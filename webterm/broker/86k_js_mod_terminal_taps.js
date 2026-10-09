@@ -541,7 +541,10 @@
         // is cached per win.controlled OBJECT and its identity follows the
         // state: info.control() and every subscriber are handed the same
         // frozen object for one state, and "has this subscriber already been
-        // told this state" is an identity test.
+        // told this state" is an identity test. info.control() is a LIVE
+        // read: during a walk that a handler's own change made stale, it
+        // already answers the newer state, and the re-walk below delivers
+        // exactly that object next.
         //
         // LEVEL, REPLAYED ONCE ON SUBSCRIBE, like onModesChanged: a subscriber
         // arriving mid-control is told at once. Unlike onModesChanged it is not
@@ -652,9 +655,7 @@
             if (typeof arm === 'function') {
                 try { arm(offFn); } catch (_) {}
             }
-            if (st.subs.indexOf(rec) !== -1) {
-                _deliverTermCtl(rec, termControlView(win));
-            }
+            _deliverTermCtl(rec, termControlView(win));
             return offFn;
         }
 

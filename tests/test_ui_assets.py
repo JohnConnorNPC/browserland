@@ -32218,6 +32218,66 @@ CASES.replay_disables_its_mod = function () {
     return { seen: seen, sent: sent, errors: errors };
 };
 
+// A mod disabled by a sibling's handler mid-walk is told nothing more: the
+// walk re-checks each record against the live list.
+CASES.teardown_mid_walk = function () {
+    const win = openTerminal();
+    const a = modCtx('a'), b = modCtx('b');
+    const seenB = [];
+    bagFor(a, win).onControlChanged(function (c) {
+        if (c.state === 'controlled') _runUnloads(b.rec);
+    });
+    bagFor(b, win).onControlChanged(function (c) { seenB.push(c.state); });
+    setControlled(win, C('phone', 5));
+    return { seenB: seenB, errors: errors };
+};
+
+// Closing the window releases the subscription record itself (the dispose
+// half of the removal), not only its deliveries.
+CASES.dispose_releases_the_record = function () {
+    const win = openTerminal();
+    bagFor(modCtx('a'), win).onControlChanged(function () {});
+    const before = _termCtlState(win, false).subs.length;
+    closeWindow(win.id);
+    return { before: before, after: _termCtlState(win, false).subs.length,
+             errors: errors };
+};
+
+// The walk itself stops at a disposed window, whatever is still listed: two
+// subscriptions with no removal armed, the first one disposes the window.
+CASES.walk_stops_at_dispose = function () {
+    const win = openTerminal();
+    const order = [];
+    _addTermCtlSub(win, function (c) {
+        order.push('a:' + c.state);
+        if (c.state === 'controlled') win.disposed = true;
+    });
+    _addTermCtlSub(win, function (c) { order.push('b:' + c.state); });
+    setControlled(win, C('phone', 5));
+    return { order: order, errors: errors };
+};
+
+// info.control() is LIVE: inside a pass that a handler's own change made
+// stale it already answers the newer state -- and that very object is what
+// the subscriber is handed next.
+CASES.live_read_is_delivered_next = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const rows = [];
+    let liveAtPhone = null;
+    bag.onControlChanged(function (c) {
+        if (c.label === 'phone') setControlled(win, C('tablet', 6));
+    });
+    bag.onControlChanged(function (c) {
+        const live = bag.control();
+        if (c.label === 'phone') liveAtPhone = live;
+        rows.push([c.label || c.state, live.label || live.state,
+                   c === liveAtPhone]);
+    });
+    setControlled(win, C('phone', 5));
+    return { rows: rows, errors: errors };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -32846,7 +32906,7 @@ CASES.split_and_resume = async function () {
     const win = openWindowReduced('h1:2');
     click(win);
     out(win, 'one');
-    applyControlView('h1:2', C('phone', 5), 'push');
+    applyControlView('h1:2', C('Pixel <b>9</b>', 5), 'push');
     await tick();
     const afterClaim = { live: live(win), paused: paused(win), saves: saves.length,
                          taps: tapCount(win), label: recLabel(win).textContent };
@@ -32981,6 +33041,23 @@ CASES.same_id_rebuild = async function () {
              saves: saves.length, paused: paused(win), errors: errors };
 };
 
+// claim -> release -> claim with no output in between: the empty resumed
+// part is not filed, and the series stays 1, 2 with no hole.
+CASES.flap = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:12');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:12', C('phone', 5), 'push');
+    applyControlView('h1:12', F(6), 'push');
+    applyControlView('h1:12', C('phone', 7), 'push');
+    applyControlView('h1:12', F(8), 'push');
+    out(win, 'two');
+    click(win);
+    await tick();
+    return { saves: saves, errors: errors };
+};
+
 CASES.manual_start_refused = async function () {
     loadRecorder(false);
     const win = openWindowReduced('h1:11');
@@ -33020,7 +33097,7 @@ def recorder_control_harness(tmp_path_factory):
     return path
 
 
-_MARKER = {"k": "c", "s": "controlled", "l": "phone"}
+_MARKER = {"k": "c", "s": "controlled", "l": "Pixel <b>9</b>"}
 
 
 def _texts(part):
@@ -33181,3 +33258,111 @@ console.log(JSON.stringify(markers.children.map(
     assert r == [["recplay-mark recplay-mark-gap", "25%", "connection gap @ 0:02"],
                  ["recplay-mark recplay-mark-ctl", "50%",
                   "controlled from <b>x</b> @ 0:05"]]
+
+
+
+# ---- #240 review round 1 -----------------------------------------------------
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_mod_disabled_mid_walk_is_told_nothing_more(
+        control_harness):
+    r = _run_control(control_harness, "teardown_mid_walk")
+    assert r["errors"] == []
+    assert r["seenB"] == ["free"], "a mod disabled mid-walk was still told"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_closing_the_window_releases_the_record(control_harness):
+    r = _run_control(control_harness, "dispose_releases_the_record")
+    assert r["errors"] == []
+    assert (r["before"], r["after"]) == (1, 0), \
+        "a closed window still holds the subscription record"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_the_walk_stops_at_a_disposed_window(control_harness):
+    r = _run_control(control_harness, "walk_stops_at_dispose")
+    assert r["errors"] == []
+    assert r["order"] == ["a:free", "b:free", "a:controlled"], \
+        "a subscriber was told about a window that is gone"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_newer_live_read_is_delivered_next(control_harness):
+    r = _run_control(control_harness, "live_read_is_delivered_next")
+    assert r["errors"] == []
+    # During the stale `phone` pass control() already reads `tablet`; the
+    # subscriber is then handed exactly that object.
+    assert r["rows"] == [["free", "free", False],
+                         ["phone", "tablet", False],
+                         ["tablet", "tablet", True]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_flap_files_no_empty_part(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "flap")
+    assert r["errors"] == []
+    parts = [(p["seg"], _texts(p)) for p in r["saves"]]
+    assert parts == [(1, ["SEED", "one"]), (2, ["SEED", "two"])], \
+        "a flap filed the stale seed (plus its marker) as a part"
+    assert len({p["series"] for p in r["saves"]}) == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_marker_survives_save_and_parse(tmp_path):
+    # The writer (saveRecording) and the readers (parseRecording, then the
+    # player's renderMarkers) run as shipped: a `c` marker written by a save
+    # comes back as a marker with its label.
+    src = _recorder_src()
+    fns = "".join(_frag_nested_fn(src, sig, indent=16) + "\n                }\n"
+                  for sig in ("async function saveRecording(rec) {",
+                              "function parseRecording(text) {"))
+    render = _frag_nested_fn(src, "function renderMarkers() {", indent=20) \
+        + "\n                    }\n"
+    r = _node239(tmp_path, _recorder_chunk_const() + "\n"
+                 + _rec240_slice("// ---- base64 <-> bytes", "// ---- capture")
+                 + r"""
+const encoder = new TextEncoder();
+function selfHostId() { return 'local'; }
+const wire = [];
+async function recPost(host, path, body) {
+    wire.push([path, body]);
+    if (path === '/recording/begin') return { ok: true, recording_id: 'r1' };
+    return { ok: true };
+}
+""" + fns + r"""
+function El() { this.children = []; this.style = {}; this.className = '';
+                this.title = ''; }
+El.prototype.appendChild = function (k) { this.children.push(k); return k; };
+El.prototype.addEventListener = function () {};
+const document = { createElement: () => new El() };
+const markers = new El();
+const notesEl = { querySelector: () => null };
+const notes = [];
+function seekTo() {}
+let recData = null, duration = 1000;
+""" + render + r"""
+(async function () {
+    const rec = { title: 'sh', cols: 80, rows: 24, startedAt: 1, durationMs: 1000,
+                  fontFamily: 'mono', fontSize: 14, bytes: 4, series: 's1', seg: 1,
+                  events: [{ t: 0, k: 'o', d: bytesToB64(encoder.encode('SEED')) },
+                           { t: 500, k: 'c', s: 'controlled', l: 'Pixel 9' }] };
+    const res = await saveRecording(rec);
+    const b64 = wire.filter((w) => w[0] === '/recording/chunk')
+                    .map((w) => w[1].content_b64);
+    const text = new TextDecoder().decode(
+        Uint8Array.from(b64.flatMap((x) => Array.from(b64ToBytes(x)))));
+    recData = parseRecording(text);
+    renderMarkers();
+    console.log(JSON.stringify({ ok: res.ok,
+        kinds: recData.events.map((e) => e.k),
+        marker: recData.events[1],
+        marks: markers.children.map((m) => [m.className, m.style.left, m.title]) }));
+})();
+""")
+    assert r["ok"] is True
+    assert r["kinds"] == ["o", "c"]
+    assert r["marker"] == {"t": 500, "k": "c", "s": "controlled", "l": "Pixel 9"}
+    assert r["marks"] == [["recplay-mark recplay-mark-ctl", "50%",
+                           "controlled from Pixel 9 @ 0:00"]]

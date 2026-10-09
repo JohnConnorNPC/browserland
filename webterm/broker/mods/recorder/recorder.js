@@ -498,6 +498,18 @@
                             && info.control().state === 'controlled';
                     } catch (_) { return false; }
                 }
+                // #240: does this part hold anything worth a file? A part opened
+                // when control came back must have captured OUTPUT past its
+                // seed: a resize, an input marker or the handoff marker alone
+                // is not content (a claim -> release -> claim flap would
+                // otherwise file the stale seed screen as a part of its own).
+                function recHasContent(rec) {
+                    if (!rec.resumed) return true;
+                    for (let i = rec.seedEvents; i < rec.events.length; i++) {
+                        if (rec.events[i].k === 'o') return true;
+                    }
+                    return false;
+                }
                 // Remember what to start when control comes back. A pending
                 // resume shows as a paused ⏺ (never in the label, which the
                 // save of the part that just ended still writes to).
@@ -831,10 +843,10 @@
                         0, Math.round(performance.now() - rec.t0));
                     rec.ui.setRecording(false);
                     // #240: a part opened when control came back that captured
-                    // nothing past its seed (the reattach failed, or the window
-                    // closed first) is only the stale screen again: not saved.
-                    if (!rec.events.length
-                        || (rec.resumed && rec.events.length <= rec.seedEvents)) {
+                    // no output past its seed (the reattach failed, the window
+                    // closed first, or control flapped straight back) is only
+                    // the stale screen again: not saved.
+                    if (!rec.events.length || !recHasContent(rec)) {
                         rec.ui.setLabel('');
                         return;
                     }
@@ -1011,12 +1023,16 @@
                     if (c && c.state === 'controlled') {
                         const rec = active.get(win.id);
                         if (!rec || rec.win !== win || rec.stopped) return;
+                        // A part that will not be filed (no output since it
+                        // resumed) hands its own seg number on, so the series
+                        // stays 1, 2, 3 with no hole.
+                        const kept = recHasContent(rec);
                         rec.events.push({
                             t: Math.max(0, Math.round(performance.now() - rec.t0)),
                             k: 'c', s: 'controlled', l: String(c.label),
                         });
                         const chain = { auto: rec.auto, series: rec.series,
-                                        seg: rec.seg + 1 };
+                                        seg: kept ? rec.seg + 1 : rec.seg };
                         stopRecording(win, 'controlled');
                         entry.resume = chain;
                         entry.ui.setPaused(true);
@@ -1132,9 +1148,9 @@
                     info.onDispose(teardown);
 
                     terms.set(win.id, entry);
-                    // #240: subscribed BEFORE the auto-arm below; the replay is
-                    // synchronous, so a terminal opened while controlled is
-                    // known to be before anything arms.
+                    // #240: the handoff split. (The auto-arm below does not
+                    // depend on this subscription: startRecording reads
+                    // info.control() itself and waits while controlled.)
                     if (typeof info.onControlChanged === 'function') {
                         info.onControlChanged(function (c) { onControl(entry, c); });
                     }
@@ -1165,8 +1181,7 @@
                     if (on) {
                         userStopped.clear();
                         for (const t of Array.from(terms.values())) {
-                            if (t.win.disposed || active.has(t.win.id)
-                                || t.resume) continue;
+                            if (t.win.disposed || active.has(t.win.id)) continue;
                             startRecording(t.win, t.info, t.ui, { auto: true });
                         }
                         return;
