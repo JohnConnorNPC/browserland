@@ -76,3 +76,168 @@
                 }
             }
         }
+
+        // THE writer of terminalControl. Returns true when the view was
+        // accepted (recorded), whether or not anything visible changed.
+        // Transitions are against the window's own win.controlled, so an
+        // unchanged view (the same poll row every tick, a push the poll
+        // already delivered) changes nothing and fires nothing:
+        //   free -> free                 record only, never a reattach
+        //   free -> controlled           enter: close the socket, grey, overlay
+        //   controlled -> same gen+label record only
+        //   controlled -> new gen/label  relabel: a NEW frozen win.controlled
+        //   controlled -> free           leave: clear FIRST, then reattach
+        // A key with no open window (a chip only) compares records instead.
+        function applyControlView(key, raw, src, sentAt) {
+            key = String(key);
+            const view = normalizeControlView(raw, src);
+            if (!view) return false;
+            const rec = terminalControl[key] || null;
+            if (!controlViewAccept(rec, view, src, sentAt)) return false;
+            terminalControl[key] = {
+                state: view.state, label: view.label, since: view.since,
+                gen: view.gen, at: performance.now(),
+            };
+            const win = windows.get(key);
+            let changed;
+            if (win && !win.disposed && win.type !== 'app') {
+                changed = transitionControlledWindow(win, view);
+            } else {
+                changed = !rec || rec.state !== view.state
+                    || rec.label !== view.label
+                    || (view.state === 'controlled' && rec.gen !== view.gen);
+            }
+            if (changed) controlStateChanged(key);
+            return true;
+        }
+
+        function transitionControlledWindow(win, view) {
+            const cur = win.controlled || null;
+            if (view.state === 'free') {
+                if (!cur) return false;
+                leaveControlled(win);
+                return true;
+            }
+            if (cur && cur.gen === view.gen && cur.label === view.label) return false;
+            const next = Object.freeze({ label: view.label, since: view.since,
+                                         gen: view.gen });
+            if (cur) {
+                win.controlled = next;
+                paintControlOverlay(win);
+            } else {
+                enterControlled(win, next);
+            }
+            return true;
+        }
+
+        // Socket first, then the look: from here on nothing this window does
+        // reaches the PTY (no input, no resize, no query reply).
+        function enterControlled(win, c) {
+            win.controlled = c;
+            _closeWinSocket(win);
+            if (win.resizeTimer) { clearTimeout(win.resizeTimer); win.resizeTimer = null; }
+            win.dom.classList.add('controlled');
+            paintControlOverlay(win);
+            if (frontId === win.id) focusWin(win);
+        }
+
+        // Clear FIRST: attachWebSocket and isResizable both refuse a controlled
+        // window, so the reattach (attach, `resized`, snapshot) and the forced
+        // initial resize from onopen's maybeSendInitialResize only happen
+        // because win.controlled is already null. A window that is out in its
+        // own browser window (#226) stays detached: its child owns the PTY and
+        // runs this same code on its own page.
+        function leaveControlled(win) {
+            win.controlled = null;
+            win._takingBack = false;
+            win.dom.classList.remove('controlled');
+            if (win.ctlOverlay) {
+                try { win.ctlOverlay.remove(); } catch (_) {}
+            }
+            win.ctlOverlay = win.ctlLabel = win.ctlSince = win.ctlBtn = null;
+            if (win.detached) return;
+            win.reattachAttempts = 0;
+            win.reattachAt = 0;
+            reattachWindow(win);
+            if (frontId === win.id) focusWin(win);
+        }
+
+        // 24-hour hh:mm, local time; '' for an unknown `since`.
+        function controlSinceText(since) {
+            if (typeof since !== 'number' || !Number.isFinite(since)) return '';
+            const d = new Date(since);
+            const p = (n) => (n < 10 ? '0' : '') + n;
+            return p(d.getHours()) + ':' + p(d.getMinutes());
+        }
+
+        // Over the body only (the title bar stays usable). Built once per
+        // entry, repainted in place on a relabel. Every string is textContent:
+        // the label is the controller's own text.
+        function paintControlOverlay(win) {
+            const c = win.controlled;
+            if (!c) return;
+            if (!win.ctlOverlay) {
+                const ov = document.createElement('div');
+                ov.className = 'term-ctl-overlay';
+                ov.tabIndex = -1;
+                const box = document.createElement('div');
+                box.className = 'term-ctl-box';
+                const msg = document.createElement('div');
+                msg.className = 'term-ctl-msg';
+                msg.appendChild(document.createTextNode('Controlled from '));
+                const who = document.createElement('b');
+                who.className = 'term-ctl-label';
+                msg.appendChild(who);
+                const since = document.createElement('span');
+                since.className = 'term-ctl-since';
+                msg.appendChild(since);
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'term-ctl-take';
+                btn.textContent = 'Take back control';
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    takeBackControl(win);
+                });
+                box.appendChild(msg);
+                box.appendChild(btn);
+                ov.appendChild(box);
+                win.body.appendChild(ov);
+                win.ctlOverlay = ov;
+                win.ctlLabel = who;
+                win.ctlSince = since;
+                win.ctlBtn = btn;
+            }
+            win.ctlLabel.textContent = c.label;
+            const at = controlSinceText(c.since);
+            win.ctlSince.textContent = at ? ' since ' + at : '';
+            win.ctlBtn.disabled = !!win._takingBack;
+        }
+
+        // openWindow's tail (67): a terminal that is controlled right now is
+        // built greyed and is never attached (the tail's attach is refused).
+        // Not a change, so no controlStateChanged: the chip already says so.
+        function seedControlledWindow(win) {
+            const rec = terminalControl[controlKey(win.hostId, win.sid)];
+            if (!rec || rec.state !== 'controlled') return;
+            enterControlled(win, Object.freeze({ label: rec.label,
+                                                 since: rec.since, gen: rec.gen }));
+        }
+
+        // The controlled view of a key: the live window's own state first, the
+        // record only for a chip with no open window.
+        function controlledViewFor(key) {
+            key = String(key);
+            const win = windows.get(key);
+            if (win && !win.disposed && win.type !== 'app') return win.controlled || null;
+            const rec = terminalControl[key];
+            return (rec && rec.state === 'controlled') ? rec : null;
+        }
+
+        // The one post-apply hook: runs once per applied change, after enter
+        // (socket already closed) or leave (reattachWindow already called; the
+        // dial is in flight), and for chip-only keys too.
+        function controlStateChanged(key) {
+            try { updateTaskbarActive(); } catch (_) {}
+            try { updateTaskbarLabel(String(key)); } catch (_) {}
+        }

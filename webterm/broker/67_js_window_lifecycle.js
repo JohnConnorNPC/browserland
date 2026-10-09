@@ -306,6 +306,9 @@
                 lastOpenAt: 0,
                 missingPolls: 0,
                 cleanups: [],
+                // #239: null, or the frozen {label, since, gen} of the device
+                // controlling this terminal (84b); replaced, never mutated.
+                controlled: null,
                 // ---- tiling (niri WM) runtime fields; derived, NOT the
                 // persisted truth (prefs._layout is). `tiled` is recomputed
                 // from _layout membership; `floatGeom` is the last floating

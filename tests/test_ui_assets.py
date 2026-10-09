@@ -31330,3 +31330,126 @@ console.log(JSON.stringify(out));
     assert r["reset"] == [None, None, 42], "only that host's gens are forgotten"
     assert r["afterReset"] is True
     assert r["key"] == "local:77"
+
+
+def test_controlled_view_is_not_resizable(tmp_path):
+    if NODE is None:
+        pytest.skip("node not installed")
+    r = _node239(tmp_path, _fn239("73_js_window_runtime.js",
+                                  "function isResizable(") + r"""
+const body = {getBoundingClientRect: () => ({width: 500, height: 300})};
+const w = (extra) => Object.assign({disposed: false, minimized: false,
+                                    detached: false, controlled: null, body}, extra);
+console.log(JSON.stringify({
+    free: isResizable(w({})),
+    controlled: isResizable(w({controlled: {label: 'p', since: 1, gen: 2}})),
+    detached: isResizable(w({detached: true})),
+}));
+""")
+    assert r == {"free": True, "controlled": False, "detached": False}
+
+
+def test_controlled_view_guard_g_is_attach_websockets_first_statement():
+    # G: every dial path (openWindow's tail, detachGateAttach, reattachWindow,
+    # 75's and 63's re-dial loops) ends in attachWebSocket, and both loops call
+    # reattachWindow on a socketless window every tick -- so this line is the
+    # only thing that keeps a greyed window from dialing.
+    src = _js_strip_comments_and_strings(_src239("73_js_window_runtime.js"))
+    body = src[src.index("function attachWebSocket(win) {"):]
+    body = body[body.index("{") + 1:]
+    first = next(l.strip() for l in body.splitlines() if l.strip())
+    assert first == "if (win.controlled) return;"
+    assert body.index("if (win.controlled) return;") < body.index("hostById(")
+    assert body.index("if (win.controlled) return;") < body.index("new WebSocket(")
+
+
+_SM239_STUBS = r"""
+const terminalControl = Object.create(null);
+const windows = new Map();
+let frontId = null;
+const log = [];
+function _closeWinSocket(win) { log.push('close:' + win.id); win.ws = null; }
+function reattachWindow(win) { log.push('reattach:' + win.id + ':' + (win.controlled === null)); }
+function focusWin(win) { log.push('focus:' + win.id); }
+function paintControlOverlay(win) { log.push('paint:' + win.id + ':' + win.controlled.label); }
+function controlStateChanged(key) { log.push('hook:' + key); }
+const performance = {t: 0, now() { return ++this.t; }};
+function mkWin(id, extra) {
+    const cls = new Set();
+    return Object.assign({id, hostId: id.split(':')[0], sid: id.split(':')[1],
+        type: 'terminal', disposed: false, detached: false, controlled: null,
+        ws: {}, dom: {classList: {add: (c) => cls.add(c), remove: (c) => cls.delete(c),
+                                  has: (c) => cls.has(c)}}}, extra || {});
+}
+"""
+
+
+def _sm239():
+    return _SM239_STUBS + _rules239() + "".join(
+        _fn239("84b_js_controlled_view.js", sig) for sig in (
+            "function applyControlView(", "function transitionControlledWindow(",
+            "function enterControlled(", "function leaveControlled(",
+            "function seedControlledWindow(", "function controlledViewFor("))
+
+
+def test_controlled_view_state_machine(tmp_path):
+    if NODE is None:
+        pytest.skip("node not installed")
+    r = _node239(tmp_path, _sm239() + r"""
+const out = {};
+const C = (gen, label) => ({state: 'controlled', label: label || 'phone', since: 5, gen});
+const F = (gen) => ({state: 'free', label: null, since: null, gen});
+const w = mkWin('local:7'); windows.set('local:7', w);
+const take = () => { const l = log.slice(); log.length = 0; return l; };
+applyControlView('local:7', F(3), 'ws');               // free -> free
+out.freeFree = take();
+applyControlView('local:7', C(4), 'push');             // enter
+out.enter = take();
+out.frozen = Object.isFrozen(w.controlled);
+out.grey = w.dom.classList.has('controlled');
+const first = w.controlled;
+applyControlView('local:7', C(4), 'poll', performance.now() + 5);  // same view
+out.same = take();
+out.sameIdentity = w.controlled === first;
+applyControlView('local:7', C(6, 'tablet'), 'push');  // relabel
+out.relabel = take();
+out.newIdentity = w.controlled !== first && w.controlled.label === 'tablet';
+applyControlView('local:7', F(7), 'push');             // leave
+out.leave = take();
+out.cleared = w.controlled === null && !w.dom.classList.has('controlled');
+applyControlView('local:7', F(8), 'ws');               // free again: nothing
+out.freeAgain = take();
+// A detached desktop window records the state but never reattaches.
+const d = mkWin('local:8', {detached: true}); windows.set('local:8', d);
+applyControlView('local:8', C(2), 'push'); take();
+applyControlView('local:8', F(3), 'push');
+out.detachedLeave = take();
+// A chip-only key: the hook fires on a change only.
+applyControlView('h2:9', C(1), 'push');
+applyControlView('h2:9', C(1), 'poll', performance.now() + 5);
+applyControlView('h2:9', F(2), 'push');
+out.chipOnly = take();
+out.viewFor = [controlledViewFor('h2:9'), controlledViewFor('local:7')];
+// Seeding a window from a controlled record: entered, no hook.
+terminalControl['h3:4'] = {state: 'controlled', label: 'phone', since: 1, gen: 9, at: 1};
+const s = mkWin('h3:4');
+seedControlledWindow(s);
+out.seed = take();
+out.seedGen = s.controlled && s.controlled.gen;
+console.log(JSON.stringify(out));
+""")
+    assert r["freeFree"] == [], "free -> free must never reattach or fire"
+    assert r["enter"] == ["close:local:7", "paint:local:7:phone", "hook:local:7"]
+    assert r["frozen"] is True and r["grey"] is True
+    assert r["same"] == [] and r["sameIdentity"] is True
+    assert r["relabel"] == ["paint:local:7:tablet", "hook:local:7"]
+    assert r["newIdentity"] is True
+    assert r["leave"] == ["reattach:local:7:true", "hook:local:7"], \
+        "win.controlled must be cleared BEFORE reattachWindow runs"
+    assert r["cleared"] is True
+    assert r["freeAgain"] == []
+    assert r["detachedLeave"] == ["hook:local:8"], "a detached window reattached"
+    assert r["chipOnly"] == ["hook:h2:9", "hook:h2:9"]
+    assert r["viewFor"] == [None, None]
+    assert r["seed"] == ["close:h3:4", "paint:h3:4:phone"]
+    assert r["seedGen"] == 9

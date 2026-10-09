@@ -16,6 +16,12 @@
         const WS_CONNECT_TIMEOUT_MS = 5000;
 
         function attachWebSocket(win) {
+            // #239: a terminal controlled from another device is never dialed.
+            // Every dial path ends here (openWindow's tail, detachGateAttach,
+            // reattachWindow and both re-dial loops), so this one line is what
+            // keeps a greyed window socketless; leaveControlled clears the
+            // flag before it reattaches.
+            if (win.controlled) return;
             const host = hostById(win.hostId);
             if (!host) {
                 // Host removed from settings mid-flight — nothing to dial.
@@ -373,7 +379,11 @@
         // out at 0px) must never reach the cols/rows math below.
         function isResizable(win) {
             // #226: a detached window is minimized anyway; belt and braces.
-            if (!win || win.disposed || win.minimized || win.detached) return false;
+            // #239: a controlled one keeps the controller's size, whatever
+            // happens to its box (tiling, drag, column, browser resize); nothing
+            // is queued for later.
+            if (!win || win.disposed || win.minimized || win.detached
+                || win.controlled) return false;
             let r;
             try { r = win.body.getBoundingClientRect(); } catch (_) { return false; }
             return !!r && r.width >= 2 && r.height >= 2;
