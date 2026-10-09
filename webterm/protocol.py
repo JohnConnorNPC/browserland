@@ -495,7 +495,7 @@ CONTROL_LABEL_MAX = 64
 # several scripts need. Every other Cf is refused, which covers all of Unicode's
 # Bidi_Control set (U+061C, U+200E-200F, U+202A-202E, U+2066-2069) as well as
 # invisible ones like U+200B and U+FEFF.
-_LABEL_CF_ALLOWED = frozenset("‌‍")
+_LABEL_CF_ALLOWED = frozenset("\u200c\u200d")
 # Control, surrogate, unassigned, line/paragraph separator.
 _LABEL_REFUSED_CATEGORIES = frozenset(("Cc", "Cs", "Cn", "Zl", "Zp"))
 

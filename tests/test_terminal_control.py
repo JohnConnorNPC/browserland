@@ -26,8 +26,8 @@ from webterm.broker.registry import BrokerRegistry, run_producer_session
     "x" * protocol.CONTROL_LABEL_MAX,
     "Notifier (phone)",
     "\U0001F600" * protocol.CONTROL_LABEL_MAX,  # 64 astral code points
-    "a‍b",                                 # ZWJ (emoji sequences)
-    "a‌b",                                 # ZWNJ
+    "a\u200db",                                 # ZWJ (emoji sequences)
+    "a\u200cb",                                 # ZWNJ
     " lead and trail ",
 ])
 def test_control_label_accepts(label):
@@ -44,16 +44,16 @@ def test_control_label_accepts(label):
     "nl\n",
     "del\x7f",
     "c1\x85",
-    "rlo‮",
-    "lri⁦",
-    "alm؜",
-    "rlm‏",
-    "zwsp​",
-    "bom﻿",
+    "rlo\u202e",
+    "lri\u2066",
+    "alm\u061c",
+    "rlm\u200f",
+    "zwsp\u200b",
+    "bom\ufeff",
     "lone\ud800",
-    "ls ",
-    "ps ",
-    "unassigned͸",
+    "ls\u2028",
+    "ps\u2029",
+    "unassigned\u0378",
     None,
     5,
     b"bytes",
@@ -280,8 +280,9 @@ def test_crossed_publications_arrive_in_gen_order_and_rest_on_live():
         gate.set()
         await reg.drain_control()
         for ws in (slow, fast, ctl):
+            # Every change, each its own view, in gen order.
             gens = [f["gen"] for f in ws.controls()]
-            assert gens == sorted(gens) and len(gens) == 3
+            assert gens == sorted(set(gens)) and len(gens) == 3
             assert ws.controls()[-1] == _live_frame(entry)
     asyncio.run(scenario())
 
@@ -555,7 +556,15 @@ def _attach(reg, ctx, entry, ws, client_id=""):
         FakeRequest(entry.id, client_id), ws, reg, ctx))
 
 
-def test_relay_frame_admitted_before_a_claim_does_not_land_after_it():
+@pytest.mark.parametrize("frame", [
+    {"type": "input", "data": "late"},
+    {"type": "paste", "data": "late"},
+    b"late-binary",
+    {"type": "resize", "cols": 1, "rows": 1},
+], ids=["input", "paste", "binary", "resize"])
+def test_relay_frame_admitted_before_a_claim_does_not_land_after_it(frame):
+    # One frame per run: the relay reads its socket in order, so a second
+    # frame queued behind the first would meet the gate on arrival instead.
     async def scenario():
         reg = BrokerRegistry()
         ctx = FakeCtx("lease")
@@ -565,9 +574,7 @@ def test_relay_frame_admitted_before_a_claim_does_not_land_after_it():
                  _attach(reg, ctx, entry, ctl, "ext-c")]
         await _settle()
         await entry._send_lock.acquire()      # a snapshot/RPC in flight
-        holder.push({"type": "input", "data": "late"})
-        holder.push(b"late-binary")
-        holder.push({"type": "resize", "cols": 1, "rows": 1})
+        holder.push(frame)
         await _settle()                       # admitted, waiting on the lock
         ctl.push({"type": "control", "op": "claim", "label": "phone"})
         await _settle()
@@ -1015,7 +1022,7 @@ def test_e2e_controller_sharing_the_losers_client_id_is_closed_and_released(
 
 @pytest.mark.parametrize("label,wid", [
     ("", 238061), ("x" * 65, 238062), ("bell\x07", 238063),
-    ("rlo‮", 238064)])
+    ("rlo\u202e", 238064)])
 def test_e2e_bad_label(broker, label, wid):
     port, base = broker
 
