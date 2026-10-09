@@ -649,3 +649,40 @@
         body.detached-surface .term-window.detached-main .rh,
         body.detached-surface .term-window.detached-main .btn-min { display: none; }
         body.detached-surface .term-window.detached-main .title-bar { cursor: default; }
+
+        /* ---- #239: controlled from another device ------------------------- */
+        /* The terminal content is greyed; the overlay over it is NOT (it is a
+           sibling of .xterm inside .term-body, outside the filtered subtree),
+           so its text and the Take back button keep full contrast. No
+           transition: the state is a fact, not an animation. */
+        .term-window.controlled .term-body .xterm {
+            opacity: 0.45;
+            filter: saturate(0.3);
+        }
+        .term-ctl-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.35);
+        }
+        .term-ctl-box {
+            max-width: 90%;
+            padding: 10px 14px;
+            text-align: center;
+            background: var(--bg-2);
+            color: var(--fg);
+            border: 1px solid #000;
+            border-left: 4px solid var(--accent, var(--accent-default));
+        }
+        .term-ctl-msg { margin-bottom: 8px; overflow-wrap: anywhere; }
+        .term-ctl-take { padding: 4px 14px; cursor: pointer; }
+        /* A chip whose terminal another device drives (tooltip says which). */
+        .taskbar-item.controlled { border-left-style: dashed; }
+        .taskbar-item.controlled::after {
+            content: '\21C4';               /* right-over-left arrows */
+            font-size: 11px;
+            color: var(--fg-dim);
+        }

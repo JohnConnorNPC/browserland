@@ -31453,3 +31453,21 @@ console.log(JSON.stringify(out));
     assert r["viewFor"] == [None, None]
     assert r["seed"] == ["close:h3:4", "paint:h3:4:phone"]
     assert r["seedGen"] == 9
+
+
+def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
+    s84b = _src239("84b_js_controlled_view.js")
+    for sink in ("innerHTML", "insertAdjacentHTML", "outerHTML",
+                 "document.write"):
+        assert sink not in s84b, f"84b must not use {sink}: the label is wire text"
+    assert "win.ctlLabel.textContent = c.label;" in s84b
+    # The tooltip carries it as a string too (textContent / title only).
+    assert "parts.push('controlled from ' + ctl.label);" in \
+        _src239("64_js_sessions_poll_control.js")
+    css = _src239("10_css_root.css")
+    rule = css[css.index(".term-window.controlled .term-body .xterm {"):]
+    rule = rule[:rule.index("}")]
+    assert "filter: saturate(0.3);" in rule and "opacity: 0.45;" in rule
+    # The overlay is a sibling of .xterm, so nothing may dim .term-body itself.
+    assert ".term-window.controlled .term-body {" not in css
+    assert ".taskbar-item.controlled {" in css

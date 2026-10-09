@@ -55,6 +55,15 @@
         // app windows. Tolerant of either being absent.
         function focusWin(win) {
             try {
+                // #239: a controlled window's keys go nowhere (it has no
+                // socket), so focus lands on its one action instead, or on the
+                // overlay while that button is busy.
+                if (win.controlled) {
+                    const b = win.ctlBtn;
+                    if (b && b.isConnected && !b.disabled) b.focus();
+                    else if (win.ctlOverlay) win.ctlOverlay.focus();
+                    return;
+                }
                 if (win.term) win.term.focus();
                 // Editors/notes expose focusEditor (routes to the CodeMirror view
                 // when one is mounted, else the textarea); fall back to win.body.
@@ -137,6 +146,10 @@
                 el.classList.toggle('minimized', !!(win && win.minimized));
                 // #226: out in its own browser window (a click focuses it).
                 el.classList.toggle('detached', !!(win && win.detached));
+                // #239: another device drives it. From the live window when
+                // one is open, else the record, so a chip with no window (and
+                // one the poll rebuilt) is marked too: every tick ends here.
+                el.classList.toggle('controlled', !!controlledViewFor(id));
             });
         }
 
