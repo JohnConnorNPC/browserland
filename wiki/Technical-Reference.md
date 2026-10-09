@@ -533,6 +533,27 @@ holder at all the browser token alone passes; `409 {"ok": false,
 another `gen` (a double click or a crossed claim never releases a newer
 controller); `200 {"ok": true, "id", ...the new free view}`.
 
+**The desktop's side (#239).** A desktop window whose terminal is controlled
+holds **no** `/ws`: it closes its socket (handlers nulled), and
+`attachWebSocket` refuses to dial while `win.controlled` is set, so it receives
+nothing and sends nothing. `isResizable` refuses it too, so no tiling, drag or
+browser resize sends a `resize`, and nothing is queued for later. The page keeps
+one record per terminal (`<hostId>:<id>`, runtime only) fed by all four
+surfaces:
+
+* a `/ws` frame, a `/control` push or a `POST` answer is applied only when its
+  `gen` is newer than the last one applied;
+* a `/sessions` row is applied when that poll was sent after the record last
+  changed, whatever its `gen`, which heals a missed push and a broker restart;
+* a new `/control` socket to a host forgets that host's gens.
+
+On attach, the `resized` that comes before the `control` frame is held until
+that frame arrives; a `controlled` view drops it, so a window never snaps to
+the controller's grid. Leaving the state clears the record first and then
+reattaches, so the attach's forced initial `resize` sends this window's size. A
+`409 not_active` from Take back shows the Become active prompt (home broker) or
+masks that broker (remote), as a lost lease does.
+
 ## MCP HTTP interface
 
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP

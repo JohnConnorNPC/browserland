@@ -64,6 +64,14 @@ A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left
 
 **Pasting images**: paste a screenshot (e.g. `Win+Shift+S`) straight into a terminal with `Ctrl+V`, `Alt+V`, or a right-click. The image itself cannot cross into the remote shell's clipboard, so the desktop uploads it to that terminal's broker host and pastes the resulting **file path** instead — AI agents like Claude Code read a pasted image path just like a drag-and-dropped file. Pasted images are kept for a few hours in the host's temp area and swept automatically. If the clipboard carries both text and an image, the text wins. `Alt+V` and right-click image capture need an https (or localhost) page; `Ctrl+V` image paste works everywhere.
 
+### Controlled from another device
+
+A terminal can be driven from outside the desktop (for example from Notifier on your phone) without taking this browser's lease; see [[Hosts-and-Multi-Browser]]. While it is, its desktop window **greys out and stops updating**. It stays exactly where it was: its column slot or floating position, its taskbar entry and title, and the last screen it showed. But it is no longer connected, so nothing you type reaches the shell, and resizing or retiling the window does not resize the terminal: it keeps the size the other device set. A panel over the screen says **Controlled from** *who* **since** *hh:mm*, and the taskbar entry is marked **⇄** (its tooltip names the device).
+
+**Take back control**, the panel's button, ends the other device's control. The window reconnects, the screen heals from a snapshot, and the terminal goes back to this window's size. If someone claimed it again in the meantime, the panel updates to show them instead. If another browser holds the lease, taking back is refused and the **Become active** prompt appears; take the lease first.
+
+When the other device lets go, the window comes back by itself. Closing the window does not release control: the terminal stays with the other device and its taskbar entry stays marked. **Terminate** in the title-bar menu still ends the shell. A terminal popped out into its own browser window shows the same panel there. After a reload, or when this browser gets the lease back, a terminal that is still controlled comes back greyed without reconnecting.
+
 ## Session recorder
 
 Every terminal title bar carries a **⏺ record button**: click to record that session, click again to stop and save it to the broker. The **Session recorder** window from the **+** menu lists saved recordings and plays them back in a window fixed at the original recorded size, with pause, speed, continuous reverse, and timestamped notes.

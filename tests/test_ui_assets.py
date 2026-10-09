@@ -31654,3 +31654,20 @@ console.log(JSON.stringify(out));
     assert r["after"] == {"armed": False, "asked": False}
     send = _frag_fn(s64, "function sendBecomeActive(")
     assert "if (_leaseAffordance.armed && host.id === homeHostId()) {" in send
+
+
+def test_controlled_view_is_documented():
+    wiki = Path(ui.__file__).resolve().parents[2] / "wiki"
+    wt = (wiki / "Window-Types.md").read_text(encoding="utf-8")
+    sec = wt[wt.index("### Controlled from another device"):wt.index("## Session recorder")]
+    assert "**Take back control**" in sec
+    assert "Closing the window does not release control" in sec
+    assert "does not resize the terminal" in sec
+    hosts = (wiki / "Hosts-and-Multi-Browser.md").read_text(encoding="utf-8")
+    assert "**Take back control** needs the lease" in hosts
+    assert "[[Window-Types#controlled-from-another-device]]" in hosts
+    tr = (wiki / "Technical-Reference.md").read_text(encoding="utf-8")
+    side = tr[tr.index("**The desktop's side (#239).**"):tr.index("## MCP HTTP interface")]
+    assert "`isResizable` refuses it too" in side
+    assert "`attachWebSocket` refuses to dial while `win.controlled` is set" in side
+    assert "a new `/control` socket to a host forgets that host's gens" in side
