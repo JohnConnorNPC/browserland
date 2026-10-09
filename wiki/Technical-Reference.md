@@ -503,7 +503,9 @@ re-baselines (forgets its last `gen`) when the broker restarts.
 **Telling everyone** (each change is published to the terminal's `/ws`
 subscribers in `gen` order, each send bounded at 0.5 s, and every socket ends on
 the live view; the `/control` pushes go out after, so two of them may arrive out
-of order — order them by `gen`):
+of order — order them by `gen`). A `/ws` or `/control` socket that cannot take a
+frame within that bound is closed with 1012, so its page reconnects and re-reads
+the state; a controller dropped that way loses control at once:
 
 1. `/ws`, to every subscriber of that terminal: `{"type": "control", ...view}`
    on every change, and once on attach, right after `resized` and before the

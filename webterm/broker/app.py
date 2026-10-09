@@ -4282,7 +4282,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # so this is how it learns of a release it did not cause. Remote
         # brokers' pages hold a /control here too, so they hear it as well.
         # All at once, each bounded by CONTROL_SEND_TIMEOUT, so one stalled
-        # browser delays nobody else's push; a miss only skips this push.
+        # browser delays nobody else's push. A socket that misses it is closed
+        # with 1012: the page's /control onclose re-dials on any code but 4401
+        # (scheduleControlReattach), so it comes back instead of starving.
         frame = protocol.terminal_control_frame(window_id, view)
         socks = [sock for group in list(app.ctx.control_clients.values())
                  for sock in list(group)]
@@ -4292,6 +4294,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 await asyncio.wait_for(sock.send(frame), CONTROL_SEND_TIMEOUT)
             except Exception as exc:
                 LOGGER.debug("terminal_control push failed: %r", exc)
+                app.ctx.registry.close_soon(sock, 1012,
+                                            "control push timed out")
         await asyncio.gather(*(_push(sock) for sock in socks))
 
     app.ctx.registry.on_control = _push_terminal_control

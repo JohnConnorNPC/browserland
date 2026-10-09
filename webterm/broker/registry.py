@@ -56,8 +56,9 @@ RPC_MAX_INFLIGHT = 4
 # revoked frame, a /ws subscriber's control frame, a /control socket's push).
 # There is no broker-wide send timeout to reuse; this bounds how long a stalled
 # peer can hold a terminal's publisher lock, which every /ws attach to that
-# terminal also takes. A /ws subscriber that misses it is dropped from the
-# entry like any failed send; a /control socket is only skipped for that push.
+# terminal also takes. A socket that misses it (a /ws subscriber or a /control
+# socket) is dropped and closed with 1012 so its page reconnects; a controller
+# dropped this way loses control at once.
 CONTROL_SEND_TIMEOUT = 0.5
 
 
@@ -188,9 +189,10 @@ class WindowEntry:
         # across a same-id replacement too: clients may order by it). closing
         # is set synchronously once the entry is dying (an `exit` frame,
         # deregister, replacement), so no control op lands on a terminal
-        # already known to be dead. revoked holds the sockets that lost the terminal (by POST
-        # or another claim): they watch, and the gate drops their input even
-        # if their clientId holds the lease, until they claim again.
+        # already known to be dead. revoked holds the sockets that lost the
+        # terminal (by POST or another claim): they watch, and the gate drops
+        # their input even if their clientId holds the lease, until they claim
+        # again.
         # published_view is the last view the ordered publisher finished
         # sending, which is what a socket attaching now is told.
         self.controller: Optional[_Controller] = None
@@ -742,14 +744,42 @@ class BrokerRegistry:
                 LOGGER.exception("on_control hook failed for window %s",
                                  entry.id)
 
-    @staticmethod
-    async def _bounded_send(entry: WindowEntry, sock, frame: str) -> None:
-        # A send that fails or misses CONTROL_SEND_TIMEOUT drops the socket
-        # from the entry, as broadcast_text drops a failed one.
+    async def _bounded_send(self, entry: WindowEntry, sock,
+                            frame: str) -> None:
+        # A send that fails or misses CONTROL_SEND_TIMEOUT drops the socket.
         try:
             await asyncio.wait_for(sock.send(frame), CONTROL_SEND_TIMEOUT)
         except Exception:
-            entry.remove_subscriber(sock)
+            self._drop_stalled(entry, sock)
+
+    def _drop_stalled(self, entry: WindowEntry, sock) -> None:
+        """A subscriber that could not take a control frame in time: remove
+        it, and CLOSE it (1012, like the replacement sweep) so the page
+        reattaches instead of sitting open and starved. If it was the
+        controller, release now: a stalled peer's close may never complete, so
+        the relay's on-close release cannot be relied on to come."""
+        entry.remove_subscriber(sock)
+        ctl = entry.controller
+        if ctl is not None and ctl.ws is sock:
+            self._release(entry)
+        self.close_soon(sock, 1012, "control send timed out")
+
+    def close_soon(self, sock, code: int, reason: str) -> None:
+        """Close ``sock`` in a retained task, bounded by CONTROL_SEND_TIMEOUT,
+        so a caller holding a publisher section never waits on a stalled
+        peer's close handshake."""
+        task = asyncio.get_running_loop().create_task(
+            self._close_bounded(sock, code, reason))
+        self._control_tasks.add(task)
+        task.add_done_callback(self._control_tasks.discard)
+
+    @staticmethod
+    async def _close_bounded(sock, code: int, reason: str) -> None:
+        try:
+            await asyncio.wait_for(sock.close(code=code, reason=reason),
+                                   CONTROL_SEND_TIMEOUT)
+        except Exception as exc:
+            LOGGER.debug("closing a stalled control peer failed: %r", exc)
 
     @contextlib.asynccontextmanager
     async def control_section(self, window_id: int):

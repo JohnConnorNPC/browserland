@@ -131,7 +131,8 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
                     continue
                 # Bare binary from the browser = raw input bytes.
                 text = bytes(message).decode("utf-8", errors="replace")
-                await entry.send_to_producer_if(protocol.input_frame(text), may)
+                await entry.send_to_producer_if(
+                    protocol.input_frame(text), may)
                 continue
             data = protocol.parse(message)
             if data is None:

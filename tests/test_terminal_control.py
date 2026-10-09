@@ -812,7 +812,43 @@ def test_a_stalled_peer_never_blocks_an_attach():
         page.hang_up()
         await task
         await reg.drain_control()
+        # ...and CLOSED, like the replacement sweep, so its page reattaches
+        # instead of sitting open and starved (review R2-1).
+        assert stuck.closed == 1012
     asyncio.run(scenario())
+
+
+class StalledPeer(FakeWS):
+    """A peer whose sends AND close handshake never complete."""
+
+    def __init__(self):
+        super().__init__(asyncio.Event())
+
+    async def close(self, code=1000, reason=""):
+        await asyncio.Event().wait()
+
+
+def test_a_stalled_controller_is_dropped_and_loses_control():
+    # Review R2-1: the controller's own socket stalls on a control frame. It
+    # is dropped, and control is released at once, without waiting for a
+    # close handshake that never completes.
+    async def scenario():
+        reg = BrokerRegistry()
+        entry = await _registered(reg)
+        ctl, watcher = StalledPeer(), FakeWS()
+        entry.add_subscriber(ctl, "ext")
+        entry.add_subscriber(watcher, "")
+        assert reg.claim(entry, ctl, "phone") is None
+        g1 = entry.control_gen
+        await asyncio.wait_for(reg.drain_control(), 3)
+        assert ctl not in entry.subscribers
+        assert entry.controller is None and entry.control_gen > g1
+        assert entry.control_view()["state"] == "free"
+        assert watcher.controls()[-1] == _live_frame(entry)
+        assert watcher.controls()[-1]["state"] == "free"
+    asyncio.run(scenario())
+
+
 
 
 # ---- end to end: a broker subprocess and real sockets ----------------------
@@ -1419,6 +1455,8 @@ def test_terminal_control_push_is_bounded_per_socket(tmp_path, monkeypatch):
     elapsed, stalled, healthy = asyncio.run(go())
     assert elapsed < 1.0
     assert stalled.sent == []
+    # Closed so the page's /control re-dials (any code but 4401 does).
+    assert stalled.closed == 1012
     assert [json.loads(m)["type"] for m in healthy.sent] == [
         "terminal_control"]
 
