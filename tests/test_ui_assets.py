@@ -32625,3 +32625,559 @@ def test_mod_control_core_a_chip_only_key_dispatches_nothing(
     r = _run_control(core_control_harness, "chip_only")
     assert r["errors"] == []
     assert r["calls"] == 0 and r["chipActive"] == 2
+
+
+# --- #240 A3: recorder splits at a handoff -----------------------------------
+# recorder's SHIPPED state block, base64 helpers, capture range, handoff +
+# per-terminal button range and its onUnload, driven through the REAL 86k bag
+# (taps + control), the REAL 84b transitions and 67's verbatim open lines.
+# Only the upload is stubbed (enqueueSave logs the part it was handed), plus
+# the browser bits: timers never fire, and the serialize addon returns 'SEED'.
+
+def _rec240_slice(start, end):
+    src = _recorder_src()
+    a = src.index(start)
+    return src[a:src.index(end, a)]
+
+
+def _rec240_sources():
+    state = _rec240_slice("                const active = new Map();",
+                          "                // Default OFF = the key absent")
+    b64 = _rec240_slice("// ---- base64 <-> bytes", "// ---- capture")
+    capture = _rec240_slice("// ---- capture", "// Uploads are QUEUED")
+    handoff = _rec240_slice("// ---- handoff to another device (#240)",
+                            "// ---- recording load")
+    unload = _rec240_slice("// Teardown — LIFO runs this FIRST",
+                           "\n            },\n")
+    for need, body in (("function recControlled(info) {", capture),
+                       ("function startRecording(win, info, ui, opts) {", capture),
+                       ("function stopRecording(win, reason) {", capture),
+                       ("function onControl(entry, c) {", handoff),
+                       ("ctx.windows.onTerminalCreate(function (info) {", handoff),
+                       ("autoSetting.onChange(function (on) {", handoff),
+                       ("ctx.onUnload(function () {", unload)):
+        assert need in body, f"{need} missing from the sliced recorder range"
+    return state + "\n" + b64 + "\n" + capture + "\n" + handoff + "\n" + unload
+
+
+_REC240_HARNESS = r"""
+'use strict';
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+function El(tag) {
+    this.tagName = tag || 'div'; this.className = ''; this.children = [];
+    this.parentNode = null; this.textContent = ''; this.title = '';
+    this.style = {}; this.listeners = {};
+    const set = new Set();
+    this.classList = {
+        add: (c) => set.add(c), remove: (c) => set.delete(c),
+        contains: (c) => set.has(c), has: (c) => set.has(c),
+        toggle: (c, on) => { if (on) set.add(c); else set.delete(c); return !!on; },
+    };
+}
+El.prototype.appendChild = function (kid) { kid.parentNode = this; this.children.push(kid); return kid; };
+El.prototype.insertBefore = function (kid, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.remove = function () {
+    if (!this.parentNode) return;
+    const i = this.parentNode.children.indexOf(this);
+    if (i !== -1) this.parentNode.children.splice(i, 1);
+    this.parentNode = null;
+};
+El.prototype.addEventListener = function (t, fn) { this.listeners[t] = fn; };
+El.prototype.removeEventListener = function (t, fn) {
+    if (this.listeners[t] === fn) delete this.listeners[t];
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+const document = { createElement: (tag) => new El(tag) };
+const window = { addEventListener() {}, removeEventListener() {} };
+function setTimeout() { return 0; }
+function clearTimeout() {}
+function setInterval() { return 0; }
+function clearInterval() {}
+const SerializeAddon = { SerializeAddon: function () {
+    this.serialize = function () { return 'SEED'; };
+    this.dispose = function () {};
+} };
+const notices = [];
+function showNotice(msg) { notices.push(String(msg)); }
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+const windows = new Map();
+const terminalControl = Object.create(null);
+let frontId = null;
+const performance = { t: 0, now() { return this.t += 10; } };
+function _closeWinSocket(win) { win.ws = null; }
+function reattachWindow(win) {}
+function paintControlOverlay(win) {}
+function focusWin(win) {}
+function updateTaskbarActive() {}
+function updateTaskbarLabel(key) {}
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__CONTROL__
+
+__UNLOADS__
+
+__CORE84B__
+
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    windows.delete(id);
+}
+function openWindowReduced(id) {
+    const dom = new El();
+    dom.className = 'term-window';
+    const bar = new El();
+    bar.className = 'title-bar';
+    const min = new El();
+    min.className = 'tb-btn btn-min';
+    bar.appendChild(min);
+    dom.appendChild(bar);
+    const term = { cols: 80, rows: 24, options: { fontFamily: 'mono', fontSize: 14 },
+                   loadAddon() {}, write(d, cb) { if (cb) cb(); } };
+    const win = { id: id, type: 'term', dom: dom, body: new El(), term: term,
+                  hostId: id.split(':')[0], sid: id.split(':')[1], name: 'sh',
+                  cleanups: [], disposed: false, detached: false,
+                  controlled: null, ws: {} };
+    // ---- 67 openWindow, verbatim: map insert -> seed -> create emit ----
+    __OPEN67__
+    return win;
+}
+
+const saves = [];
+let autoOn = false, autoCb = null;
+const autoSetting = { get: () => autoOn, onChange: (fn) => { autoCb = fn; } };
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = { id: id, ctxVersion: 1,
+        onUnload: function (fn) { if (typeof fn === 'function') rec.unloads.push(fn); },
+        windows: { onTerminalCreate: function (cb) {
+            const off = registerTerminalCreate(cb); rec.unloads.push(off); return off; } } };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+const decode = (ev) => ev.k === 'o'
+    ? { k: 'o', text: Buffer.from(ev.d, 'base64').toString('utf8') }
+    : Object.assign({}, ev, { t: undefined });
+function enqueueSave(rec) {
+    saves.push({ series: rec.series, seg: rec.seg, auto: rec.auto,
+                 events: rec.events.map(decode) });
+    return Promise.resolve({ ok: true });
+}
+let R = null;    // the recorder's closure, per case
+function initRecorder(ctx) {
+    __RECORDER__
+    return { active: active, terms: terms };
+}
+function loadRecorder(legacy) {
+    if (legacy) {
+        const i = _ctxExtenders.indexOf(_ctxTerminalControl);
+        if (i !== -1) _ctxExtenders.splice(i, 1);
+    }
+    const m = modCtx('recorder');
+    R = initRecorder(m.ctx);
+    return m;
+}
+function recBtn(win) {
+    return win.dom.querySelector('.title-bar').children
+        .find((c) => c.className.indexOf('btn-rec') !== -1);
+}
+function recLabel(win) {
+    return win.dom.querySelector('.title-bar').children
+        .find((c) => c.className.indexOf('rec-label') !== -1);
+}
+function click(win) { recBtn(win).listeners.click({ stopPropagation() {} }); }
+const C = (label, gen) => ({ state: 'controlled', label: label, since: 1000, gen: gen });
+const F = (gen) => ({ state: 'free', label: null, since: null, gen: gen });
+const out = (win, s) => dispatchTermOut(win, s);
+const tick = () => new Promise((r) => setImmediate(r));
+function tapCount(win) {
+    const l = _termTapLists(win, false);
+    return l ? l.out.length + l.in.length + l.resize.length : 0;
+}
+function paused(win) { return recBtn(win).classList.contains('rec-paused'); }
+function live(win) { return R.active.has(win.id); }
+
+const CASES = {};
+
+// A page without the control members records exactly as before.
+CASES.legacy_bag = async function () {
+    autoOn = true;
+    loadRecorder(true);
+    const win = openWindowReduced('h1:1');
+    const liveAtOpen = live(win);
+    out(win, 'one');
+    applyControlView('h1:1', C('phone', 5), 'push');
+    click(win);
+    await tick();
+    return { liveAtOpen: liveAtOpen, saves: saves,
+             errors: errors };
+};
+
+// The split, then the resume: same series, the next seg.
+CASES.split_and_resume = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:2');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:2', C('phone', 5), 'push');
+    await tick();
+    const afterClaim = { live: live(win), paused: paused(win), saves: saves.length,
+                         taps: tapCount(win), label: recLabel(win).textContent };
+    applyControlView('h1:2', F(6), 'push');
+    const afterRelease = { live: live(win), paused: paused(win) };
+    out(win, 'two');
+    click(win);
+    await tick();
+    return { afterClaim: afterClaim, afterRelease: afterRelease, saves: saves,
+             errors: errors };
+};
+
+// Auto-record on a terminal opened while controlled: nothing captured, no
+// taps held, nothing saved until control comes back.
+CASES.auto_open_while_controlled = async function () {
+    autoOn = true;
+    loadRecorder(false);
+    terminalControl['h1:3'] = { state: 'controlled', label: 'phone', since: 1,
+                                gen: 9, at: 0 };
+    const win = openWindowReduced('h1:3');
+    out(win, 'invisible');
+    await tick();
+    const during = { live: live(win), taps: tapCount(win), saves: saves.length,
+                     paused: paused(win) };
+    applyControlView('h1:3', F(10), 'push');
+    const afterRelease = { live: live(win), paused: paused(win) };
+    out(win, 'live');
+    click(win);
+    await tick();
+    return { during: during, afterRelease: afterRelease, saves: saves,
+             errors: errors };
+};
+
+CASES.stop_while_paused = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:4');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:4', C('phone', 5), 'push');
+    click(win);
+    const afterClick = { paused: paused(win), live: live(win) };
+    applyControlView('h1:4', F(6), 'push');
+    await tick();
+    return { afterClick: afterClick, live: live(win), saves: saves.length,
+             errors: errors };
+};
+
+CASES.detached_release = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:5');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:5', C('phone', 5), 'push');
+    win.detached = true;
+    applyControlView('h1:5', F(6), 'push');
+    await tick();
+    return { live: live(win), paused: paused(win), saves: saves.length,
+             errors: errors };
+};
+
+CASES.resumed_then_closed = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:6');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:6', C('phone', 5), 'push');
+    applyControlView('h1:6', F(6), 'push');
+    const resumed = live(win);
+    closeWindow('h1:6');
+    await tick();
+    return { resumed: resumed, saves: saves.length, errors: errors };
+};
+
+CASES.auto_off_while_paused = async function () {
+    autoOn = true;
+    loadRecorder(false);
+    const win = openWindowReduced('h1:7');
+    out(win, 'one');
+    applyControlView('h1:7', C('phone', 5), 'push');
+    const pausedBefore = paused(win);
+    autoOn = false;
+    autoCb(false);
+    const pausedAfter = paused(win);
+    applyControlView('h1:7', F(6), 'push');
+    await tick();
+    return { pausedBefore: pausedBefore, pausedAfter: pausedAfter,
+             live: live(win), saves: saves.length, errors: errors };
+};
+
+CASES.mod_teardown_while_paused = async function () {
+    const m = loadRecorder(false);
+    const win = openWindowReduced('h1:8');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:8', C('phone', 5), 'push');
+    _runUnloads(m.rec);
+    applyControlView('h1:8', F(6), 'push');
+    await tick();
+    return { live: live(win), saves: saves.length, entry: R.terms.has('h1:8'),
+             errors: errors };
+};
+
+CASES.relabel_while_paused = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:9');
+    click(win);
+    out(win, 'one');
+    applyControlView('h1:9', C('phone', 5), 'push');
+    applyControlView('h1:9', C('tablet', 6), 'push');
+    const during = { paused: paused(win), live: live(win), saves: saves.length };
+    applyControlView('h1:9', F(7), 'push');
+    out(win, 'two');
+    click(win);
+    await tick();
+    return { during: during, saves: saves, errors: errors };
+};
+
+// The same id rebuilt (a lease-loss view rebuild) while paused: the old
+// window's pause dies with it, and the new window starts clean.
+CASES.same_id_rebuild = async function () {
+    loadRecorder(false);
+    const old = openWindowReduced('h1:10');
+    click(old);
+    out(old, 'one');
+    applyControlView('h1:10', C('phone', 5), 'push');
+    closeWindow('h1:10');
+    const win = openWindowReduced('h1:10');
+    const reseeded = !!win.controlled;
+    applyControlView('h1:10', F(6), 'push');
+    await tick();
+    return { reseeded: reseeded, live: live(win), oldLive: R.active.has('h1:10'),
+             saves: saves.length, paused: paused(win), errors: errors };
+};
+
+CASES.manual_start_refused = async function () {
+    loadRecorder(false);
+    const win = openWindowReduced('h1:11');
+    applyControlView('h1:11', C('phone', 5), 'push');
+    click(win);
+    const during = { live: live(win), paused: paused(win),
+                     label: recLabel(win).textContent, taps: tapCount(win) };
+    applyControlView('h1:11', F(6), 'push');
+    await tick();
+    return { during: during, live: live(win), saves: saves.length,
+             errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve(CASES[want]()).then(function (res) {
+    process.stdout.write(JSON.stringify(res) + '\n');
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def recorder_control_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("recctl") / "harness.js"
+    path.write_text(
+        _REC240_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__CONTROL__", _term_control_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__CORE84B__", _core84b_source())
+        .replace("__OPEN67__", _open67_source())
+        .replace("__RECORDER__", _rec240_sources()),
+        encoding="utf-8")
+    return path
+
+
+_MARKER = {"k": "c", "s": "controlled", "l": "phone"}
+
+
+def _texts(part):
+    return [e.get("text") for e in part["events"] if e["k"] == "o"]
+
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_legacy_bag_records_as_before(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "legacy_bag")
+    assert r["errors"] == []
+    assert r["liveAtOpen"] is True, "auto-record did not arm on a legacy bag"
+    assert len(r["saves"]) == 1
+    events = r["saves"][0]["events"]
+    assert _texts(r["saves"][0]) == ["SEED", "one"]
+    assert not any(e["k"] == "c" for e in events)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_claim_closes_the_part_with_a_marker(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "split_and_resume")
+    assert r["errors"] == []
+    first = r["saves"][0]
+    assert _texts(first) == ["SEED", "one"]
+    last = {k: first["events"][-1].get(k) for k in ("k", "s", "l")}
+    assert last == _MARKER, "the part did not end with the handoff marker"
+    a = r["afterClaim"]
+    assert a["live"] is False and a["saves"] == 1 and a["taps"] == 0
+    # The pause is on the button, so the part's own save cannot erase it.
+    assert a["paused"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_release_resumes_the_same_series(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "split_and_resume")
+    assert r["afterRelease"] == {"live": True, "paused": False}
+    first, second = r["saves"]
+    assert second["series"] == first["series"], "the resumed part is a new run"
+    assert (first["seg"], second["seg"]) == (1, 2)
+    assert _texts(second) == ["SEED", "two"]
+    assert not any(e["k"] == "c" for e in second["events"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_auto_record_waits_for_free(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "auto_open_while_controlled")
+    assert r["errors"] == []
+    assert r["during"] == {"live": False, "taps": 0, "saves": 0, "paused": True}, \
+        "auto-record captured (or held taps on) a controlled terminal"
+    assert r["afterRelease"] == {"live": True, "paused": False}
+    assert len(r["saves"]) == 1
+    assert _texts(r["saves"][0]) == ["SEED", "live"]
+    assert r["saves"][0]["seg"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_stop_while_paused_stays_stopped(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "stop_while_paused")
+    assert r["errors"] == []
+    assert r["afterClick"] == {"paused": False, "live": False}
+    assert r["live"] is False and r["saves"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_detached_window_does_not_resume(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "detached_release")
+    assert r["errors"] == []
+    assert r["live"] is False and r["paused"] is False and r["saves"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_an_empty_resumed_part_is_not_saved(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "resumed_then_closed")
+    assert r["errors"] == []
+    assert r["resumed"] is True
+    assert r["saves"] == 1, "a resumed part holding only its seed was saved"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_auto_record_off_cancels_a_pause(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "auto_off_while_paused")
+    assert r["errors"] == []
+    assert r["pausedBefore"] is True and r["pausedAfter"] is False
+    assert r["live"] is False and r["saves"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_mod_teardown_cancels_a_pause(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "mod_teardown_while_paused")
+    assert r["errors"] == []
+    assert r["live"] is False and r["entry"] is False and r["saves"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_relabel_keeps_the_pause(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "relabel_while_paused")
+    assert r["errors"] == []
+    assert r["during"] == {"paused": True, "live": False, "saves": 1}
+    first, second = r["saves"]
+    assert (second["series"], second["seg"]) == (first["series"], 2)
+    assert _texts(second) == ["SEED", "two"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_same_id_rebuild_starts_clean(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "same_id_rebuild")
+    assert r["errors"] == []
+    assert r["reseeded"] is True
+    assert r["live"] is False and r["paused"] is False and r["saves"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_a_manual_start_while_controlled_is_refused(
+        recorder_control_harness):
+    r = _run_control(recorder_control_harness, "manual_start_refused")
+    assert r["errors"] == []
+    assert r["during"] == {"live": False, "paused": False,
+                           "label": "controlled elsewhere", "taps": 0}
+    assert r["live"] is False and r["saves"] == 0, \
+        "a refused start was armed for later"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_recorder_the_player_marks_a_handoff(tmp_path):
+    src = _recorder_src()
+    fn = _frag_nested_fn(src, "function renderMarkers() {", indent=20) \
+        + "\n                    }\n"
+    r = _node239(tmp_path, r"""
+function El() { this.children = []; this.style = {}; this.className = '';
+                this.title = ''; }
+El.prototype.appendChild = function (k) { this.children.push(k); return k; };
+El.prototype.addEventListener = function () {};
+const document = { createElement: () => new El() };
+const markers = new El();
+const notesEl = { querySelector: () => null };
+const recData = { events: [{ t: 100, k: 'o' }, { t: 250, k: 'g' },
+                           { t: 500, k: 'c', s: 'controlled', l: '<b>x</b>' }] };
+const duration = 1000;
+const notes = [];
+function seekTo() {}
+function fmtClock(ms) { return '0:0' + Math.floor(ms / 100); }
+""" + fn + r"""
+renderMarkers();
+console.log(JSON.stringify(markers.children.map(
+    (m) => [m.className, m.style.left, m.title])));
+""")
+    assert r == [["recplay-mark recplay-mark-gap", "25%", "connection gap @ 0:02"],
+                 ["recplay-mark recplay-mark-ctl", "50%",
+                  "controlled from <b>x</b> @ 0:05"]]

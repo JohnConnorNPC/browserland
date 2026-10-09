@@ -489,10 +489,31 @@
                     return 's' + Date.now().toString(36) + '-' + rand;
                 }
 
+                // #240: is this terminal controlled from another device right
+                // now? Feature-detected: a page without info.control records
+                // exactly as it did before.
+                function recControlled(info) {
+                    try {
+                        return !!info && typeof info.control === 'function'
+                            && info.control().state === 'controlled';
+                    } catch (_) { return false; }
+                }
+                // Remember what to start when control comes back. A pending
+                // resume shows as a paused ⏺ (never in the label, which the
+                // save of the part that just ended still writes to).
+                function pendResume(win, ui, chain) {
+                    const t = terms.get(win.id);
+                    if (!t || t.win !== win) return false;
+                    if (!t.resume) t.resume = chain;
+                    ui.setPaused(true);
+                    return true;
+                }
+
                 // opts (#151): {auto} marks a recording as auto-record-owned
                 // (governs the unload guard and the setting's off switch), and
                 // {series, seg} continue an existing chain — a roll passes the
                 // previous segment's chain forward, a fresh start mints one.
+                // {resumed} (#240) marks a part opened when control came back.
                 // Returns the live recording, or null when nothing started:
                 // a roll MUST be able to tell that its replacement is really in
                 // place, since it has already torn the previous one down.
@@ -501,6 +522,16 @@
                         return null;
                     }
                     const o = opts || {};
+                    // #240: a controlled terminal has no output stream (#239
+                    // closed its socket), so an auto-record arm waits for
+                    // control to come back rather than saving a part that holds
+                    // nothing but its seed snapshot. A manual ⏺ is refused
+                    // before it gets here.
+                    if (recControlled(info)) {
+                        pendResume(win, ui, { auto: !!o.auto, series: o.series,
+                                              seg: o.seg });
+                        return null;
+                    }
                     const t0 = performance.now();
                     const rec = {
                         win: win, ui: ui, info: info,
@@ -524,6 +555,9 @@
                         series: o.series || newSeriesId(),
                         seg: o.seg || 1,
                         rollTimer: null, rolling: false,
+                        // #240: opened when control came back; saved only if
+                        // it captures something past its seed.
+                        resumed: !!o.resumed, seedEvents: 0,
                     };
                     const now = function () {
                         return Math.max(0, Math.round(performance.now() - t0));
@@ -558,6 +592,7 @@
                             }
                         }
                     } catch (_) {}
+                    rec.seedEvents = rec.events.length;
                     // The grid and the font a recording is FILED as (meta.cols /
                     // meta.rows is what a player window sizes itself to, and
                     // meta.fontFamily what it renders with). Re-read at the
@@ -795,7 +830,11 @@
                     rec.durationMs = Math.max(
                         0, Math.round(performance.now() - rec.t0));
                     rec.ui.setRecording(false);
-                    if (!rec.events.length) {
+                    // #240: a part opened when control came back that captured
+                    // nothing past its seed (the reattach failed, or the window
+                    // closed first) is only the stale screen again: not saved.
+                    if (!rec.events.length
+                        || (rec.resumed && rec.events.length <= rec.seedEvents)) {
                         rec.ui.setLabel('');
                         return;
                     }
@@ -957,6 +996,41 @@
                     }
                 }
 
+                // ---- handoff to another device (#240) ----------------------
+                // While another device controls a terminal its window has no
+                // socket, so a recording would hold a silent hole that looks
+                // like an idle shell. Instead the part ENDS at the handoff, its
+                // last event a marker {k:'c', s:'controlled', l: label}, and the
+                // next part of the same series starts when control comes back
+                // (the reattach's snapshot redraws the screen it opens on). A
+                // window that is out in its own browser window (#226) is not
+                // reattached on release, so nothing resumes there.
+                function onControl(entry, c) {
+                    const win = entry.win;
+                    if (terms.get(win.id) !== entry || win.disposed) return;
+                    if (c && c.state === 'controlled') {
+                        const rec = active.get(win.id);
+                        if (!rec || rec.win !== win || rec.stopped) return;
+                        rec.events.push({
+                            t: Math.max(0, Math.round(performance.now() - rec.t0)),
+                            k: 'c', s: 'controlled', l: String(c.label),
+                        });
+                        const chain = { auto: rec.auto, series: rec.series,
+                                        seg: rec.seg + 1 };
+                        stopRecording(win, 'controlled');
+                        entry.resume = chain;
+                        entry.ui.setPaused(true);
+                        return;
+                    }
+                    const chain = entry.resume;
+                    if (!chain) return;
+                    entry.resume = null;
+                    entry.ui.setPaused(false);
+                    if (win.detached || active.has(win.id)) return;
+                    startRecording(win, entry.info, entry.ui,
+                                   Object.assign({}, chain, { resumed: true }));
+                }
+
                 // ---- per-terminal ⏺ button --------------------------------
                 const decorated = new WeakSet();
                 ctx.windows.onTerminalCreate(function (info) {
@@ -981,16 +1055,39 @@
                                            : 'Record session';
                         },
                         setLabel: function (s) { label.textContent = s; },
+                        setPaused: function (on) {
+                            btn.classList.toggle('rec-paused', !!on);
+                            if (on) {
+                                btn.title = 'Recording paused: controlled from'
+                                    + ' another device (click to stop)';
+                            } else if (!btn.classList.contains('recording')) {
+                                btn.title = 'Record session';
+                            }
+                        },
                     };
+                    const entry = { win: win, info: info, ui: ui, resume: null };
                     const onClick = function (e) {
                         e.stopPropagation();
-                        if (active.has(win.id)) {
+                        if (active.has(win.id) || entry.resume) {
                             // A ⏺ stop must STAY stopped: without this, the
                             // next auto-record pass (a setting flip, or this
                             // window being rebuilt) re-arms the very terminal
-                            // the button was just used to switch off.
+                            // the button was just used to switch off. A paused
+                            // recording (#240) stops here too.
                             userStopped.add(win.id);
+                            entry.resume = null;
+                            ui.setPaused(false);
                             stopRecording(win, 'user');
+                        } else if (recControlled(info)) {
+                            // #240: nothing to record while another device
+                            // controls the terminal (its window has no stream).
+                            ui.setLabel('controlled elsewhere');
+                            setTimeout(function () {
+                                if (!active.has(win.id)
+                                    && label.textContent === 'controlled elsewhere') {
+                                    ui.setLabel('');
+                                }
+                            }, 4000);
                         } else {
                             userStopped.delete(win.id);
                             // While auto-record is on, a ⏺ start re-arms the
@@ -1034,7 +1131,13 @@
                     disposers.add(teardown);
                     info.onDispose(teardown);
 
-                    terms.set(win.id, { win: win, info: info, ui: ui });
+                    terms.set(win.id, entry);
+                    // #240: subscribed BEFORE the auto-arm below; the replay is
+                    // synchronous, so a terminal opened while controlled is
+                    // known to be before anything arms.
+                    if (typeof info.onControlChanged === 'function') {
+                        info.onControlChanged(function (c) { onControl(entry, c); });
+                    }
                     // Arm auto-record for a terminal opening now — immediately,
                     // not on a later frame, so no output can arrive before
                     // capture is wrapped around term.write. The grid is still
@@ -1062,13 +1165,21 @@
                     if (on) {
                         userStopped.clear();
                         for (const t of Array.from(terms.values())) {
-                            if (t.win.disposed || active.has(t.win.id)) continue;
+                            if (t.win.disposed || active.has(t.win.id)
+                                || t.resume) continue;
                             startRecording(t.win, t.info, t.ui, { auto: true });
                         }
                         return;
                     }
                     for (const rec of Array.from(active.values())) {
                         if (rec.auto) stopRecording(rec.win, 'auto-record off');
+                    }
+                    // ...and a paused auto recording (#240) stays stopped.
+                    for (const t of Array.from(terms.values())) {
+                        if (t.resume && t.resume.auto) {
+                            t.resume = null;
+                            t.ui.setPaused(false);
+                        }
                     }
                 });
 
@@ -1490,12 +1601,22 @@
                         markers.innerHTML = '';
                         if (!recData) return;
                         for (const ev of recData.events) {
-                            if (ev.k !== 'g') continue;
+                            if (ev.k !== 'g' && ev.k !== 'c') continue;
                             const m = document.createElement('div');
-                            m.className = 'recplay-mark recplay-mark-gap';
+                            if (ev.k === 'c') {
+                                // #240: the part ended because another device
+                                // took the terminal. The label is that
+                                // device's own text: an attribute, never markup.
+                                m.className = 'recplay-mark recplay-mark-ctl';
+                                m.title = 'controlled from '
+                                    + String(ev.l || 'another device')
+                                    + ' @ ' + fmtClock(ev.t);
+                            } else {
+                                m.className = 'recplay-mark recplay-mark-gap';
+                                m.title = 'connection gap @ ' + fmtClock(ev.t);
+                            }
                             m.style.left =
                                 ((ev.t / duration) * 100) + '%';
-                            m.title = 'connection gap @ ' + fmtClock(ev.t);
                             markers.appendChild(m);
                         }
                         notes.forEach(function (n, i) {

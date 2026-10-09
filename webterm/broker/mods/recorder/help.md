@@ -95,6 +95,14 @@ newest first, and a player window titles the part it is playing. Each part is a
 complete recording in its own right — it opens on the screen the previous part
 ended on — so there is no seeking across a boundary.
 
+A part also ends when another device takes control of the terminal (its window
+greys out and says **Controlled from …**): nothing reaches this page while it
+is controlled, so the part closes with a blue marker at the end of its timeline
+instead of recording a silent hole. The ⏺ button stays shaded while you wait,
+and when control comes back the next part of the same run starts by itself.
+Click the shaded ⏺ to stop for good. A new recording cannot be started while a
+terminal is controlled from another device.
+
 ## Playback
 
 Open **Session recorder** from the right-click (+) menu to list recordings —
@@ -133,7 +141,7 @@ Transport controls: play/pause, playback speed 0.25×–8×, and **◀◀ revers
 a true backwards animation, not just a jump. The scrubber seeks anywhere;
 seeking and reverse render from keyframes the player indexes when it loads a
 recording ("indexing…"). Note markers are gold on the timeline; connection
-gaps are red.
+gaps are red; a handoff to another device is blue.
 
 ## Notes
 
