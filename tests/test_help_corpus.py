@@ -1313,3 +1313,37 @@ def test_help_render_path_has_no_innerhtml():
                       "DOMParser", ".innerHTML", "document.write"):
         assert forbidden not in region, \
             "Help render path must not use %s on corpus content" % forbidden
+
+
+# --- #240: info.control / info.onControlChanged + the resize boundary ---------
+# One literal claim per pin, read with whitespace normalised so a rewrap does
+# not red it. Every name carries `mod_control`.
+
+def _mod_control_norm(text):
+    return " ".join(text.split())
+
+
+_MOD_CONTROL_WAM_PINS = (
+    "`onControlChanged` replays the current state exactly once on subscribe",
+    "It fires after core has applied the change.",
+    "`{state: 'free'}` has no `label`",
+    "auto-removed at terminal dispose and at mod teardown",
+    "`typeof info.onControlChanged === 'function'`",
+    "render it with `textContent`, never as HTML.",
+    "The mod system has no way to set or hold a PTY size.",
+    "changes only the local grid — the PTY never hears of it",
+)
+
+
+@pytest.mark.parametrize("claim", _MOD_CONTROL_WAM_PINS)
+def test_mod_control_docs_writing_a_mod_states(claim):
+    page = (hc.WIKI_DIR / "Writing-a-Mod.md").read_text(encoding="utf-8")
+    start = page.index("### Controlled from another device: `info.control`")
+    end = page.index("### Queued modal prompts", start)
+    assert claim in _mod_control_norm(page[start:end])
+
+
+def test_mod_control_docs_recorder_help_states_the_refused_start():
+    help_md = (hc.MODS_DIR / "recorder" / "help.md").read_text(encoding="utf-8")
+    assert ("cannot be started while a terminal is controlled from another "
+            "device") in _mod_control_norm(help_md)

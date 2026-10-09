@@ -124,6 +124,13 @@ rather than deleting it. What remains is narrower and is the same containment
 boundary as limit 2: a mod that replaces `term.resize` by assignment and never
 calls through fires no event. Limits 2, 3 and 4 stand as written.
 
+## A controlled terminal (#239, #240)
+
+While another device controls a terminal, its desktop window holds no socket,
+so none of the output or input sites above runs for it and every tap is silent
+by construction. That is not a hook limit: there is no traffic on this page to
+observe. Mods learn why through `info.onControlChanged` (Writing-a-Mod §8).
+
 ## What the gate does NOT cover
 
 Two bounded scope limits, recorded so the word "complete" above stays honest:

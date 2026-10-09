@@ -2021,6 +2021,66 @@ the existing v1 `windows` family and owe no capability entry of their own:
 feature-detect with `typeof info.tapOutput === 'function'`. `ctxVersion` stays
 `1`.
 
+### Controlled from another device: `info.control` / `info.onControlChanged` (#240)
+
+Another device can take over one terminal's input and size (#238; the first
+such client is Notifier on a phone). While it does, the terminal's desktop
+window is greyed and holds **no socket** (#239), so every surface above goes
+quiet: the taps see no traffic and `onResize` sees no resize. These two members
+say why, per terminal:
+
+```js
+ctx.windows.onTerminalCreate(function (info) {
+    info.control();      // {state:'free'} | {state:'controlled', label, since, gen}
+    const off = info.onControlChanged(function (c) { /* same shape */ });
+});
+```
+
+**`onControlChanged` replays the current state exactly once on subscribe**,
+then reports each change, so a subscriber arriving mid-control is told at
+once. It is a level surface like `onModesChanged`, but nothing is sampled or
+held for a frame: it fires once per change core applied.
+
+**It fires after core has applied the change.** On `controlled` the window's
+socket is already closed. On `free` the reattach has already been issued, and
+`onResize` follows only if the reattach succeeds and a resize is applied. A
+window popped out into its own browser window (#226) is told too, but is not
+reattached by this page — its own page does that.
+
+**Every subscriber hears the same sequence.** If a handler causes a change of
+its own, the remaining subscribers are still told the state the pass started
+with, and then everyone is told the new one. No subscriber is told one state
+twice.
+
+**The payload is frozen and shared.** `info.control()` returns the very object
+the last delivery carried. `{state: 'free'}` has no `label`; `since` is epoch
+milliseconds or `null`; `gen` orders changes within one broker run and nothing
+more. **`label` is the controlling device's own text: render it with
+`textContent`, never as HTML.**
+
+**Lifecycle: auto-removed at terminal dispose and at mod teardown**, both armed
+before the replay runs, so a replay that disables its own mod leaves nothing
+behind. From a disabled mod `onControlChanged` registers nothing; `control()`
+is a plain read and still answers.
+
+Both are members of the v1 `windows` family: feature-detect with
+`typeof info.onControlChanged === 'function'`. There is no capability entry and
+no `ctx.events` name (the event is per terminal), and `ctxVersion` stays `1`.
+
+**Resizing.** The mod system has no way to set or hold a PTY size.
+`info.onResize` observes the page's xterm grid, `info.cellDims()` measures
+cells and `info.setFont` changes the font and lets core refit; none of them
+asks for cols/rows. `sendResize` and `isResizable` are core-internal: not part of `ctx`,
+and reachable only through `win`, the §1 escape hatch. While a terminal is
+controlled, core sends no PTY resize at all (`isResizable` is false, and there
+is no socket). A mod can still resize the page's own xterm through `win`
+(`win.fitAddon.fit()`, `win.term.resize()`): that fires `onResize` and changes
+only the local grid — the PTY never hears of it, and the controller's size
+stands. The controller's size reaches mods only as `onControlChanged`; on
+release, the ordinary `onResize` follows when the reattach applies the
+browser's size. Requesting a size would be a separate `info.requestSize`
+design with its own ownership rules (like `setFont`'s owner record).
+
 ### Queued modal prompts: `ctx.dialog.open` (#202)
 
 ```js
