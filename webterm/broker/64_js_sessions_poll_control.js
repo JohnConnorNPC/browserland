@@ -126,6 +126,13 @@
         // lease rebuild re-enters the state, and is pruned where the poll
         // drops a session (75). Prototype-free: keys are wire data.
         const terminalControl = Object.create(null);
+        // #239: Take back control was refused because another browser holds
+        // the HOME lease, so the Become active overlay was put up over a view
+        // that is still built. `armed` = it was put up that way; `asked` = its
+        // button was pressed since. Only an {active:true} after both may take
+        // it down again (becomeActiveTransition): a still-active page gets no
+        // rebuild that would do it.
+        const _leaseAffordance = { armed: false, asked: false };
 
         // #123: single source of truth for the taskbar/title label — order AND
         // per-component visibility. Returns the VISIBLE parts in `show.order`,
@@ -443,6 +450,9 @@
             host = host || localHost();
             const rec = host && controlSockets.get(host.id);
             if (!rec || !rec.ws || rec.ws.readyState !== WebSocket.OPEN) return;
+            if (_leaseAffordance.armed && host.id === homeHostId()) {
+                _leaseAffordance.asked = true;
+            }
             try { rec.ws.send(JSON.stringify({ type: 'become_active' })); }
             catch (_) {}
         }
@@ -511,7 +521,16 @@
         // {active:true}/{active:false} after the first must be a no-op.
         function becomeActiveTransition() {
             if (!_booted) { bootActiveView(); return; }  // first activation
-            if (!_deactivated) return;                   // already active
+            if (!_deactivated) {                         // already active
+                // #239: the overlay a refused Take back put up over a live
+                // view comes down on the answer to its own button.
+                if (_leaseAffordance.armed && _leaseAffordance.asked) {
+                    _leaseAffordance.armed = false;
+                    _leaseAffordance.asked = false;
+                    hideBecomeActiveOverlay();
+                }
+                return;
+            }
             rebuildView();
         }
         function deactivateTransition() {

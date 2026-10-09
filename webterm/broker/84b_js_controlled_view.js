@@ -233,6 +233,78 @@
             win.ctlBtn.disabled = !!win._takingBack;
         }
 
+        // Take back control: POST /session/control {id, op:'release', gen,
+        // clientId} to the terminal's own broker (#238). The answer is applied
+        // BY KEY, like every other source, so a window closed and reopened
+        // meanwhile is still told; the captured `win` is only its button.
+        //   200 {ok, ...free view}        -> leave
+        //   409 stale_gen {...live view}  -> adopt it: a new controller
+        //                                    relabels, a free one leaves
+        //   409 not_active                -> another browser holds the lease:
+        //                                    show the existing Become active
+        //   404 unknown_session           -> the terminal is gone: close
+        //   anything else                 -> say so; nothing changes
+        // Closing or terminating a controlled window sends nothing: closing
+        // does not release.
+        async function takeBackControl(win) {
+            if (!win || win.disposed || !win.controlled || win._takingBack) return;
+            const key = controlKey(win.hostId, win.sid);
+            const host = hostById(win.hostId);
+            if (!host) return;
+            win._takingBack = true;
+            if (win.ctlBtn) win.ctlBtn.disabled = true;
+            let r = null, j = null;
+            try {
+                r = await hostFetch(host, '/session/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: win.sid, op: 'release',
+                                           gen: win.controlled.gen,
+                                           clientId: CLIENT_ID }),
+                });
+                j = await r.json().catch(() => null);
+            } catch (_) {
+                r = null;
+            } finally {
+                win._takingBack = false;
+                if (!win.disposed && win.controlled && win.ctlBtn) win.ctlBtn.disabled = false;
+            }
+            const err = j && j.error;
+            if (r && j && ((r.status === 200 && j.ok)
+                           || (r.status === 409 && err === 'stale_gen'))) {
+                applyControlView(key, j, 'post');
+                return;
+            }
+            if (r && r.status === 409 && err === 'not_active') {
+                showLeaseAffordance(win.hostId);
+                return;
+            }
+            if (r && r.status === 404) {
+                const w = windows.get(key);
+                if (w && !w.disposed) {
+                    w.staleSession = true;
+                    showNotice('session ' + w.sid + ' no longer exists');
+                    closeWindow(key);
+                }
+                return;
+            }
+            showNotice('take back failed' + (err ? ': ' + err : ''), { type: 'error' });
+        }
+
+        // The lease affordance that already exists for that broker: the HOME
+        // Become active overlay (armed, so the answer to its button takes it
+        // down again over this still-built view), or a REMOTE broker's mask
+        // and click-to-take-over chip.
+        function showLeaseAffordance(hostId) {
+            if (hostId === homeHostId()) {
+                _leaseAffordance.armed = true;
+                _leaseAffordance.asked = false;
+                showBecomeActiveOverlay();
+                return;
+            }
+            applyRemoteLease(hostId, false);
+        }
+
         // openWindow's tail (67): a terminal that is controlled right now is
         // built greyed and is never attached (the tail's attach is refused).
         // Not a change, so no controlStateChanged: the chip already says so.

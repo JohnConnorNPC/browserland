@@ -31546,3 +31546,111 @@ def test_controlled_view_sources_are_wired():
     assert "applyControlView(controlKey(win.hostId, win.sid), data, 'ws');" in s73
     # The socket's first `resized` is held for its first `control` frame.
     assert "if (firstResized) {" in s73 and "heldResized = data;" in s73
+
+
+_TB239_STUBS = r"""
+const terminalControl = Object.create(null);
+const windows = new Map();
+const CLIENT_ID = 'page-A';
+const log = [];
+let nextAnswer = null;
+const sent = [];
+function hostById(id) { return {id}; }
+function homeHostId() { return 'local'; }
+async function hostFetch(host, path, opts) {
+    sent.push({host: host.id, path, body: JSON.parse(opts.body)});
+    const a = nextAnswer;
+    if (a === 'throw') throw new TypeError('network');
+    return {status: a.status, json: async () => a.body};
+}
+function applyControlView(key, j, src) { log.push(['apply', key, src, j.state, j.gen]); }
+function showNotice(t, o) { log.push(['notice', t]); }
+function closeWindow(k) { log.push(['close', k]); }
+function showBecomeActiveOverlay() { log.push(['overlay']); }
+function applyRemoteLease(h, a) { log.push(['remoteLease', h, a]); }
+const _leaseAffordance = {armed: false, asked: false};
+function controlKey(h, s) { return String(h) + ':' + String(s); }
+"""
+
+
+def test_controlled_view_take_back_answers(tmp_path):
+    if NODE is None:
+        pytest.skip("node not installed")
+    r = _node239(tmp_path, _TB239_STUBS + "".join(
+        _fn239("84b_js_controlled_view.js", sig) for sig in (
+            "async function takeBackControl(", "function showLeaseAffordance(")) + r"""
+(async () => {
+const out = {};
+const mk = (hostId) => {
+    const w = {id: hostId + ':5', hostId, sid: '5', disposed: false,
+               controlled: Object.freeze({label: 'phone', since: 1, gen: 41}),
+               ctlBtn: {disabled: false}};
+    windows.set(w.id, w);
+    return w;
+};
+const run = async (ans, hostId) => {
+    log.length = 0; sent.length = 0; nextAnswer = ans;
+    const w = mk(hostId || 'local');
+    await takeBackControl(w);
+    return {log: log.slice(), sent: sent.slice(), busy: w._takingBack,
+            btn: w.ctlBtn.disabled};
+};
+out.ok = await run({status: 200, body: {ok: true, id: 5, state: 'free', label: null, since: null, gen: 42}});
+out.stale = await run({status: 409, body: {ok: false, error: 'stale_gen', id: 5, state: 'controlled', label: 'tablet', since: 2, gen: 43}});
+out.notActiveHome = await run({status: 409, body: {ok: false, error: 'not_active'}});
+out.armed = Object.assign({}, _leaseAffordance);
+out.notActiveRemote = await run({status: 409, body: {ok: false, error: 'not_active'}}, 'h2');
+out.gone = await run({status: 404, body: {ok: false, error: 'unknown_session'}});
+out.net = await run('throw');
+out.other = await run({status: 400, body: {ok: false, error: 'bad_gen'}});
+console.log(JSON.stringify(out));
+})();
+""")
+    assert r["ok"]["sent"] == [{"host": "local", "path": "/session/control",
+                                "body": {"id": "5", "op": "release", "gen": 41,
+                                         "clientId": "page-A"}}]
+    assert r["ok"]["log"] == [["apply", "local:5", "post", "free", 42]]
+    assert r["stale"]["log"] == [["apply", "local:5", "post", "controlled", 43]]
+    # The button is usable again after every answer (a stale_gen relabel keeps
+    # the window controlled and the user must be able to retry).
+    for k in ("ok", "stale", "notActiveHome", "notActiveRemote", "gone", "net", "other"):
+        assert r[k]["busy"] is False, k
+    assert r["stale"]["btn"] is False
+    assert r["notActiveHome"]["log"] == [["overlay"]]
+    assert r["armed"] == {"armed": True, "asked": False}
+    assert r["notActiveRemote"]["log"] == [["remoteLease", "h2", False]]
+    assert r["gone"]["log"] == [["notice", "session 5 no longer exists"],
+                                ["close", "local:5"]]
+    assert r["net"]["log"] == [["notice", "take back failed"]]
+    assert r["other"]["log"] == [["notice", "take back failed: bad_gen"]]
+
+
+def test_controlled_view_lease_overlay_comes_down_only_on_its_own_answer(tmp_path):
+    if NODE is None:
+        pytest.skip("node not installed")
+    s64 = _src239("64_js_sessions_poll_control.js")
+    r = _node239(tmp_path, r"""
+let _booted = true, _deactivated = false;
+const _leaseAffordance = {armed: false, asked: false};
+const log = [];
+function bootActiveView() { log.push('boot'); }
+function rebuildView() { log.push('rebuild'); }
+function hideBecomeActiveOverlay() { log.push('hide'); }
+""" + _frag_fn(s64, "function becomeActiveTransition(") + "\n        }\n" + r"""
+const out = {};
+becomeActiveTransition();                       // not armed: nothing
+out.unarmed = log.splice(0);
+_leaseAffordance.armed = true;
+becomeActiveTransition();                       // armed, button not pressed
+out.notAsked = log.splice(0);
+_leaseAffordance.asked = true;
+becomeActiveTransition();                       // the answer to its button
+out.answered = log.splice(0);
+out.after = Object.assign({}, _leaseAffordance);
+console.log(JSON.stringify(out));
+""")
+    assert r["unarmed"] == [] and r["notAsked"] == []
+    assert r["answered"] == ["hide"]
+    assert r["after"] == {"armed": False, "asked": False}
+    send = _frag_fn(s64, "function sendBecomeActive(")
+    assert "if (_leaseAffordance.armed && host.id === homeHostId()) {" in send
