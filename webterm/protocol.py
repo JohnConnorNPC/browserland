@@ -475,8 +475,9 @@ def control_status_frame(active: bool,
 # A controller is any /ws subscriber that claims the terminal; while it holds
 # it, only its socket's input and resize reach the producer. Every surface
 # carries the same VIEW: {state: "free"|"controlled", label: str|None,
-# since: epoch ms|None, gen: int} (label/since are None when free; gen is
-# opaque and strictly increasing per terminal id, compared for equality only).
+# since: epoch ms|None, gen: int} (label/since are None when free; gen:
+# strictly increasing per terminal id, across same-id replacement and broker
+# restart; clients may order by it).
 #   controller -> broker (/ws): {"type": "control", "op": "claim", "label": s}
 #                               {"type": "control", "op": "release"}
 #   broker -> /ws subscriber:   {"type": "control", **view}   (each change, and

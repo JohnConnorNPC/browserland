@@ -250,15 +250,16 @@ def test_replacement_releases_and_gen_never_goes_backwards():
         new = await _registered(reg, 7)
         assert old.controller is None and old.closing is True
         assert old.control_gen > g1
-        assert new.control_gen >= old.control_gen
+        assert new.control_gen > old.control_gen
         assert new.control_view()["state"] == "free"
         assert a.closed == 1012
         assert reg.claim(old, a, "phone") == "unknown_session"
         await reg.drain_control()
         assert hooked == [(7, "controlled", g1), (7, "free", old.control_gen)]
-        # An UNcontrolled replacement shows no older gen either.
+        # An UNcontrolled replacement's view is newer too (clients order
+        # views by gen).
         newer = await _registered(reg, 7)
-        assert newer.control_view()["gen"] >= new.control_view()["gen"]
+        assert newer.control_view()["gen"] > new.control_view()["gen"]
         assert newer.published_view == newer.control_view()
     asyncio.run(scenario())
 

@@ -175,8 +175,9 @@ class WindowEntry:
         # BrokerRegistry transition ops (claim / release_by_ws /
         # release_by_gen / force_release) and register(); the relay gate
         # reads controller and revoked per frame. control_gen is the gen of
-        # the current view (register() seeds it from the registry's seq, so it
-        # never goes backwards across a same-id replacement). closing is set
+        # the current view (register() gives every new entry the next value of
+        # the registry's seq, so it is strictly increasing across a same-id
+        # replacement too: clients may order by it). closing is set
         # synchronously once the entry is dying (an `exit` frame, deregister,
         # replacement), so no control op lands on a terminal already known to
         # be dead. revoked holds the sockets that lost the terminal (by POST
@@ -409,9 +410,10 @@ class BrokerRegistry:
         # #238 terminal control. ONE broker-global gen sequence, seeded with
         # epoch ms so a gen handed out before a restart is (barring a clock
         # step back) never handed out again, and still far below 2**53 for
-        # JS. Every control change takes the next value, so gens are strictly
-        # increasing per terminal id across same-id replacement with no
-        # carry-over.
+        # JS. Every control change and every newly registered entry takes the
+        # next value, so gens are strictly increasing per terminal id, across
+        # same-id replacement too, with no carry-over: clients may order views
+        # by gen.
         self._control_seq = int(time.time() * 1000)
         # The ordered publisher: one asyncio.Lock per terminal ID (not per
         # entry, so an old entry's in-flight publication finishes before its
@@ -527,9 +529,9 @@ class BrokerRegistry:
                 # on the new entry can be overtaken by the old one's release.
                 old.closing = True
                 self.force_release(old)
-            # The new entry starts free at the CURRENT seq: never below any
-            # gen this id has shown, so a free view does not go backwards.
-            entry.control_gen = self._control_seq
+            # The new entry starts free at the NEXT gen: above any gen this id
+            # has shown, so a client ordering views by gen accepts it.
+            entry.control_gen = self._next_gen()
             entry.published_view = entry.control_view()
             self._entries[window_id] = entry
             waiter = self._waiters.get(window_id)
