@@ -13332,6 +13332,9 @@ let _homeActive = false;
 let _booted = false;
 let _deactivated = false;
 let _viewEpoch = 0;
+// #239: 64's lease-affordance latch, read by becomeActiveTransition's
+// already-active branch (unarmed here: these cases never refuse a take-back).
+const _leaseAffordance = { armed: false, asked: false };
 let _stateReady = false;
 let _statePendingPush = false;
 let _markedReady = 0;
