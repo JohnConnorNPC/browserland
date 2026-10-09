@@ -643,6 +643,9 @@
         // `arm(off)` runs BEFORE the replay: the replay is synchronous mod
         // code that may disable its own mod or close the terminal, and either
         // drains the very cleanup that is meant to remove this subscription.
+        // The replay then goes only to a sub the arm left in place: the arm
+        // calls the bag's onModTeardown and onDispose, which a mod can
+        // overwrite with ones that run off() at once.
         function _addTermCtlSub(win, fn, arm) {
             const noop = function () { return false; };
             if (typeof fn !== 'function') return noop;
@@ -663,7 +666,9 @@
             if (typeof arm === 'function') {
                 try { arm(offFn); } catch (_) {}
             }
-            _deliverTermCtl(rec, termControlView(win));
+            if (st.subs.indexOf(rec) !== -1) {
+                _deliverTermCtl(rec, termControlView(win));
+            }
             return offFn;
         }
 

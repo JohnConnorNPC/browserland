@@ -32361,6 +32361,26 @@ CASES.replay_disables_its_mod = function () {
     return { seen: seen, sent: sent, errors: errors };
 };
 
+// A sub the arm already removed is not replayed. The arm calls the bag's
+// onModTeardown, which a mod can overwrite. This relies on the bag being
+// decorated IN PLACE (core's fresh literal), so the arm reads the member
+// written here; armCalls proves it did, so a copied bag reds the case rather
+// than passing without reaching the recheck.
+CASES.arm_removes_before_replay = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    let armCalls = 0;
+    bag.onModTeardown = function (fn) { armCalls += 1; fn(); return true; };
+    const seen = [];
+    const off = bag.onControlChanged(function (c) { seen.push(c.state); });
+    const st = _termCtlState(win, false);
+    const subsAfter = st ? st.subs.length : -1;
+    const offResult = off();
+    const sent = setControlled(win, C('phone', 5));
+    return { seen: seen, armCalls: armCalls, subsAfter: subsAfter,
+             offResult: offResult, sent: sent, errors: errors };
+};
+
 // A mod disabled by a sibling's handler mid-walk is told nothing more: the
 // walk re-checks each record against the live list.
 CASES.teardown_mid_walk = function () {
@@ -32565,6 +32585,17 @@ def test_mod_control_removal_is_armed_before_the_replay(control_harness):
     assert r["errors"] == []
     assert r["seen"] == ["free"] and r["sent"] == 0, \
         "a replay that disabled its own mod left the subscription alive"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_subscription_removed_while_arming_is_not_replayed(
+        control_harness):
+    r = _run_control(control_harness, "arm_removes_before_replay")
+    assert r["errors"] == []
+    assert r["armCalls"] == 1, "the overwritten onModTeardown never armed"
+    assert r["seen"] == [], "a subscription the arm removed was replayed"
+    assert r["subsAfter"] == 0 and r["offResult"] is False
+    assert r["sent"] == 0
 
 
 # --- #240 A2: the core seam (84b controlStateChanged -> 86k) -----------------
