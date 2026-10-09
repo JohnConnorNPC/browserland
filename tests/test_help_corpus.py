@@ -1332,6 +1332,13 @@ _MOD_CONTROL_WAM_PINS = (
     "render it with `textContent`, never as HTML.",
     "The mod system has no way to set or hold a PTY size.",
     "changes only the local grid — the PTY never hears of it",
+    # review round 1 (#240): the claims, each pinned on its own
+    "are plain functions in core's script, not members of `ctx`, `info` or `win`.",
+    "on a controlled terminal `sendResize` does nothing",
+    "**No size reaches mods from the controller**",
+    "**`onResize` fires only if the page's grid actually changes**",
+    "**`info.control()` is a live read**",
+    "the next delivery brings exactly that object.",
 )
 
 
@@ -1347,3 +1354,44 @@ def test_mod_control_docs_recorder_help_states_the_refused_start():
     help_md = (hc.MODS_DIR / "recorder" / "help.md").read_text(encoding="utf-8")
     assert ("cannot be started while a terminal is controlled from another "
             "device") in _mod_control_norm(help_md)
+
+
+
+# The code facts the round-1 Resizing claims rest on, checked against the
+# shipped sources so the pinned sentences cannot drift from what they claim.
+_MOD_CONTROL_BROKER = hc.MODS_DIR.parent
+
+
+def test_mod_control_docs_resize_functions_are_core_closures_not_win_members():
+    src = (_MOD_CONTROL_BROKER / "73_js_window_runtime.js").read_text(
+        encoding="utf-8")
+    assert "        function sendResize(win, force) {" in src
+    assert "        function isResizable(win) {" in src
+    for frag in sorted(_MOD_CONTROL_BROKER.glob("[0-9]*.js")):
+        text = frag.read_text(encoding="utf-8")
+        assert not re.search(r"\.(sendResize|isResizable)\b|"
+                             r"\b(sendResize|isResizable)\s*:", text), \
+            f"{frag.name} exposes a resize function as a member"
+    # sendResize refuses a controlled window before it touches the socket.
+    body = src[src.index("        function sendResize(win, force) {"):]
+    body = body[:body.index("\n        }\n")]
+    assert body.index("if (!isResizable(win)) return;") \
+        < body.index("win.ws.send(")
+    life = (_MOD_CONTROL_BROKER / "67_js_window_lifecycle.js").read_text(
+        encoding="utf-8")
+    assert "id, sid, hostId, dom, body, term, fitAddon," in life
+
+
+def test_mod_control_docs_the_payload_carries_no_size():
+    taps = (_MOD_CONTROL_BROKER / "86k_js_mod_terminal_taps.js").read_text(
+        encoding="utf-8")
+    view = taps[taps.index("v = Object.freeze({ state: 'controlled'"):]
+    view = view[:view.index("});")]
+    keys = re.findall(r"(\w+):", view)
+    assert keys == ["state", "label", "since", "gen"], keys
+
+
+def test_mod_control_docs_xterm_resize_is_a_no_op_on_the_same_grid():
+    vendor = (_MOD_CONTROL_BROKER / "vendor" / "xterm.js").read_text(
+        encoding="utf-8", errors="replace")
+    assert "resize(e,t){e!==this.cols||t!==this.rows?super.resize(e,t):" in vendor

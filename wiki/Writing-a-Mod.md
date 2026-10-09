@@ -2042,8 +2042,7 @@ once. It is a level surface like `onModesChanged`, but nothing is sampled or
 held for a frame: it fires once per change core applied.
 
 **It fires after core has applied the change.** On `controlled` the window's
-socket is already closed. On `free` the reattach has already been issued, and
-`onResize` follows only if the reattach succeeds and a resize is applied. A
+socket is already closed. On `free` the reattach has already been issued. A
 window popped out into its own browser window (#226) is told too, but is not
 reattached by this page — its own page does that.
 
@@ -2052,10 +2051,13 @@ its own, the remaining subscribers are still told the state the pass started
 with, and then everyone is told the new one. No subscriber is told one state
 twice.
 
-**The payload is frozen and shared.** `info.control()` returns the very object
-the last delivery carried. `{state: 'free'}` has no `label`; `since` is epoch
-milliseconds or `null`; `gen` orders changes within one broker run and nothing
-more. **`label` is the controlling device's own text: render it with
+**The payload is frozen and shared.** Between deliveries, `info.control()`
+returns the very object the last delivery carried. `{state: 'free'}` has no
+`label`; `since` is epoch milliseconds or `null`; `gen` orders changes within
+one broker run and nothing more. **`info.control()` is a live read**, though:
+if a handler's own change (or an earlier subscriber's) makes the state being
+delivered stale, `info.control()` already answers the newer state inside that
+handler — and the next delivery brings exactly that object. **`label` is the controlling device's own text: render it with
 `textContent`, never as HTML.**
 
 **Lifecycle: auto-removed at terminal dispose and at mod teardown**, both armed
@@ -2070,16 +2072,22 @@ no `ctx.events` name (the event is per terminal), and `ctxVersion` stays `1`.
 **Resizing.** The mod system has no way to set or hold a PTY size.
 `info.onResize` observes the page's xterm grid, `info.cellDims()` measures
 cells and `info.setFont` changes the font and lets core refit; none of them
-asks for cols/rows. `sendResize` and `isResizable` are core-internal: not part of `ctx`,
-and reachable only through `win`, the §1 escape hatch. While a terminal is
-controlled, core sends no PTY resize at all (`isResizable` is false, and there
-is no socket). A mod can still resize the page's own xterm through `win`
-(`win.fitAddon.fit()`, `win.term.resize()`): that fires `onResize` and changes
+asks for cols/rows. Core's own `sendResize(win, force)` and `isResizable(win)`
+are plain functions in core's script, not members of `ctx`, `info` or `win`.
+Like every core global they can be called by bare name from a mod (§1), which
+is outside the contract — and on a controlled terminal `sendResize` does
+nothing: `isResizable` answers false, and the window holds no socket
+(`win.ws` is `null`). What `info.win` itself exposes is the page's own xterm,
+`win.term` and `win.fitAddon`. A mod can resize that through `win`
+(`win.fitAddon.fit()`, `win.term.resize()`): it fires `onResize` and changes
 only the local grid — the PTY never hears of it, and the controller's size
-stands. The controller's size reaches mods only as `onControlChanged`; on
-release, the ordinary `onResize` follows when the reattach applies the
-browser's size. Requesting a size would be a separate `info.requestSize`
-design with its own ownership rules (like `setFont`'s owner record).
+stands. **No size reaches mods from the controller**: the `onControlChanged`
+payload says who holds the terminal, not how big it is. On release, the
+reattach asks for the browser's size, but **`onResize` fires only if the
+page's grid actually changes** — usually it does not, because the page's grid
+stood still while the terminal was controlled. Requesting a size would be a
+separate `info.requestSize` design with its own ownership rules (like
+`setFont`'s owner record).
 
 ### Queued modal prompts: `ctx.dialog.open` (#202)
 

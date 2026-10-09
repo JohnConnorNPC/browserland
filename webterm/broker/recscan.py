@@ -25,7 +25,8 @@ never skipped into a clean result.
 Format (newline-delimited JSON): line 1 is meta, then one event per line.
 ``{"t":ms,"k":"o","d":"<base64 output>"}`` carries content; ``k:"i"`` is an
 input MARKER (a byte count, never the keystrokes), ``k:"r"`` a resize, ``k:"g"``
-a connection gap.
+a connection gap, and ``k:"c"`` the end of a part handed to another device
+(#240; ``"l"`` is that device's own label, plain text, not scanned).
 
 Read-only by design. A recording is an archived artifact and this never rewrites
 one -- it tells you which file to look at (or delete), and where in the
