@@ -202,19 +202,33 @@ def live_controller():
 class Proxy:
     def __init__(self):
         self.ws_opens = []            # (t, url) of every page /ws dial to WID
+        self.ws_closed = {}           # socket# -> t the PAGE closed it
+        self.ws_count = 0
         self.ws_sent = []             # (t, socket#, frame) page -> broker on /ws
         self.ws_recv = []             # (t, socket#, frame) broker -> page on /ws
         self.control_routes = []
+        self.ws_nums = []             # socket# of each page /ws dial to WID
         self.drop_terminal_control = False
         self.drop_status_inactive = False
         self.stall_polls = False
 
     def on_ws(self, route):
-        n = len(self.ws_opens)
+        n = self.ws_count
+        self.ws_count += 1
         mine = ("session=%d" % WID) in route.url
         if mine:
             self.ws_opens.append((time.time(), route.url))
+            self.ws_nums.append(n)
         server = route.connect_to_server()
+
+        # The WIRE fact "the page closed this socket": the route's own
+        # `closePage` event (a close from the page side). Listened to beside
+        # the default forwarding rather than through route.on_close, whose
+        # Python handler raises KeyError('code') on a close without a code in
+        # Playwright 1.57 -- which is exactly the close a page's ws.close()
+        # sends.
+        route._impl_obj._channel.on(
+            "closePage", lambda _ev: self.ws_closed.setdefault(n, time.time()))
 
         def up(m):
             if mine and isinstance(m, str):
@@ -263,6 +277,17 @@ class Proxy:
 
     def opens_since(self, t):
         return [u for (ts, u) in self.ws_opens if ts >= t]
+
+    def last_socket_before(self, t):
+        nums = [n for (ts, _u), n in zip(self.ws_opens, self.ws_nums) if ts < t]
+        return nums[-1] if nums else None
+
+    def sockets_since(self, t):
+        return [n for (ts, _u), n in zip(self.ws_opens, self.ws_nums) if ts >= t]
+
+    def closed_by_page_within(self, n, t, secs):
+        c = self.ws_closed.get(n)
+        return c is not None and t - 0.2 <= c <= t + secs
 
 
 PROXY = Proxy()
@@ -375,7 +400,11 @@ try:
         st = win(page)
         check(ok and st["controlled"]["label"] == label and st["controlled"]["frozen"],
               "P1 claim: win.controlled = frozen {label, since, gen}")
-        check(not st["hasWs"] and not st["wsOpen"], "P1 claim: the window holds no socket")
+        page.wait_for_timeout(300)
+        n1 = PROXY.last_socket_before(t_claim)
+        check(not st["hasWs"] and not st["wsOpen"] and n1 is not None
+              and PROXY.closed_by_page_within(n1, t_claim, 2.0),
+              "P1 claim: the window holds no socket (the page CLOSED its /ws on the wire)")
         check(st["labelText"] == label and st["labelChildren"] == 0,
               "P1 claim: the overlay shows the label as TEXT (markup not parsed)")
         check(st["grey"] and st["overlay"], "P1 claim: greyed with the overlay")
@@ -393,7 +422,7 @@ try:
               "P1 claim: the controller-era output never reached the page's xterm")
         check(page.evaluate("() => { const ov = document.querySelector('.term-ctl-overlay'); "
                             "return !!ov && Number(getComputedStyle(ov).zIndex) === 20; }"),
-              "P1 claim: the overlay stacks at z-index 20")
+              "P1 claim: the overlay declares z-index 20 (a declaration pin, not a stacking test)")
 
         # ---- P12 chip marked, survives a rebuild ----------------------------
         check(st["chipControlled"] and label in st["chipTitle"],
@@ -432,7 +461,8 @@ try:
         check(box is not None, "P2 setup: the float's resize handle was dragged")
         check(PROXY.resizes_since(t2) == [] and PROXY.opens_since(t2) == []
               and PROD.count("resize") == n_res,
-              "P2 no resize: tiling, float drag and browser resizes sent 0 resize frames")
+              "P2 no resize: tiling, float drag and browser resizes sent 0 resize frames "
+              "(no socket: guard G + the close; isResizable itself is pinned by the collected harness)")
 
         # ---- P7 real 409 stale_gen relabels -------------------------------------
         PROXY.drop_terminal_control = True
@@ -458,6 +488,25 @@ try:
         posts = []
         page.on("request", lambda r: posts.append(r.post_data_json)
                 if r.url.endswith("/session/control") and r.method == "POST" else None)
+        # R2: the controller sets its own grid first, so the attach `resized`
+        # after Take back carries 50x15; the window must keep its own box.
+        BG.run(CTL.resize(50, 15))
+        page.wait_for_timeout(600)
+        check(any(f.get("type") == "resize" and (f["cols"], f["rows"]) == (50, 15)
+                  for f in PROD.frames), "P3 setup: the controller resized the PTY to 50x15")
+        geo0 = page.evaluate("""(k) => { const w = windows.get(k);
+            // Sampled every frame: the box (style width/height; a click also
+            // rewrites style.zIndex, which is not a move) and the xterm grid.
+            window.__boxes = []; window.__cols = [];
+            const tick = () => { if (window.__cols.length < 400) {
+                window.__cols.push(w.term.cols);
+                window.__boxes.push(w.dom.style.width + 'x' + w.dom.style.height);
+                requestAnimationFrame(tick); } };
+            requestAnimationFrame(tick);
+            const blob = JSON.parse(localStorage.getItem('webterm:prefs:v1') || '{}');
+            return {style: [w.dom.style.width, w.dom.style.height],
+                    pref: JSON.stringify(getPref(k).geom || null),
+                    stored: JSON.stringify((blob[k] || {}).geom || null)}; }""", KEY)
         t3 = time.time()
         h0 = hooks(page)
         # Polls stalled: 75's heal loop only re-dials a host whose poll
@@ -466,8 +515,21 @@ try:
         page.wait_for_timeout(2500)
         page.click(".term-window[data-session-id=\"%s\"] .term-ctl-take" % KEY)
         ok = wait_for(page, FREE_ATTACHED, 10, KEY)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1500)
         PROXY.stall_polls = False
+        geo1 = page.evaluate("""(k) => { const w = windows.get(k);
+            const blob = JSON.parse(localStorage.getItem('webterm:prefs:v1') || '{}');
+            return {style: [w.dom.style.width, w.dom.style.height],
+                    pref: JSON.stringify(getPref(k).geom || null),
+                    stored: JSON.stringify((blob[k] || {}).geom || null),
+                    boxes: Array.from(new Set(window.__boxes)), cols: window.__cols}; }""", KEY)
+        check(geo1["style"] == geo0["style"]
+              and geo1["boxes"] == ["%sx%s" % tuple(geo0["style"])],
+              "P3 take back (R2): the float's box never moved toward the controller's grid %s"
+              % (geo1["boxes"],))
+        check(geo1["pref"] == geo0["pref"] and geo1["stored"] == geo0["stored"],
+              "P3 take back (R2): the saved geometry (prefs + localStorage) is unchanged")
+        check(50 not in geo1["cols"], "P3 take back (R2): the xterm never took the controller's 50 cols")
         cid = page.evaluate("CLIENT_ID")
         check(ok and posts == [{"id": str(WID), "op": "release", "gen": live["gen"], "clientId": cid}],
               "P3 take back: one POST with the live gen and this browser's clientId")
@@ -488,9 +550,13 @@ try:
         PROXY.drop_terminal_control = True
         PROXY.stall_polls = True
         page.wait_for_timeout(300)
+        t10 = time.time()
         BG.run(CTL.claim("phone"))
-        check(wait_for(page, CONTROLLED, 3, KEY),
-              "P10 /ws frame: greyed with pushes dropped and polls stalled")
+        ok = wait_for(page, CONTROLLED, 3, KEY)
+        page.wait_for_timeout(300)
+        n10 = PROXY.last_socket_before(t10)
+        check(ok and n10 is not None and PROXY.closed_by_page_within(n10, t10, 3.0),
+              "P10 /ws frame: greyed with pushes dropped and polls stalled, its /ws closed on the wire")
         PROXY.drop_terminal_control = False
 
         # ---- P4 controller-side release, push alone ----------------------------
@@ -537,8 +603,8 @@ try:
             page.wait_for_timeout(200)
         page.wait_for_timeout(800)
         check(len(PROXY.control_routes) > n_routes, "P17 setup: /control re-dialled after a 1012 close")
-        g = page.evaluate("(k) => { const r = terminalControl[k]; return r ? r.gen : 'none'; }", KEY)
-        check(g is None, "P17 reconnect: that host's recorded gen was forgotten (%r)" % (g,))
+        g = page.evaluate("(k) => { const r = terminalControl[k]; return r ? r.unordered === true : 'none'; }", KEY)
+        check(g is True, "P17 reconnect: that host's recorded gen was forgotten (%r)" % (g,))
         PROXY.stall_polls = True
         PROXY.control_routes[-1].send(json.dumps({
             "type": "terminal_control", "id": WID, "state": "controlled",
@@ -557,6 +623,7 @@ try:
         BG.run(CTL.resize(50, 15))
         page.wait_for_timeout(800)
         t16 = time.time()
+        n_prod16 = PROD.count("resize")
         geo = page.evaluate("""(k) => { const w = openWindow(k, sessions.get(k));
             const r = w.dom.getBoundingClientRect();
             return [Math.round(r.width), Math.round(r.height), w.term.cols, w.term.rows]; }""", KEY)
@@ -567,6 +634,13 @@ try:
         check([st["rect"][2], st["rect"][3], st["cols"], st["rows"]] == geo
               and (st["cols"], st["rows"]) != (50, 15),
               "P16 stale attach: the held `resized` (50x15) neither resized the xterm nor snapped the float")
+        page.wait_for_timeout(1000)
+        n16 = PROXY.sockets_since(t16)
+        check(len(n16) == 1 and PROXY.closed_by_page_within(n16[0], t16, 6.0),
+              "P16 stale attach: the page CLOSED that one socket on the wire")
+        check(PROD.count("resize") == n_prod16,
+              "P16 stale attach: the producer received NO resize from it (the broker gate, M2); "
+              "page resize frames on the wire: %d" % len(PROXY.resizes_since(t16)))
         PROXY.drop_terminal_control = False
         PROXY.stall_polls = False
 
