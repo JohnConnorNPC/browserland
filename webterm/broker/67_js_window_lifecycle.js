@@ -1,11 +1,14 @@
         // ---- per-terminal-window lifecycle hook (#116 / S14) ---------------
         // A per-window title-bar control (the git status widget) is not a taskbar
         // chip or an app window, so it needs a hook that fires once per TERMINAL
-        // window. registerTerminalCreate(cb) subscribes: cb is REPLAYED over every
-        // terminal already open (so enabling the git mod mid-session decorates the
-        // existing windows) and fired for every future openWindow. Returns an
-        // unsubscribe fn. The loader exposes this as ctx.windows.onTerminalCreate
-        // and auto-unsubscribes on the mod's teardown. `windows` is the cross-
+        // window. registerTerminalCreate(cb, arm) subscribes: cb is REPLAYED over
+        // every terminal already open (so enabling the git mod mid-session
+        // decorates the existing windows) and fired for every future openWindow.
+        // Returns an unsubscribe fn, handed first to the optional arm(off) BEFORE
+        // the replay. The loader exposes this as ctx.windows.onTerminalCreate,
+        // and its arm puts off() on the mod's teardown chain (#242). An arm that
+        // calls off() gets no delivery at all; an arm that throws has the
+        // registration rolled back. `windows` is the cross-
         // fragment core Map (64_js_sessions_poll_control.js); these live at the one
         // shared top-level scope, so create-time + replay both reach them.
         //
@@ -65,21 +68,37 @@
                 console.error('[windows] onTerminalCreate callback failed:', e);
             }
         }
-        function registerTerminalCreate(cb) {
+        function registerTerminalCreate(cb, arm) {
             if (typeof cb !== 'function') return function () {};
-            termCreateCbs.push(cb);
-            // Replay over the terminals open right now (app windows are excluded —
-            // this is a TERMINAL hook). A disposed-but-not-yet-removed window is
-            // skipped so a stale interval isn't started on a dead window.
-            for (const win of Array.from(windows.values())) {
-                if (win && win.type !== 'app' && !win.disposed) {
-                    _emitTerminalCreate(win, cb);
-                }
-            }
-            return function () {
-                const i = termCreateCbs.indexOf(cb);
+            // One entry per REGISTRATION: off() and the recheck below key on it,
+            // so one function registered twice is two registrations, and an
+            // off() can never remove the other one.
+            const entry = function (info) { return cb(info); };
+            termCreateCbs.push(entry);
+            const off = function () {
+                const i = termCreateCbs.indexOf(entry);
                 if (i !== -1) termCreateCbs.splice(i, 1);
             };
+            // #242: the owner's arm(off) runs BEFORE the replay, so a replayed cb
+            // that tears its owner down (a mod disabling itself) finds off()
+            // already on the owner's chain. It fails CLOSED, unlike the mod-range
+            // arms' bare catch (#240/#241): this arm IS the ownership, so a
+            // registration it could not own is removed before any delivery.
+            if (typeof arm === 'function') {
+                try { arm(off); } catch (_) { off(); }
+            }
+            // Replay over the terminals open right now (app windows are excluded —
+            // this is a TERMINAL hook). A disposed-but-not-yet-removed window is
+            // skipped so a stale interval isn't started on a dead window. The
+            // liveness recheck stops the replay once off() has run, in the arm or
+            // in the previous replayed call.
+            for (const win of Array.from(windows.values())) {
+                if (termCreateCbs.indexOf(entry) === -1) break;
+                if (win && win.type !== 'app' && !win.disposed) {
+                    _emitTerminalCreate(win, entry);
+                }
+            }
+            return off;
         }
 
         // ---- window create / minimize / restore / close -------------------

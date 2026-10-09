@@ -5351,7 +5351,7 @@ def test_windows_capability_and_session_git_present():
     # on these. ctxVersion stays 1 (both additive).
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     for sym in ("windows: {", "onTerminalCreate: function (cb)",
-                "registerTerminalCreate(cb)",
+                "registerTerminalCreate(cb,",
                 "git: function (id, opts)", "'/session/git'"):
         assert sym in loader, f"missing #116 loader capability symbol: {sym!r}"
     assert "ctxVersion: 1" in loader
@@ -13791,7 +13791,7 @@ def _terminal_create_source():
     assert start < end, "slice markers out of order"
     body = src[start:end]
     for needed in ("function _emitTerminalCreate(win, cb) {",
-                   "function registerTerminalCreate(cb) {",
+                   "function registerTerminalCreate(cb, arm) {",
                    "addTitleBarItem: function (node) {",
                    "onDispose: function (fn) {"):
         assert needed in body, f"{needed} missing from the sliced range"
@@ -13856,15 +13856,18 @@ def test_on_mod_teardown_wraps_the_v1_hook_and_owes_no_capability_entry():
 
 
 def test_the_loader_still_spells_on_terminal_create_the_way_the_harness_does():
-    # The node harness re-types 86's three-line ctx.windows.onTerminalCreate
-    # (the loader is not sliced into it). This is the assertion that keeps the
-    # copy honest -- if the loader stops pushing `off` onto rec.unloads, the
-    # teardown cases below would be testing a fiction.
+    # The node harnesses re-type 86's two-line ctx.windows.onTerminalCreate
+    # (the loader is not sliced into them). This and the #242 twin pin below
+    # keep the copies honest -- if the loader stopped arming `off` onto
+    # rec.unloads, the teardown cases would be testing a fiction.
     body = _frag_fn(_loader_src(), "function makeCtx(modId, rec) {")
     for line in ("onTerminalCreate: function (cb) {",
-                 "const off = registerTerminalCreate(cb);",
-                 "rec.unloads.push(off);"):
+                 "if (rec.unloading) return function () {};",
+                 "return registerTerminalCreate(cb, "
+                 "function (off) { rec.unloads.push(off); });"):
         assert line in body, f"the loader no longer spells {line!r}"
+    assert "const off = registerTerminalCreate(cb);" not in body, \
+        "the loader pushes its unsubscribe after the replay again"
 
 
 # E37 is BEHAVIOUR -- exactly once, on the FIRST of two exits, in both orders --
@@ -13969,9 +13972,9 @@ function barOf(win) {
     });
 }
 // One ctx per mod, built the way makeCtx builds it: the v1 literal, then the
-// extenders. `windows.onTerminalCreate` is 86's own three lines, re-typed
-// because the loader is not sliced in here (a python assertion beside these
-// cases keeps the copy equal to the shipped member).
+// extenders. `windows.onTerminalCreate` is 86's own two lines, re-typed
+// because the loader is not sliced in here (#242's twin pin keeps this copy and
+// the eight others equal to the shipped member).
 function modCtx(id) {
     const rec = { id: id, unloads: [] };
     const ctx = {
@@ -13981,9 +13984,8 @@ function modCtx(id) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -14260,6 +14262,125 @@ CASES.costs_nothing_until_used = function () {
              badOff: typeof bad };
 };
 
+// #242: the LATE replay. registerTerminalCreate hands the unsubscribe to the
+// loader's arm BEFORE it replays, so a replayed cb that disables its own mod
+// drains it, and the replay stops at the next window.
+CASES.late_replay_disables_its_mod = function () {
+    const baseline = termCreateCbs.length;
+    openTerminal();
+    openTerminal();                      // two open, so a stop is observable
+    const m = modCtx('self');
+    const calls = [];
+    const off = m.ctx.windows.onTerminalCreate(function (info) {
+        calls.push(info.win.id);
+        if (calls.length === 1) _runUnloads(m.rec);
+    });
+    const callsAfterSub = calls.slice();
+    const cbsAfter = termCreateCbs.length;
+    const unloadsAfter = m.rec.unloads.length;
+    openTerminal();                      // a later terminal is never delivered
+    const offType = typeof off;
+    off();                               // inert by now
+    return { baseline: baseline, calls: calls, callsAfterSub: callsAfterSub,
+             cbsAfter: cbsAfter, unloadsAfter: unloadsAfter, offType: offType,
+             cbsAfterOff: termCreateCbs.length };
+};
+
+// ...the window/teardown variant, through 86c's wrapper: the replayed cb
+// registers a per-window teardown, closes its own window, then disables.
+CASES.late_replay_closes_its_window_and_disables_its_mod = function () {
+    const baseline = termCreateCbs.length;
+    openTerminal();
+    const w2 = openTerminal();
+    const m = modCtx('self');
+    const calls = [];
+    const log = [];
+    let bagHasTeardown = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        calls.push(info.win.id);
+        if (calls.length !== 1) return;
+        bagHasTeardown = typeof info.onModTeardown === 'function';
+        const id = info.win.id;
+        info.onModTeardown(function () { log.push('td:' + id); });
+        closeWindow(id);
+        _runUnloads(m.rec);
+    });
+    const cbsAfter = termCreateCbs.length;
+    const unloadsAfter = m.rec.unloads.length;
+    openTerminal();
+    const w2Cleanups = w2.cleanups.length;   // read before w2 closes
+    closeWindow(w2.id);
+    return { baseline: baseline, calls: calls, log: log,
+             bagHasTeardown: bagHasTeardown, cbsAfter: cbsAfter,
+             unloadsAfter: unloadsAfter, w2Cleanups: w2Cleanups,
+             live: Array.from(m.rec.winTeardowns || []).length,
+             windows: windows.size };
+};
+
+// Core's own arm contract: an arm that calls off() gets no delivery at all...
+CASES.arm_that_unsubscribes_is_not_replayed = function () {
+    const baseline = termCreateCbs.length;
+    openTerminal();
+    const calls = [];
+    registerTerminalCreate(function (info) { calls.push(info.win.id); },
+                           function (o) { o(); });
+    return { baseline: baseline, calls: calls, cbsAfter: termCreateCbs.length };
+};
+
+// ...and an arm that throws has the registration rolled back (fail closed).
+CASES.a_throwing_arm_rolls_back = function () {
+    const baseline = termCreateCbs.length;
+    openTerminal();
+    const calls = [];
+    const off = registerTerminalCreate(
+        function (info) { calls.push(info.win.id); },
+        function () { throw new Error('arm failed'); });
+    openTerminal();
+    return { baseline: baseline, calls: calls, cbsAfter: termCreateCbs.length,
+             offType: typeof off };
+};
+
+// A dead mod registers nothing: neither from inside its own drain nor from a
+// ctx it kept after the disable. Either would land on a list never drained.
+CASES.a_dead_mod_registers_nothing = function () {
+    const baseline = termCreateCbs.length;
+    openTerminal();
+    const m = modCtx('self');
+    const calls = [];
+    let inner = null;
+    m.ctx.onUnload(function () {
+        inner = m.ctx.windows.onTerminalCreate(function (info) {
+            calls.push('a:' + info.win.id);
+        });
+    });
+    _runUnloads(m.rec);
+    const late = m.ctx.windows.onTerminalCreate(function (info) {
+        calls.push('b:' + info.win.id);
+    });
+    openTerminal();
+    return { baseline: baseline, calls: calls, cbsAfter: termCreateCbs.length,
+             unloadsAfter: m.rec.unloads.length,
+             innerType: typeof inner, lateType: typeof late };
+};
+
+// One function registered twice is two registrations: B's off() twice (a
+// manual off, then the teardown's) never removes A's.
+CASES.one_function_twice_is_two_registrations = function () {
+    const baseline = termCreateCbs.length;
+    const calls = [];
+    const shared = function (info) { calls.push(info.win.id); };
+    const offA = registerTerminalCreate(shared);
+    const offB = registerTerminalCreate(shared);
+    offB();
+    offB();
+    openTerminal();
+    const cbsMid = termCreateCbs.length;
+    offA();
+    openTerminal();
+    return { baseline: baseline, calls: calls, cbsMid: cbsMid,
+             cbsAfter: termCreateCbs.length };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -14486,6 +14607,161 @@ def test_the_hook_costs_nothing_until_a_mod_uses_it(teardown_harness):
     assert r["cbs"] == 0, "the wrapper broke onTerminalCreate's unsubscribe"
     assert r["badOff"] == "function", \
         "a malformed subscribe must return an inert unsubscribe, not throw"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_late_terminal_create_replay_that_disables_its_mod_leaks_no_callback(
+        teardown_harness):
+    # #242: the unsubscribe is armed BEFORE the replay, so the disable inside
+    # it drains the create callback, and the replay stops at the next window.
+    r = _run_teardown(teardown_harness, "late_replay_disables_its_mod")
+    assert r["errors"] == []
+    assert r["callsAfterSub"] == ["h1:1"], \
+        "the replay kept delivering to a mod that had disabled itself"
+    assert r["calls"] == ["h1:1"], "a later terminal reached a disabled mod"
+    assert r["cbsAfter"] == r["baseline"], "the create callback leaked"
+    assert r["unloadsAfter"] == 0, "an unsubscribe landed on the drained list"
+    assert r["offType"] == "function"
+    assert r["cbsAfterOff"] == r["baseline"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_late_terminal_create_replay_that_closes_its_window_and_disables_its_mod_leaks_nothing(
+        teardown_harness):
+    r = _run_teardown(teardown_harness,
+                      "late_replay_closes_its_window_and_disables_its_mod")
+    assert r["errors"] == []
+    assert r["bagHasTeardown"] is True, "86c's wrapper is not in the chain"
+    assert r["calls"] == ["h1:1"]
+    assert r["log"] == ["td:h1:1"], \
+        "the teardown must fire once, by the close, and never again"
+    assert r["cbsAfter"] == r["baseline"]
+    assert r["unloadsAfter"] == 0
+    assert r["w2Cleanups"] == 0, "a window after the disable was decorated"
+    assert r["live"] == 0
+    assert r["windows"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_terminal_create_arm_that_unsubscribes_is_not_replayed(
+        teardown_harness):
+    r = _run_teardown(teardown_harness, "arm_that_unsubscribes_is_not_replayed")
+    assert r["errors"] == []
+    assert r["calls"] == [], "a registration the arm removed was replayed"
+    assert r["cbsAfter"] == r["baseline"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_terminal_create_arm_rolls_the_registration_back(
+        teardown_harness):
+    r = _run_teardown(teardown_harness, "a_throwing_arm_rolls_back")
+    assert r["errors"] == []
+    assert r["calls"] == [], "an unowned registration was delivered"
+    assert r["cbsAfter"] == r["baseline"], "an unowned registration was kept"
+    assert r["offType"] == "function"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_mod_gets_no_terminal_create_registration(teardown_harness):
+    r = _run_teardown(teardown_harness, "a_dead_mod_registers_nothing")
+    assert r["errors"] == []
+    assert r["calls"] == [], "a dead mod's subscription was delivered"
+    assert r["cbsAfter"] == r["baseline"]
+    assert r["unloadsAfter"] == 0
+    assert r["innerType"] == "function" and r["lateType"] == "function", \
+        "a refused subscribe must return an inert unsubscribe, not throw"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_function_registered_twice_for_terminal_create_is_two_registrations(
+        teardown_harness):
+    r = _run_teardown(teardown_harness, "one_function_twice_is_two_registrations")
+    assert r["errors"] == []
+    assert r["calls"] == ["h1:1"], "B's off() removed A's registration"
+    assert r["cbsMid"] == r["baseline"] + 1
+    assert r["cbsAfter"] == r["baseline"]
+
+
+def test_terminal_create_arms_its_unsubscribe_before_the_replay():
+    # #242: pinned on the shipped code, apart from what the cases observe --
+    # the cases run harness copies of the loader member, so a loader-only
+    # regression is visible here and in the twin pin below, nowhere else.
+    core = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    raw = _frag_fn(core, "function registerTerminalCreate(cb, arm) {")
+    assert raw.count("if (typeof arm === 'function') {") == 1
+    code = _js_strip_comments_and_strings(raw)
+    # String contents are blanked here, so the literal is checked on the raw
+    # body above and the guard's shape (fail closed) in code.
+    guarded = re.findall(r"if \(typeof arm === '\s+'\) \{\s*"
+                         r"try \{ arm\(off\); \} catch \(_\) \{ off\(\); \}\s*\}",
+                         code)
+    assert len(guarded) == 1, "arm(off) is not under its guard, or fails open"
+    emit = "_emitTerminalCreate(win, entry)"
+    assert code.count("arm(off)") == 1
+    assert code.count(emit) == 1
+    assert code.index("arm(off)") < code.index(emit), \
+        "the unsubscribe is armed after the replay"
+    recheck = "if (termCreateCbs.indexOf(entry) === -1) break;"
+    assert code.count(recheck) == 1
+    loop = code.index("for (const win of Array.from(windows.values())) {")
+    assert loop < code.index(recheck) < code.index(emit), \
+        "the replay does not recheck liveness before each delivery"
+    assert code.count("termCreateCbs.push(entry);") == 1
+    assert "termCreateCbs.push(cb)" not in code
+    flat = " ".join(_js_strip_comments_and_strings(
+        _frag_fn(_loader_src(), "function makeCtx(modId, rec) {")).split())
+    guard = "if (rec.unloading) return function () {};"
+    armed = ("return registerTerminalCreate(cb, "
+             "function (off) { rec.unloads.push(off); });")
+    assert flat.count(guard) == 1 and flat.count(armed) == 1
+    assert flat.index(guard) < flat.index(armed)
+    assert "const off = registerTerminalCreate(cb)" not in flat
+
+
+def _terminal_create_members(src):
+    """Every `onTerminalCreate: function (cb) { ... }` in `src`, whitespace-
+    collapsed, closed on its MATCHING brace -- so the loader's `},` and the
+    one-line harnesses' `} } };` both end at the member's own `}`."""
+    flat = " ".join(src.split())
+    head = "onTerminalCreate: function (cb) {"
+    out = []
+    i = flat.find(head)
+    while i != -1:
+        depth = 0
+        for j in range(i + len(head) - 1, len(flat)):
+            if flat[j] == "{":
+                depth += 1
+            elif flat[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        assert depth == 0, "unbalanced onTerminalCreate member"
+        out.append(flat[i:j + 1])
+        i = flat.find(head, j)
+    return out
+
+
+def test_every_harness_retypes_the_loader_terminal_create_member_verbatim():
+    # #242: the loader is not sliced into the node harnesses, so each re-types
+    # its member. All nine copies must be the shipped text, or a case is
+    # testing a fiction (the old push-after-replay order, say).
+    shipped = _terminal_create_members(
+        _frag_fn(_loader_src(), "function makeCtx(modId, rec) {"))
+    assert shipped == [
+        "onTerminalCreate: function (cb) { "
+        "if (rec.unloading) return function () {}; "
+        "return registerTerminalCreate(cb, "
+        "function (off) { rec.unloads.push(off); }); }"]
+    # The served page carries the loader itself: one member, the shipped one.
+    assert _terminal_create_members(INDEX_HTML) == shipped
+    copies = {name: val for name, val in globals().items()
+              if name != "INDEX_HTML" and isinstance(val, str)
+              and "onTerminalCreate: function (cb)" in val}
+    assert len(copies) == 9, sorted(copies)
+    for name, val in copies.items():
+        assert _terminal_create_members(val) == shipped, \
+            f"{name} re-types a stale ctx.windows.onTerminalCreate"
+        assert "const off = registerTerminalCreate(cb)" not in val, name
 
 
 # --------------------------------------------------------------------------- #
@@ -15529,9 +15805,8 @@ function bootGitBare() {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -24428,9 +24703,8 @@ function modCtx(id) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -25116,9 +25390,8 @@ function modCtx(id) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -25626,9 +25899,8 @@ function modCtx(id) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -26355,9 +26627,8 @@ function modCtx(id, opts) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -32182,9 +32453,8 @@ function modCtx(id) {
         },
         windows: {
             onTerminalCreate: function (cb) {
-                const off = registerTerminalCreate(cb);
-                rec.unloads.push(off);
-                return off;
+                if (rec.unloading) return function () {};
+                return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); });
             },
         },
     };
@@ -32712,7 +32982,8 @@ function modCtx(id) {
     const ctx = { id: id, ctxVersion: 1,
         onUnload: function (fn) { if (typeof fn === 'function') rec.unloads.push(fn); },
         windows: { onTerminalCreate: function (cb) {
-            const off = registerTerminalCreate(cb); rec.unloads.push(off); return off; } } };
+            if (rec.unloading) return function () {};
+            return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); }); } } };
     _applyCtxExtenders(ctx, rec);
     return { ctx: ctx, rec: rec };
 }
@@ -33025,7 +33296,8 @@ function modCtx(id) {
     const ctx = { id: id, ctxVersion: 1,
         onUnload: function (fn) { if (typeof fn === 'function') rec.unloads.push(fn); },
         windows: { onTerminalCreate: function (cb) {
-            const off = registerTerminalCreate(cb); rec.unloads.push(off); return off; } } };
+            if (rec.unloading) return function () {};
+            return registerTerminalCreate(cb, function (off) { rec.unloads.push(off); }); } } };
     _applyCtxExtenders(ctx, rec);
     return { ctx: ctx, rec: rec };
 }
