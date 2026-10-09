@@ -121,6 +121,7 @@
     "_ctxServerStoreUpdate",
     "_ctxServices",
     "_ctxSignal",
+    "_ctxTerminalControl",
     "_ctxTerminalFont",
     "_ctxTerminalModes",
     "_ctxTerminalTaps",
@@ -131,6 +132,8 @@
   ],
   "info": [
     "info.cellDims",
+    "info.control",
+    "info.onControlChanged",
     "info.onModTeardown",
     "info.onModesChanged",
     "info.onResize",
