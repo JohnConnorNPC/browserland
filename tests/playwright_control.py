@@ -382,6 +382,11 @@ try:
         check(st["rect"] == before["rect"] and st["loc"] == before["loc"] and st["chip"],
               "P1 claim: same box, same layout slot, chip kept")
         check(hooks(page) - h0 == 1, "P1 claim: exactly one controlStateChanged")
+        # Both re-dial loops (75's heal tick, 63's auth success) reach a
+        # socketless window; guard G is what refuses them.
+        page.wait_for_timeout(4500)
+        check(PROXY.opens_since(t_claim) == [] and win(page)["controlled"],
+              "P1 claim: no re-dial while controlled across two heal ticks")
         BG.run(PROD.out(b"CTLMARK_239\r\n"))
         page.wait_for_timeout(1200)
         check(not page.evaluate(BUF_HAS, [KEY, "CTLMARK_239"]),
@@ -455,9 +460,14 @@ try:
                 if r.url.endswith("/session/control") and r.method == "POST" else None)
         t3 = time.time()
         h0 = hooks(page)
+        # Polls stalled: 75's heal loop only re-dials a host whose poll
+        # answered, so the one attach below can only be leaveControlled's.
+        PROXY.stall_polls = True
+        page.wait_for_timeout(2500)
         page.click(".term-window[data-session-id=\"%s\"] .term-ctl-take" % KEY)
         ok = wait_for(page, FREE_ATTACHED, 10, KEY)
         page.wait_for_timeout(800)
+        PROXY.stall_polls = False
         cid = page.evaluate("CLIENT_ID")
         check(ok and posts == [{"id": str(WID), "op": "release", "gen": live["gen"], "clientId": cid}],
               "P3 take back: one POST with the live gen and this browser's clientId")
@@ -561,11 +571,16 @@ try:
         PROXY.stall_polls = False
 
         # ---- P13 Close does not release; the chip stays marked -----------------
-        page.evaluate("(k) => closeWindow(k)", KEY)
-        page.wait_for_timeout(2500)
+        # Sampled from the close on, every 100 ms for 2.5 s: a record pruned
+        # by the close would unmark the chip until the next poll re-marks it.
+        marks = page.evaluate("""async (k) => { closeWindow(k); const out = [];
+            for (let i = 0; i < 25; i++) {
+                const c = document.querySelector('.taskbar-item[data-session-id="' + CSS.escape(k) + '"]');
+                out.push(!!(c && c.classList.contains('controlled')));
+                await new Promise(r => setTimeout(r, 100)); }
+            return out; }""", KEY)
         check(live_controller() not in (None, "gone"), "P13 close: closing the window released nothing")
-        check(page.evaluate("(k) => { const c = document.querySelector('.taskbar-item[data-session-id=\"' + CSS.escape(k) + '\"]'); return !!(c && c.classList.contains('controlled')); }", KEY),
-              "P13 close: the chip (no window) stays .controlled")
+        check(all(marks), "P13 close: the chip (no window) stays .controlled from the close on (%d/25)" % sum(marks))
 
         # ---- P5 reload mid-control: re-enter from GET /sessions, never attach ------
         open_window(page)
