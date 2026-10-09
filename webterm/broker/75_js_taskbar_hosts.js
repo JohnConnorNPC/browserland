@@ -223,6 +223,9 @@
             // stalls its body can never wedge refreshTaskbar's in-flight guard.
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+            // #239: when this request left, so a row it carries is only taken
+            // over a control state recorded before then (84b, R3).
+            const sentAt = performance.now();
             try {
                 const r = await hostFetch(host, '/sessions',
                                       { signal: ctrl.signal, timeoutMs: 0 });
@@ -255,6 +258,7 @@
                 st.authNeeded = false;
                 authPrompted.delete(host.id);
                 st.sessions = list;
+                st.sessionsSentAt = sentAt;
                 // This answer has not been consumed by a tick yet. Ticks no
                 // longer wait for the poll, so without this a tick that reused
                 // last-good data would count a window's absence a SECOND time
@@ -782,6 +786,10 @@
                         // brokers: null)
                         mcp_scope: (typeof s.mcp_scope === 'string'
                                     && s.mcp_scope) ? s.mcp_scope : null,
+                        // #239 (#238): who controls it. Absent on an older
+                        // broker, which is "unknown", never "free".
+                        controllerKnown: ('controller' in s),
+                        controller: ('controller' in s) ? s.controller : null,
                         stale,
                         hostId: host.id,
                         hostLabel: host.label,
@@ -901,6 +909,10 @@
             const itemsHost = document.getElementById('taskbar-items');
             for (const [key, sess] of merged) {
                 sessions.set(key, sess);
+                // #239: BEFORE the pending opens below, so a window opened on
+                // this tick is built from this row's control state.
+                applyControlRow(key, sess,
+                                pollStateFor(sess.hostId).sessionsSentAt);
                 // Passive title sync — reflect the producer's title and the
                 // broker-stamped host together.
                 const win = windows.get(key);
@@ -1041,12 +1053,17 @@
                     if (win.missingPolls >= MISSING_POLLS_CLOSE) {
                         el.remove();
                         sessions.delete(key);
+                        // #239: the session is gone and its window closes
+                        // just below; until then (the grace polls) the
+                        // control record stays with the open window.
+                        delete terminalControl[key];
                         showNotice('session ' + win.sid + ' disappeared');
                         closeWindow(key);
                     }
                 } else {
                     el.remove();
                     sessions.delete(key);
+                    delete terminalControl[key];   // #239: no window, no chip
                 }
             }
             // Every host's latest answer has now been accounted for. Cleared

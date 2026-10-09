@@ -23,8 +23,9 @@
         //     and a broker restart (whose gens are re-seeded from the clock);
         //   - a /control reconnect forgets that host's gens
         //     (resetControlBaselines), so the next view per key is accepted.
-        // A free poll row carries no gen; it is recorded as gen null, which
-        // means "no baseline": the next view of any gen is accepted.
+        // A free poll row carries no gen: over a free record it keeps that
+        // record's gen; over a controlled one it is recorded as gen null,
+        // "no baseline", so the next view of any gen is accepted.
         //
         // Declarations only: nothing below runs at evaluation time.
 
@@ -109,6 +110,24 @@
             }
             if (changed) controlStateChanged(key);
             return true;
+        }
+
+        // A /sessions row (75's merged record, `sentAt` = when its poll left).
+        // A row from a broker without `controller` says nothing. A free row
+        // has no gen: it keeps the one already recorded when the record was
+        // free too, else records null ("no baseline").
+        function applyControlRow(key, sess, sentAt) {
+            if (!sess || !sess.controllerKnown) return false;
+            const c = sess.controller;
+            if (c && typeof c === 'object') {
+                return applyControlView(key, { state: 'controlled', label: c.label,
+                                               since: c.since, gen: c.gen },
+                                        'poll', sentAt);
+            }
+            const rec = terminalControl[String(key)];
+            const gen = (rec && rec.state === 'free') ? rec.gen : null;
+            return applyControlView(key, { state: 'free', label: null,
+                                           since: null, gen: gen }, 'poll', sentAt);
         }
 
         function transitionControlledWindow(win, view) {

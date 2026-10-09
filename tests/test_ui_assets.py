@@ -31471,3 +31471,72 @@ def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
     # The overlay is a sibling of .xterm, so nothing may dim .term-body itself.
     assert ".term-window.controlled .term-body {" not in css
     assert ".taskbar-item.controlled {" in css
+
+
+def test_controlled_view_poll_rows(tmp_path):
+    if NODE is None:
+        pytest.skip("node not installed")
+    r = _node239(tmp_path, _sm239() + _fn239(
+        "84b_js_controlled_view.js", "function applyControlRow(") + r"""
+const out = {};
+// An older broker's row has no `controller`: unknown, never "free".
+out.unknown = applyControlRow('h:1', {controllerKnown: false, controller: null}, 10);
+out.unknownRec = 'h:1' in terminalControl;
+// A free row over a free record keeps that record's gen...
+terminalControl['h:2'] = {state: 'free', label: null, since: null, gen: 30, at: 1};
+applyControlRow('h:2', {controllerKnown: true, controller: null}, 5);
+out.keptGen = terminalControl['h:2'].gen;
+// ...and over a controlled one records "no baseline" (gen null), so a later
+// push of any gen is taken (a forged or pre-restart gen cannot pin it).
+terminalControl['h:3'] = {state: 'controlled', label: 'p', since: 1, gen: 1000, at: 1};
+applyControlRow('h:3', {controllerKnown: true, controller: null}, 5);
+out.nullGen = terminalControl['h:3'].gen;
+out.thenPush = applyControlView('h:3', {state: 'controlled', label: 'q', since: 2, gen: 4}, 'push');
+// A controlled row carries its own gen.
+applyControlRow('h:4', {controllerKnown: true,
+                        controller: {label: 'phone', since: 9, gen: 77}}, 5);
+out.controlled = terminalControl['h:4'];
+console.log(JSON.stringify(out));
+""")
+    assert r["unknown"] is False and r["unknownRec"] is False
+    assert r["keptGen"] == 30
+    assert r["nullGen"] is None and r["thenPush"] is True
+    assert {k: r["controlled"][k] for k in ("state", "label", "since", "gen")} \
+        == {"state": "controlled", "label": "phone", "since": 9, "gen": 77}
+
+
+def test_controlled_view_sources_are_wired():
+    s64 = _src239("64_js_sessions_poll_control.js")
+    # The push precedes the lease-status filter that drops every other type,
+    # and a new /control socket forgets that host's gens (a broker restart
+    # re-seeds them from its clock).
+    assert s64.index("msg.type === 'terminal_control'") \
+        < s64.index("if (!msg || msg.type !== 'status') return;")
+    assert "applyControlView(controlKey(hid, msg.id), msg, 'push');" in s64
+    opener = s64[s64.index("ws.onopen = () => {"):s64.index("ws.onmessage = (ev) => {")]
+    assert "resetControlBaselines(hid);" in opener
+    s75 = _src239("75_js_taskbar_hosts.js")
+    poll = s75[s75.index("async function pollHost(host) {"):
+               s75.index("function pollHostOnce(host) {")]
+    assert poll.index("const sentAt = performance.now();") \
+        < poll.index("await hostFetch(host, '/sessions'")
+    assert "st.sessionsSentAt = sentAt;" in poll
+    assert "controllerKnown: ('controller' in s)," in s75
+    # The row is applied BEFORE the pending opens, so a window opened on this
+    # tick is built from it.
+    assert s75.index("applyControlRow(key, sess,") \
+        < s75.index("for (const [key, deadline] of Array.from(pendingOpens))")
+    # Pruned at BOTH removal sites, and with an open window only where it is
+    # closed (MISSING_POLLS_CLOSE), never during the grace polls.
+    removal = s75[s75.index("if (win.missingPolls >= MISSING_POLLS_CLOSE) {"):]
+    removal = removal[:removal.index("for (const st of hostPolls.values()) st.fresh = false;")]
+    assert removal.count("delete terminalControl[key];") == 2
+    grace = s75[s75.index("win.missingPolls = (win.missingPolls || 0) + 1;"):
+                s75.index("if (win.missingPolls >= MISSING_POLLS_CLOSE) {")]
+    assert "terminalControl" not in grace
+    s67 = _src239("67_js_window_lifecycle.js")
+    assert s67.index("seedControlledWindow(win);") < s67.index("detachGateAttach(win);")
+    s73 = _src239("73_js_window_runtime.js")
+    assert "applyControlView(controlKey(win.hostId, win.sid), data, 'ws');" in s73
+    # The socket's first `resized` is held for its first `control` frame.
+    assert "if (firstResized) {" in s73 and "heldResized = data;" in s73

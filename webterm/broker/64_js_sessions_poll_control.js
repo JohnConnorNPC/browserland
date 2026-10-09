@@ -112,7 +112,7 @@
         // key -> merged session object (built in refreshTaskbarInner):
         //   {key, id (real numeric), sid (String(id)), title, cols, rows,
         //    host, pid, kind, agent, cwd, profile, mcp, mcpKnown, mcp_scope,
-        //    stale, hostId, hostLabel}
+        //    stale, hostId, hostLabel, controllerKnown, controller}
         // The merge copies those fields BY NAME, so a new /sessions field
         // reaches the page only once it is added there too.
         // Keys are host-qualified '<hostId>:<windowId>' (window ids are
@@ -330,6 +330,12 @@
                 if (rec.ws !== ws) { try { ws.close(); } catch (_) {} return; }
                 rec.attempts = 0;
                 rec.lastOpenAt = Date.now();
+                // #239: a new /control socket may be a new broker run, whose
+                // control gens are re-seeded from its clock: forget this
+                // host's, so its next view per terminal is taken whatever its
+                // gen. (A 1012 close for a stalled send lands here too, via
+                // scheduleControlReattach.)
+                resetControlBaselines(hid);
                 if (rec.pingTimer) clearInterval(rec.pingTimer);
                 rec.pingTimer = setInterval(() => {
                     // App-level keepalive: an unknown-type JSON frame the broker
@@ -343,6 +349,13 @@
                 if (rec.ws !== ws) return;
                 let msg;
                 try { msg = JSON.parse(ev.data); } catch (_) { return; }
+                // #239 (#238): a terminal on this broker changed controller.
+                // The one way a controlled window, which holds no /ws, hears
+                // of a release it did not cause.
+                if (msg && msg.type === 'terminal_control') {
+                    applyControlView(controlKey(hid, msg.id), msg, 'push');
+                    return;
+                }
                 if (!msg || msg.type !== 'status') return;
                 onControlStatus(hid, msg);
             };

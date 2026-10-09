@@ -902,6 +902,10 @@
                 maybeSendInitialResize(win);
             }));
 
+            // #239: a terminal another device controls right now is built
+            // greyed, and the attach below is refused (attachWebSocket's guard).
+            seedControlledWindow(win);
+
             // #226: on the desktop the attach is gated on who owns the PTY —
             // a key this browser handed to its own browser window is built
             // WITHOUT attaching and parked minimized, and every other open
