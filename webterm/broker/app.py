@@ -6794,7 +6794,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return None, None, sanic_json({"error": "bad_id"}, status=400)
         entry = app.ctx.registry.get(sid)
         mode = _mcp_effective_mode(entry) if entry is not None else "off"
-        scope = _mcp_scope(request)
+        # #245: an admin's declared scope is ignored for reach (owner
+        # decision: it only tags the terminals the admin LAUNCHES), so the
+        # chokepoint runs unscoped for it. The off filter STAYS: mode gates
+        # terminal I/O, so to drive an off window the admin must first set
+        # it read/readwrite (#243's /mcp/window) — a deliberate, visible
+        # step, not a silent bypass.
+        scope = None if _mcp_is_admin(request) else _mcp_scope(request)
         if (entry is None or mode == "off"
                 or (scope is not None and entry.mcp_scope != scope)):
             return None, None, _mcp_unknown_or_off()
@@ -6831,13 +6837,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #230: a caller that declared a scope sees only the windows tagged
         # with it; an unscoped caller sees every window, as before. The mode
         # still applies either way: an off window is never listed.
+        # #245: an ADMIN sees every window whatever its scope, off windows
+        # included — its declared scope is ignored for visibility (it only
+        # tags the admin's own launches). Reads and input still honor each
+        # window's mode, so the off rows are visible, not yet drivable.
         scope = _mcp_scope(request)
+        admin = _mcp_is_admin(request)
         out = []
         for s in app.ctx.registry.session_summaries(default_mode):
             mode = s.get("mcp", "off")
-            if mode == "off":
+            if mode == "off" and not admin:
                 continue
-            if scope is not None and s["mcp_scope"] != scope:
+            if (scope is not None and not admin
+                    and s["mcp_scope"] != scope):
                 continue
             version = s.get("version", "") or ""
             entry_out = {"id": s["id"], "title": s["title"], "host": s["host"],

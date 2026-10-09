@@ -331,3 +331,103 @@ def test_mcp_responses_vary_on_admin_header(tmp_path, monkeypatch):
     vary = resp.headers.get("Vary", "")
     assert MCP_ADMIN_HEADER in vary
     assert "X-Browserland-Scope" in vary
+
+
+# ---- A3: admin reach on the existing surface -------------------------------
+
+from webterm.broker.registry import WindowEntry  # noqa: E402
+
+
+class _Producer:
+    """Producer double: an entry holder that records nothing (the A3 cells
+    exercise broker-local gates only — the chokepoint's 404 fires before any
+    RPC, and /mcp/pace is broker-local)."""
+
+    def __init__(self):
+        self.entry = None
+
+
+def _window(app, wid, scope=None, mcp_mode=None):
+    """A live entry tagged ``scope``/``mcp_mode``, injected straight into the
+    registry the way tests/test_mcp_scope.py's ``_window`` does."""
+    ws = _Producer()
+    entry = WindowEntry(wid, 111, "t", 80, 24, ws, kind="agent")
+    entry.mcp_scope = scope
+    entry.mcp_mode = mcp_mode
+    ws.entry = entry
+    app.ctx.registry._entries[wid] = entry
+    return entry
+
+
+def test_admin_lists_every_window_including_off_and_foreign_scope(
+        tmp_path, monkeypatch):
+    """#245: an admin lists every window whatever its scope or mode, each
+    with its RAW scope tag and effective mode — including an off window and
+    one tagged with a scope the admin did NOT declare. A declared scope on
+    the admin call changes nothing (ignored for visibility)."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _window(app, 5, scope="a", mcp_mode="read")
+    _window(app, 6, scope="other", mcp_mode=None)      # effective: default off
+    _window(app, 7, mcp_mode="readwrite")              # untagged
+    for admin_scope in (None, "a"):
+        headers = [("Authorization", f"Bearer {MCP_TOKEN}")]
+        if admin_scope:
+            headers.append(("X-Browserland-Scope", admin_scope))
+        headers.append((MCP_ADMIN_HEADER, ADMIN_TOKEN))
+        _, resp = app.test_client.get("/mcp/terminals", headers=headers)
+        assert resp.status == 200
+        rows = {r["id"]: r for r in resp.json}
+        assert sorted(rows) == [5, 6, 7]
+        assert (rows[5]["scope"], rows[5]["mode"]) == ("a", "read")
+        assert (rows[6]["scope"], rows[6]["mode"]) == ("other", "off")
+        assert (rows[7]["scope"], rows[7]["mode"]) == (None, "readwrite")
+
+
+def test_admin_read_off_window_still_404_unknown_or_off(tmp_path,
+                                                         monkeypatch):
+    """#245: mode gates terminal I/O even for the admin — reading an off
+    window is the chokepoint's 404 until the admin sets the window's mode,
+    and the bytes are the shared construction a missing id answers."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _window(app, 5, scope="a", mcp_mode="off")
+    _, resp = _mcp(app, "/mcp/read", admin=ADMIN_TOKEN)
+    assert (resp.status, resp.json["error"]) == (404, "unknown_or_off")
+    _, gone = app.test_client.post(
+        "/mcp/read", json={"id": 999},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert (gone.status, gone.body) == (404, resp.body)
+
+
+def test_admin_reaches_a_foreign_scope_window(tmp_path, monkeypatch):
+    """#245: the chokepoint's scope clause is skipped for an admin — a window
+    tagged with a scope the admin never declared is reachable (/mcp/pace is
+    broker-local, so this proves the filter, not an RPC), while the same
+    window is the usual 404 for a scoped non-admin."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _window(app, 5, scope="theirs", mcp_mode="readwrite")
+    _, resp = _mcp(app, "/mcp/pace", admin=ADMIN_TOKEN,
+                   extra_headers=[("X-Browserland-Scope", "mine")])
+    assert (resp.status, resp.json.get("pace_ms")) == (200, 5)
+    _, resp = _mcp(app, "/mcp/pace",
+                   extra_headers=[("X-Browserland-Scope", "mine")])
+    assert (resp.status, resp.json["error"]) == (404, "unknown_or_off")
+
+
+def test_non_admin_sees_unchanged_listing_and_404_bytes(tmp_path,
+                                                         monkeypatch):
+    """#245: a non-admin's world is byte-identical to before — the off
+    window is still hidden from the listing, and the admin credential's
+    existence changes nothing about the 404s it gets."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _window(app, 5, scope="a", mcp_mode="off")
+    _window(app, 6, scope="a", mcp_mode="read")
+    _, resp = _mcp(app, "/mcp/terminals",
+                   extra_headers=[("X-Browserland-Scope", "a")])
+    assert [r["id"] for r in resp.json] == [6]
+    _, off = _mcp(app, "/mcp/read", extra_headers=[("X-Browserland-Scope",
+                                                    "a")])
+    _, foreign = _mcp(app, "/mcp/read",
+                      extra_headers=[("X-Browserland-Scope", "zzz")])
+    assert off.body == foreign.body
+    assert (off.status, off.json["error"]) == (404, "unknown_or_off")
