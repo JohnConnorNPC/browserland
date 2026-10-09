@@ -476,8 +476,10 @@ def control_status_frame(active: bool,
 # it, only its socket's input and resize reach the producer. Every surface
 # carries the same VIEW: {state: "free"|"controlled", label: str|None,
 # since: epoch ms|None, gen: int} (label/since are None when free; gen:
-# strictly increasing per terminal id, across same-id replacement and broker
-# restart; clients may order by it).
+# strictly increasing per terminal id within one broker run, across same-id
+# replacement too; clients may order by it. Across a broker restart it is
+# seeded from the wall clock in ms, which normally keeps it increasing but is
+# not guaranteed if the clock steps back, so clients re-baseline then).
 #   controller -> broker (/ws): {"type": "control", "op": "claim", "label": s}
 #                               {"type": "control", "op": "release"}
 #   broker -> /ws subscriber:   {"type": "control", **view}   (each change, and
@@ -496,27 +498,40 @@ CONTROL_LABEL_MAX = 64
 # Bidi_Control set (U+061C, U+200E-200F, U+202A-202E, U+2066-2069) as well as
 # invisible ones like U+200B and U+FEFF.
 _LABEL_CF_ALLOWED = frozenset("\u200c\u200d")
-# Control, surrogate, unassigned, line/paragraph separator.
+# Control, surrogate, unassigned, line/paragraph separator. Categories come
+# from the RUNNING Python's Unicode database (unicodedata.unidata_version; 3.10
+# on deploy), so a code point newer than it reads as unassigned and is refused.
 _LABEL_REFUSED_CATEGORIES = frozenset(("Cc", "Cs", "Cn", "Zl", "Zp"))
+# Letters, numbers, punctuation and symbols that still render as nothing
+# (Hangul fillers, the braille blank, the Khmer inherent vowels): they do not
+# count as the visible character a label must have.
+_LABEL_FILLERS = frozenset(map(chr, (0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800,
+                                     0x17B4, 0x17B5)))
 
 
 def control_label_ok(label: Any) -> bool:
     """Whether ``label`` is a valid claim label: a str of 1..CONTROL_LABEL_MAX
-    code points, not whitespace-only, with no control, surrogate, unassigned,
-    line/paragraph-separator or format character (ZWNJ/ZWJ excepted). The
-    label is shown to the owner verbatim, so it is refused, never repaired
-    (no normalization, no stripping)."""
+    code points with at least one visible character (a letter, number,
+    punctuation or symbol that is not a filler; so not whitespace-only, and
+    not only marks, joiners or variation selectors), and no control,
+    surrogate, unassigned, line/paragraph-separator or format character
+    (ZWNJ/ZWJ excepted). The label is shown to the owner verbatim, so it is
+    refused, never repaired (no normalization, no stripping). The length cap
+    also bounds stacked combining marks."""
     if not isinstance(label, str):
         return False
-    if not 1 <= len(label) <= CONTROL_LABEL_MAX or not label.strip():
+    if not 1 <= len(label) <= CONTROL_LABEL_MAX:
         return False
+    visible = False
     for ch in label:
         cat = unicodedata.category(ch)
         if cat in _LABEL_REFUSED_CATEGORIES:
             return False
         if cat == "Cf" and ch not in _LABEL_CF_ALLOWED:
             return False
-    return True
+        if cat[0] in "LNPS" and ch not in _LABEL_FILLERS:
+            visible = True
+    return visible
 
 
 def control_view(state: str, label: Optional[str], since: Optional[int],

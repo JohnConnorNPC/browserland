@@ -455,9 +455,12 @@ that enforces it. A client feature-detects on that integer.
 
 Every surface carries one **view**: `{"state": "free"|"controlled", "label":
 <str|null>, "since": <epoch ms|null>, "gen": <int>}` (`label`/`since` are
-`null` when free). `gen` is strictly increasing per terminal id — across a
-same-id producer reconnect and a broker restart too — so clients may order
-views by it and drop any older than the last one they applied.
+`null` when free). Within one broker run `gen` is strictly increasing per
+terminal id — across a same-id producer reconnect too — so clients may order
+views by it and drop any older than the last one they applied. Across a broker
+restart it is seeded from the wall clock in milliseconds: that normally keeps
+it increasing, but it is **not guaranteed** if the clock steps back, so a client
+re-baselines (forgets its last `gen`) when the broker restarts.
 
 * **Claim / release, on the controller's own `/ws`** (so the grant can never
   outlive the socket): attach as usual (`/ws?session=<id>&clientId=<own id>`,
@@ -470,11 +473,15 @@ views by it and drop any older than the last one they applied.
   "reason": "bad_label"|"not_controller"|"bad_op"|"unknown_session",
   "session_id": <id>}` and leaves the socket open.
 * **Label**: 1–64 Unicode code points (a JS `length` can read up to twice
-  that), not whitespace-only, shown to the owner verbatim (never normalized).
-  Refused: any control, surrogate, unassigned, line/paragraph-separator or
-  format character, except ZWNJ/ZWJ (U+200C/U+200D) — so every bidi control
+  that), shown to the owner verbatim (never normalized). It needs at least one
+  visible character — a letter, number, punctuation or symbol other than the
+  fillers U+115F, U+1160, U+3164, U+FFA0, U+2800, U+17B4, U+17B5 — so a label of
+  only spaces, combining marks, joiners or variation selectors is refused.
+  Refused anywhere: any control, surrogate, unassigned, line/paragraph-separator
+  or format character, except ZWNJ/ZWJ (U+200C/U+200D) — so every bidi control
   (U+061C, U+200E–200F, U+202A–202E, U+2066–2069) and invisible ones like
-  U+200B/U+FEFF are out.
+  U+200B/U+FEFF are out. Categories come from the broker's Python Unicode
+  database, so a code point newer than it counts as unassigned.
 * **The gate**: while a controller holds a terminal, only that socket's input
   and resize reach the producer. Everyone else's, the lease holder's included,
   is dropped, exactly like a non-active socket's. With no controller the lease
@@ -493,8 +500,10 @@ views by it and drop any older than the last one they applied.
   every viewer as always. Nothing is remembered or restored on release — the
   next driver's first `resize` decides.
 
-**Telling everyone**, one ordered stream per terminal (each change is published
-in `gen` order, and every socket ends on the live view):
+**Telling everyone** (each change is published to the terminal's `/ws`
+subscribers in `gen` order, each send bounded at 0.5 s, and every socket ends on
+the live view; the `/control` pushes go out after, so two of them may arrive out
+of order — order them by `gen`):
 
 1. `/ws`, to every subscriber of that terminal: `{"type": "control", ...view}`
    on every change, and once on attach, right after `resized` and before the
@@ -502,7 +511,9 @@ in `gen` order, and every socket ends on the live view):
    "control", "state": "revoked", "by": "browser"|"claim", "gen": <new gen>}`.
 2. `/control`, to every connected browser: `{"type": "terminal_control",
    "id": <id>, ...view}` (a controlled desktop window has closed its `/ws`, so
-   this is how it hears of a release it did not cause).
+   this is how it hears of a release it did not cause). A terminal that exits
+   while controlled still gets its `free` view on both surfaces, after `exit`
+   and for an id that is already gone, so a page can clear its state.
 3. `GET /sessions` rows: `"controller": {"label", "since", "gen"} | null`, so a
    page that boots or rebuilds mid-control re-enters the state.
 
@@ -513,9 +524,9 @@ and keeps its socket as a watcher. Answers, in the order they are checked:
 `401 auth_required`; `400 bad_json` / `bad_id`; `404 unknown_session` (also for
 a terminal that is exiting); `400 bad_op` (`op` is not `"release"`); `400
 bad_gen` (not an integer ≥ 0; a boolean counts as bad); `409 {"ok": false,
-"error": "not_active"}` unless `clientId` (trimmed) equals the broker's active
-lease — **stricter than `PUT /state`**: with no active lease at all this also
-refuses, so a token alone never releases a controller; `409 {"ok": false,
+"error": "not_active"}` when another browser holds the lease (`clientId`,
+trimmed, is not the holder) — the same rule as `PUT /state`, so with no lease
+holder at all the browser token alone passes; `409 {"ok": false,
 "error": "stale_gen", "id", ...live view}` when the terminal is free or held at
 another `gen` (a double click or a crossed claim never releases a newer
 controller); `200 {"ok": true, "id", ...the new free view}`.

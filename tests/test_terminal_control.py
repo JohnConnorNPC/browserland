@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -29,6 +30,10 @@ from webterm.broker.registry import BrokerRegistry, run_producer_session
     "a\u200db",                                 # ZWJ (emoji sequences)
     "a\u200cb",                                 # ZWNJ
     " lead and trail ",
+    "a" + chr(0xFE0F),                          # a base + VS16
+    chr(0x1F468) + chr(0x200D) + chr(0x1F469) + chr(0x200D)
+    + chr(0x1F467),                             # an emoji ZWJ family
+    "a" + chr(0x301) * (protocol.CONTROL_LABEL_MAX - 1),   # zalgo, capped
 ])
 def test_control_label_accepts(label):
     assert protocol.control_label_ok(label) is True
@@ -54,6 +59,16 @@ def test_control_label_accepts(label):
     "ls\u2028",
     "ps\u2029",
     "unassigned\u0378",
+    # Nothing visible (#238 review R5): joiners, fillers, marks, selectors.
+    chr(0x200D),                                # ZWJ alone
+    chr(0x200C) * protocol.CONTROL_LABEL_MAX,   # ZWNJ only
+    chr(0x3164),                                # Hangul filler
+    chr(0x2800),                                # braille blank
+    chr(0x115F),                                # Hangul choseong filler
+    chr(0x17B4),                                # Khmer inherent vowel
+    chr(0x301),                                 # a lone combining mark
+    chr(0xFE0F),                                # VS16 alone
+    chr(0x301) * 3 + " ",
     None,
     5,
     b"bytes",
@@ -361,8 +376,11 @@ def test_old_entry_publication_in_flight_precedes_the_replacement():
         await asyncio.sleep(0.01)
         gate.set()
         await reg.drain_control()
-        assert hooked == [("controlled", g1), ("free", g2),
-                          ("controlled", g3)]
+        # The /control fan-out runs outside the publisher section, so pushes
+        # are ordered by gen, not arrival: all three, and the newest is the
+        # replacement's controller.
+        assert sorted(hooked, key=lambda v: v[1]) == [
+            ("controlled", g1), ("free", g2), ("controlled", g3)]
     asyncio.run(scenario())
 
 
@@ -455,13 +473,16 @@ def test_a_raising_hook_neither_loses_the_view_nor_the_next_change():
 def test_control_lock_map_is_bounded_by_live_ids():
     async def scenario():
         reg = BrokerRegistry()
-        for i in range(25):
+        for i in range(50):
             entry = await _registered(reg, 100 + i)
             a = FakeWS()
             entry.add_subscriber(a, "")
-            async with reg.control_section(entry.id):
+            async with reg.control_section(entry.id):   # as an attach does
                 pass
-            reg.claim(entry, a, "phone")
+            if i % 2:
+                # Controlled: its release publication runs a section too.
+                reg.claim(entry, a, "phone")
+            # Uncontrolled: only deregister itself can drop the lock.
             await reg.deregister(entry.id, entry)
             await reg.drain_control()
         assert reg._control_locks == {}
@@ -472,6 +493,14 @@ def test_control_lock_map_is_bounded_by_live_ids():
             pass
         assert list(reg._control_locks) == [500]
     asyncio.run(scenario())
+
+
+def test_gen_seed_is_the_wall_clock_in_ms():
+    # Across a restart gen is only as good as this seed (clients re-baseline
+    # then), but it must not start below the clock.
+    floor = int(time.time() * 1000)
+    reg = BrokerRegistry()
+    assert reg._control_seq >= floor
 
 
 def test_send_to_producer_if_rechecks_under_the_send_lock():
@@ -596,21 +625,24 @@ def test_relay_attach_reads_resized_before_any_control_change():
         ctl = FakeBrowser()
         tasks = [_attach(reg, ctx, entry, ctl, "ext-c")]
         await _settle()
+        g0 = entry.control_gen
         gate = asyncio.Event()
         late = FakeBrowser(gate_first=gate)
         tasks.append(_attach(reg, ctx, entry, late, "lease"))
         await _settle()                       # late's `resized` is held
         ctl.push({"type": "control", "op": "claim", "label": "phone"})
         await _settle()
+        g1 = entry.control_gen
         gate.set()
         await _settle()
         await reg.drain_control()
-        first = json.loads(late.sent[0])
-        assert first["type"] == "resized"
-        gens = [f["gen"] for f in late.controls()]
-        assert gens == sorted(gens)
-        assert late.controls()[-1] == _live_frame(entry)
-        assert late.controls()[-1]["state"] == "controlled"
+        # Exactly: resized, the PUBLISHED view at attach (still free at g0,
+        # though the claim had already committed), then the claim's own view.
+        frames = [json.loads(m) for m in late.sent if isinstance(m, str)]
+        seen = [(f["type"], f.get("state"), f.get("gen")) for f in frames]
+        assert seen == [("resized", None, None), ("control", "free", g0),
+                        ("control", "controlled", g1)]
+        assert frames[-1] == _live_frame(entry)
         for ws in (ctl, late):
             ws.hang_up()
         await asyncio.gather(*tasks)
@@ -711,6 +743,78 @@ def test_relay_controller_socket_closing_releases():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("how", ["replace", "exit"])
+def test_relay_attach_waiting_on_the_section_never_joins_a_dead_entry(how):
+    # Review R1: the attach takes the publisher section, which can wait; a
+    # replacement (its 1012 sweep) or an exit in that wait must not leave the
+    # socket subscribed to the dead entry.
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        old = await _registered(reg, 7)
+        held, release = asyncio.Event(), asyncio.Event()
+
+        async def hold():
+            async with reg.control_section(7):
+                held.set()
+                await release.wait()
+        holder = asyncio.get_running_loop().create_task(hold())
+        await held.wait()
+        page = FakeBrowser()
+        task = _attach(reg, ctx, old, page, "lease")
+        await _settle()                       # waiting on the section
+        if how == "replace":
+            new = await _registered(reg, 7)
+        else:
+            await reg.deregister(7, old)
+        release.set()
+        await holder
+        await asyncio.wait_for(task, 2)
+        assert page not in old.subscribers
+        assert [json.loads(m) for m in page.sent] == [
+            {"type": "error", "reason": "unknown_session", "session_id": 7}]
+        assert old.ws.sent == []              # no snapshot request either
+        if how == "replace":
+            assert page not in new.subscribers and new.ws.sent == []
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+def test_a_stalled_peer_never_blocks_an_attach():
+    # Review R2: a /control peer that never drains (the hook) and a /ws
+    # subscriber that never drains must not hold a new attach up.
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        unstall = asyncio.Event()
+
+        async def stalled_control_peer(wid, view):
+            await unstall.wait()
+        reg.on_control = stalled_control_peer
+        entry = await _registered(reg)
+        stuck = FakeWS(asyncio.Event())       # its sends never complete
+        ctl = FakeWS()
+        entry.add_subscriber(stuck, "")
+        entry.add_subscriber(ctl, "")
+        reg.claim(entry, ctl, "phone")
+        await asyncio.sleep(0)                # the publication is under way
+        page = FakeBrowser()
+        start = loop.time()
+        task = _attach(reg, ctx, entry, page, "lease")
+        while len(page.sent) < 2:
+            assert loop.time() - start < 1.0, page.sent
+            await asyncio.sleep(0.01)
+        assert [json.loads(m)["type"] for m in page.sent[:2]] == [
+            "resized", "control"]
+        assert stuck not in entry.subscribers  # dropped, like a failed send
+        unstall.set()
+        page.hang_up()
+        await task
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
 # ---- end to end: a broker subprocess and real sockets ----------------------
 #
 # The fixture follows tests/test_broker_e2e.py's broker_proc (same env, same
@@ -721,7 +825,6 @@ def test_relay_controller_socket_closing_releases():
 import os  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
-import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import websockets  # noqa: E402
@@ -839,6 +942,17 @@ async def _claim(ws, label="phone"):
     return await _until(ws, _is_control("controlled"))
 
 
+async def _processed(ws):
+    """A same-socket barrier: once this returns, the relay has handled every
+    frame ``ws`` sent before it (one task reads a socket in order), so a
+    frame it should have dropped can no longer reach the producer after a
+    marker another socket sends next. The probe is a release from a socket
+    that holds nothing, answered not_controller and changing nothing."""
+    await ws.send(json.dumps({"type": "control", "op": "release"}))
+    await _until(ws, lambda f: f.get("type") == "error"
+                 and f.get("reason") == "not_controller")
+
+
 def _session(base, wid):
     _, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
     return next(s for s in sessions if s["id"] == wid)
@@ -895,6 +1009,7 @@ def test_e2e_gate_while_controlled(broker):
         await holder_a.send(json.dumps({"type": "paste", "data": "h3"}))
         await holder_a.send(json.dumps({"type": "resize", "cols": 100,
                                         "rows": 30}))
+        await _processed(holder_a)
         await ctl.send(json.dumps({"type": "resize", "cols": 40,
                                    "rows": 20}))
         assert await _next_drive(prod_a) == {"type": "resize", "cols": 40,
@@ -966,6 +1081,7 @@ def test_e2e_second_claim_revokes_the_first(broker):
         assert await _until(first, _is_control()) == taken
         # The revoked socket stays open as a watcher, its input dropped.
         await first.send(json.dumps({"type": "input", "data": "x"}))
+        await _processed(first)
         await second.send(json.dumps({"type": "input", "data": "y"}))
         assert await _next_drive(prod) == {"type": "input", "data": "y"}
         for ws in (first, second, prod, lease):
@@ -1087,6 +1203,7 @@ def test_e2e_take_back_over_post_and_the_control_push(broker):
         assert _session(base, 238071)["controller"] is None
         page, _ = await _browser(port, 238071, "tc-post")
         await ctl.send(json.dumps({"type": "input", "data": "dropped"}))
+        await _processed(ctl)
         await page.send(json.dumps({"type": "input", "data": "page"}))
         assert await _next_drive(prod) == {"type": "input", "data": "page"}
         for ws in (ctl, page, prod, lease, other):
@@ -1183,17 +1300,26 @@ def test_post_session_control_refusal_ladder(tmp_path, monkeypatch):
     assert entry.controller is not None and entry.control_gen == gen
 
 
-def test_post_session_control_refuses_a_none_lease(tmp_path, monkeypatch):
-    # Owner ruling (Q6, STRICT): unlike PUT /state, a None lease refuses.
+def test_post_session_control_passes_on_a_none_lease(tmp_path, monkeypatch):
+    # Owner ruling (Q6, round 1): the PUT /state rule. With no lease holder
+    # the browser token alone passes, whatever clientId is sent.
     app = _control_app(tmp_path, monkeypatch)
     entry = _app_entry(app, 42)
-    _app_claim(app, entry)
     assert app.ctx.active_client_id is None
-    body = {"id": 42, "op": "release", "gen": entry.control_gen,
-            "clientId": "page"}
-    assert _post_control(app, body) == (
-        409, {"ok": False, "error": "not_active"})
-    assert _post_control(app, dict(body, clientId="")) == (
+    for client in ("page", "", None):
+        _app_claim(app, entry)
+        body = {"id": 42, "op": "release", "gen": entry.control_gen}
+        if client is not None:
+            body["clientId"] = client
+        status, resp = _post_control(app, body)
+        assert status == 200 and resp["state"] == "free"
+        assert entry.controller is None
+    # A lease held by another browser refuses.
+    _app_claim(app, entry)
+    app.ctx.active_client_id = "someone-else"
+    assert _post_control(app, {"id": 42, "op": "release",
+                               "gen": entry.control_gen,
+                               "clientId": "page"}) == (
         409, {"ok": False, "error": "not_active"})
     assert entry.controller is not None
 
@@ -1274,6 +1400,29 @@ def test_on_control_pushes_terminal_control_to_every_control_socket(
             dict({"type": "terminal_control", "id": 46}, **freed)]
 
 
+def test_terminal_control_push_is_bounded_per_socket(tmp_path, monkeypatch):
+    # Review R2: one stalled browser neither delays the others' push nor
+    # holds the publication open past CONTROL_SEND_TIMEOUT.
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 49)
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        stalled, healthy = FakeWS(asyncio.Event()), FakeWS()
+        app.ctx.control_clients = {"a": {stalled}, "b": {healthy}}
+        ws = FakeWS()
+        entry.add_subscriber(ws, "ext")
+        start = loop.time()
+        app.ctx.registry.claim(entry, ws, "phone")
+        await asyncio.wait_for(app.ctx.registry.drain_control(), 2)
+        return loop.time() - start, stalled, healthy
+    elapsed, stalled, healthy = asyncio.run(go())
+    assert elapsed < 1.0
+    assert stalled.sent == []
+    assert [json.loads(m)["type"] for m in healthy.sent] == [
+        "terminal_control"]
+
+
 def test_sessions_and_mcp_rows_report_the_controller(tmp_path, monkeypatch):
     app = _control_app(tmp_path, monkeypatch)
     entry = _app_entry(app, 47)
@@ -1300,7 +1449,9 @@ def test_wiki_documents_the_contract():
     assert "### Terminal control (#238)" in tr
     assert '`"terminal_control": 1`' in tr
     assert "**`POST /session/control`**" in tr
-    assert "**stricter than `PUT /state`**" in tr
+    assert "the same rule as `PUT /state`" in tr
+    assert "**not guaranteed** if the clock steps back" in tr
+    assert "needs at least one" in tr and "visible character" in tr
     assert "clients may order\nviews by it" in tr
     assert '"controlled":false' in tr
     hosts = (wiki / "Hosts-and-Multi-Browser.md").read_text(encoding="utf-8")

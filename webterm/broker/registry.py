@@ -52,6 +52,14 @@ def _whitelist_agent(value: Any) -> str:
 # /session/* calls can't pile Futures or executor jobs on one agent.
 RPC_MAX_INFLIGHT = 4
 
+# #238: the longest a control publication waits on ONE socket's send (the
+# revoked frame, a /ws subscriber's control frame, a /control socket's push).
+# There is no broker-wide send timeout to reuse; this bounds how long a stalled
+# peer can hold a terminal's publisher lock, which every /ws attach to that
+# terminal also takes. A /ws subscriber that misses it is dropped from the
+# entry like any failed send; a /control socket is only skipped for that push.
+CONTROL_SEND_TIMEOUT = 0.5
+
 
 class _PendingRpc:
     """One in-flight management RPC: the Future the endpoint awaits plus the
@@ -176,11 +184,11 @@ class WindowEntry:
         # release_by_gen / force_release) and register(); the relay gate
         # reads controller and revoked per frame. control_gen is the gen of
         # the current view (register() gives every new entry the next value of
-        # the registry's seq, so it is strictly increasing across a same-id
-        # replacement too: clients may order by it). closing is set
-        # synchronously once the entry is dying (an `exit` frame, deregister,
-        # replacement), so no control op lands on a terminal already known to
-        # be dead. revoked holds the sockets that lost the terminal (by POST
+        # the registry's seq, so within a broker run it is strictly increasing
+        # across a same-id replacement too: clients may order by it). closing
+        # is set synchronously once the entry is dying (an `exit` frame,
+        # deregister, replacement), so no control op lands on a terminal
+        # already known to be dead. revoked holds the sockets that lost the terminal (by POST
         # or another claim): they watch, and the gate drops their input even
         # if their clientId holds the lease, until they claim again.
         # published_view is the last view the ordered publisher finished
@@ -407,13 +415,15 @@ class BrokerRegistry:
         # state beside _lock and _waiters. None = no hook. Contract: register().
         self.on_register: Optional[
             Callable[[WindowEntry, Optional[WindowEntry]], None]] = None
-        # #238 terminal control. ONE broker-global gen sequence, seeded with
-        # epoch ms so a gen handed out before a restart is (barring a clock
-        # step back) never handed out again, and still far below 2**53 for
-        # JS. Every control change and every newly registered entry takes the
-        # next value, so gens are strictly increasing per terminal id, across
-        # same-id replacement too, with no carry-over: clients may order views
-        # by gen.
+        # #238 terminal control. ONE broker-global gen sequence. Every control
+        # change and every newly registered entry takes the next value, so
+        # within one broker run gens are strictly increasing per terminal id,
+        # across same-id replacement too, with no carry-over: clients may
+        # order views by gen. Across a restart it is only seeded from the wall
+        # clock in ms (far below 2**53 for JS): that normally keeps it
+        # increasing, but a clock step back (or more than one change per ms of
+        # the previous run's uptime) can reissue lower gens, so a client
+        # re-baselines when the broker restarts.
         self._control_seq = int(time.time() * 1000)
         # The ordered publisher: one asyncio.Lock per terminal ID (not per
         # entry, so an old entry's in-flight publication finishes before its
@@ -425,8 +435,10 @@ class BrokerRegistry:
         self._control_users: Dict[int, int] = {}
         self._control_tasks: Set["asyncio.Task"] = set()
         # The broker-installed /control push: ``await hook(window_id, view)``
-        # after each published change. None = no hook (tests). An Exception
-        # is logged and swallowed.
+        # after each published change, outside the terminal's publisher
+        # section (so a stalled browser never blocks an attach, and two pushes
+        # for one terminal may land out of order). None = no hook (tests). An
+        # Exception is logged and swallowed.
         self.on_control: Optional[
             Callable[[int, Dict[str, Any]], Awaitable[None]]] = None
 
@@ -621,8 +633,10 @@ class BrokerRegistry:
     # refusal reason the caller reports. The publication of every change runs
     # in a registry-owned task, serialized FIFO per terminal id: the revoked
     # frame (if any) to the controller that lost it, then that change's OWN
-    # view to every subscriber, then the on_control hook. So every socket gets
-    # every change, in gen order, and rests on the live view.
+    # view to every subscriber (each send bounded by CONTROL_SEND_TIMEOUT). So
+    # every /ws socket gets every change, in gen order, and rests on the live
+    # view. The on_control hook (the /control fan-out) runs after, outside
+    # that serialization: its pushes are ordered by gen, not by arrival.
 
     def is_live(self, entry: WindowEntry) -> bool:
         """Whether ``entry`` is the registered entry for its id and not dying.
@@ -707,20 +721,35 @@ class BrokerRegistry:
                        revoked_ws, by) -> None:
         async with self.control_section(entry.id):
             if revoked_ws is not None:
-                try:
-                    await revoked_ws.send(
-                        protocol.control_revoked_frame(by, view["gen"]))
-                except Exception:
-                    entry.remove_subscriber(revoked_ws)
-            await entry.broadcast_text(protocol.control_frame(view))
+                await self._bounded_send(
+                    entry, revoked_ws,
+                    protocol.control_revoked_frame(by, view["gen"]))
+            # Every subscriber at once, each bounded: a stalled socket holds
+            # the section (and so every attach to this terminal) for at most
+            # CONTROL_SEND_TIMEOUT, however many there are.
+            frame = protocol.control_frame(view)
+            await asyncio.gather(*(self._bounded_send(entry, sub, frame)
+                                   for sub in list(entry.subscribers)))
             entry.published_view = view
-            hook = self.on_control
-            if hook is not None:
-                try:
-                    await hook(entry.id, view)
-                except Exception:
-                    LOGGER.exception("on_control hook failed for window %s",
-                                     entry.id)
+        # The /control fan-out runs OUTSIDE the section, so a stalled browser
+        # never blocks an attach. Pushes for one terminal may then land out of
+        # order; a client orders them by gen.
+        hook = self.on_control
+        if hook is not None:
+            try:
+                await hook(entry.id, view)
+            except Exception:
+                LOGGER.exception("on_control hook failed for window %s",
+                                 entry.id)
+
+    @staticmethod
+    async def _bounded_send(entry: WindowEntry, sock, frame: str) -> None:
+        # A send that fails or misses CONTROL_SEND_TIMEOUT drops the socket
+        # from the entry, as broadcast_text drops a failed one.
+        try:
+            await asyncio.wait_for(sock.send(frame), CONTROL_SEND_TIMEOUT)
+        except Exception:
+            entry.remove_subscriber(sock)
 
     @contextlib.asynccontextmanager
     async def control_section(self, window_id: int):

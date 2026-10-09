@@ -91,7 +91,8 @@ from .launcher import LaunchError, Launcher, default_profiles
 # the per-window store that validates them (#228), and so are the scope
 # grammar and the header a client declares a scope on (#230).
 from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
-from .registry import BrokerRegistry, run_producer_session
+from .registry import (CONTROL_SEND_TIMEOUT, BrokerRegistry,
+                       run_producer_session)
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
 # desktop page or parse the wiki. These are the only production importers, so the
@@ -4280,14 +4281,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # order per terminal). A controlled desktop window has closed its /ws,
         # so this is how it learns of a release it did not cause. Remote
         # brokers' pages hold a /control here too, so they hear it as well.
+        # All at once, each bounded by CONTROL_SEND_TIMEOUT, so one stalled
+        # browser delays nobody else's push; a miss only skips this push.
         frame = protocol.terminal_control_frame(window_id, view)
         socks = [sock for group in list(app.ctx.control_clients.values())
                  for sock in list(group)]
-        for sock in socks:
+
+        async def _push(sock):
             try:
-                await sock.send(frame)
+                await asyncio.wait_for(sock.send(frame), CONTROL_SEND_TIMEOUT)
             except Exception as exc:
-                LOGGER.debug("terminal_control push failed: %s", exc)
+                LOGGER.debug("terminal_control push failed: %r", exc)
+        await asyncio.gather(*(_push(sock) for sock in socks))
 
     app.ctx.registry.on_control = _push_terminal_control
     # MCP HTTP interface runtime config (token + default mode + allow-launch +
@@ -6576,13 +6581,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "scope": scope})
 
     def _control_lease_refusal(client_id):
-        """#238: the lease gate for taking a terminal back. STRICTER than PUT
-        /state's _lease_refusal by owner ruling: a None lease refuses too, so
-        a token alone (no browser holding the lease) never releases a
-        controller. Costs the page nothing: its /control auto-activates a None
-        lease before it can see a controlled row. Returns the 409, or None."""
+        """#238: the lease gate for taking a terminal back, the PUT /state
+        rule by owner ruling (_lease_refusal's semantics): 409 not_active only
+        when some browser holds the lease and ``client_id`` is not it. With no
+        lease holder (a fresh broker, or the holder's last /control closed:
+        there is no auto-promote) the POST passes on the browser token alone,
+        as PUT /state does. Returns the 409, or None."""
         active = app.ctx.active_client_id
-        if active is None or client_id != active:
+        if active is not None and client_id != active:
             return sanic_json({"ok": False, "error": "not_active"},
                               status=409)
         return None
@@ -6592,9 +6598,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # controller. Body {id, op: "release", gen, clientId}. The refusal
         # ladder, in order: 401 auth_required; 400 bad_json/bad_id; 404
         # unknown_session (a dying entry too); 400 bad_op; 400 bad_gen (not
-        # an int >= 0, a bool included); 409 not_active (the lease, above);
-        # 409 stale_gen with the live view (free, or another controller's
-        # gen: a double click or a crossed claim never releases a newer one);
+        # an int >= 0, a bool included); 409 not_active (another browser
+        # holds the lease, above); 409 stale_gen with the live view (free, or
+        # another controller's gen: a double click or a crossed claim never
+        # releases a newer one);
         # 200 with the new free view. The released controller is sent
         # `revoked` (by: browser) and keeps its socket as a watcher.
         err = _gated_auth_error(request, "/session/control")

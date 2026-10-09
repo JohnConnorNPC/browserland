@@ -97,12 +97,23 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
         # than the PUBLISHED view it is told here. The finally covers a
         # cancellation in here (remove_subscriber is idempotent).
         async with registry.control_section(entry.id):
-            entry.add_subscriber(ws, client_id)
-            try:
-                await ws.send(protocol.resized_frame(entry.cols, entry.rows))
-                await ws.send(protocol.control_frame(entry.published_view))
-            except Exception as exc:
-                LOGGER.debug("send initial resized/control failed: %s", exc)
+            # Taking the section can wait, and in that wait the entry can be
+            # replaced (its subscribers already swept with 1012) or exit. Re-
+            # check, or this socket would join a dead entry and freeze.
+            live = registry.is_live(entry)
+            if live:
+                entry.add_subscriber(ws, client_id)
+                try:
+                    await ws.send(protocol.resized_frame(entry.cols,
+                                                         entry.rows))
+                    await ws.send(protocol.control_frame(entry.published_view))
+                except Exception as exc:
+                    LOGGER.debug("send initial resized/control failed: %s",
+                                 exc)
+        if not live:
+            # Exactly what an attach to an unknown session gets.
+            await ws.send(protocol.error_frame("unknown_session", session_id))
+            return
 
         # Fresh snapshot so this browser sees current state immediately.
         await entry.request_snapshot()
