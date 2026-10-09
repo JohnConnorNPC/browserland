@@ -20,11 +20,14 @@ replaces the stale entry, binary frames broadcast verbatim to subscribers,
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
 import socket
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set
+import time
+from typing import (Any, Awaitable, Callable, Dict, List, Mapping, Optional,
+                    Set)
 
 from .. import protocol
 
@@ -59,6 +62,19 @@ class _PendingRpc:
     def __init__(self, future: "asyncio.Future", expected: str) -> None:
         self.future = future
         self.expected = expected
+
+
+class _Controller:
+    """The one external controller of a terminal (#238): the /ws socket that
+    claimed it, the label the owner is shown, when (epoch ms) and at which
+    gen. Replaced whole on every claim, never mutated."""
+    __slots__ = ("ws", "label", "since", "gen")
+
+    def __init__(self, ws, label: str, since: int, gen: int) -> None:
+        self.ws = ws
+        self.label = label
+        self.since = since
+        self.gen = gen
 
 
 class WindowEntry:
@@ -155,6 +171,33 @@ class WindowEntry:
         # the whole map dies with the connection.
         self.pending_rpc: Dict[int, _PendingRpc] = {}
         self._next_req = 1
+        # #238 terminal control. Every field is written ONLY by the
+        # BrokerRegistry transition ops (claim / release_by_ws /
+        # release_by_gen / force_release) and register(); the relay gate
+        # reads controller and revoked per frame. control_gen is the gen of
+        # the current view (register() seeds it from the registry's seq, so it
+        # never goes backwards across a same-id replacement). closing is set
+        # synchronously once the entry is dying (an `exit` frame, deregister,
+        # replacement), so no control op lands on a terminal already known to
+        # be dead. revoked holds the sockets that lost the terminal (by POST
+        # or another claim): they watch, and the gate drops their input even
+        # if their clientId holds the lease, until they claim again.
+        # published_view is the last view the ordered publisher finished
+        # sending, which is what a socket attaching now is told.
+        self.controller: Optional[_Controller] = None
+        self.control_gen = 0
+        self.closing = False
+        self.revoked: Set[Any] = set()
+        self.published_view: Dict[str, Any] = protocol.control_view(
+            "free", None, None, 0)
+
+    def control_view(self) -> Dict[str, Any]:
+        """The LIVE control view (protocol.control_view's shape)."""
+        ctl = self.controller
+        if ctl is None:
+            return protocol.control_view("free", None, None, self.control_gen)
+        return protocol.control_view("controlled", ctl.label, ctl.since,
+                                     ctl.gen)
 
     def summary(self, mcp_default: str = "off") -> Dict[str, Any]:
         # ``mcp`` is the EFFECTIVE access mode (per-window override or the
@@ -180,6 +223,13 @@ class WindowEntry:
             "pace_ms": self.pace_ms,
             "mcp": self.mcp_mode or mcp_default,
             "mcp_scope": self.mcp_scope,
+            # #238: who is driving this terminal from outside, or None. A
+            # page that boots or rebuilds mid-control re-enters the state
+            # from here.
+            "controller": (None if self.controller is None else {
+                "label": self.controller.label,
+                "since": self.controller.since,
+                "gen": self.controller.gen}),
         }
 
     async def send_to_producer(self, text: str) -> None:
@@ -190,6 +240,22 @@ class WindowEntry:
             except Exception as exc:
                 LOGGER.debug("send_to_producer failed for window %s: %s",
                              self.id, exc)
+
+    async def send_to_producer_if(self, text: str,
+                                  may: Callable[[], bool]) -> bool:
+        """send_to_producer, but only if ``may()`` still holds once the send
+        lock is taken (#238). A frame the relay gate admitted can wait here
+        behind a snapshot request or an RPC; a claim or revoke that lands in
+        that wait must still stop it. Returns whether it was sent."""
+        async with self._send_lock:
+            if not may():
+                return False
+            try:
+                await self.ws.send(text)
+            except Exception as exc:
+                LOGGER.debug("send_to_producer failed for window %s: %s",
+                             self.id, exc)
+            return True
 
     async def request_snapshot(self) -> None:
         await self.send_to_producer(protocol.snapshot_please_frame())
@@ -248,6 +314,7 @@ class WindowEntry:
     def remove_subscriber(self, ws) -> None:
         self.subscribers.discard(ws)
         self.subscriber_clients.pop(ws, None)
+        self.revoked.discard(ws)
 
     async def broadcast_binary(self, payload: bytes) -> None:
         if not self.subscribers:
@@ -339,6 +406,27 @@ class BrokerRegistry:
         # state beside _lock and _waiters. None = no hook. Contract: register().
         self.on_register: Optional[
             Callable[[WindowEntry, Optional[WindowEntry]], None]] = None
+        # #238 terminal control. ONE broker-global gen sequence, seeded with
+        # epoch ms so a gen handed out before a restart is (barring a clock
+        # step back) never handed out again, and still far below 2**53 for
+        # JS. Every control change takes the next value, so gens are strictly
+        # increasing per terminal id across same-id replacement with no
+        # carry-over.
+        self._control_seq = int(time.time() * 1000)
+        # The ordered publisher: one asyncio.Lock per terminal ID (not per
+        # entry, so an old entry's in-flight publication finishes before its
+        # replacement's), counted users so a lock is dropped once its id is
+        # deregistered and nobody holds or waits on it, and the retained
+        # publication tasks (so a cancelled request or socket task can never
+        # cut a committed change's notification short).
+        self._control_locks: Dict[int, asyncio.Lock] = {}
+        self._control_users: Dict[int, int] = {}
+        self._control_tasks: Set["asyncio.Task"] = set()
+        # The broker-installed /control push: ``await hook(window_id, view)``
+        # after each published change. None = no hook (tests). An Exception
+        # is logged and swallowed.
+        self.on_control: Optional[
+            Callable[[int, Dict[str, Any]], Awaitable[None]]] = None
 
     async def register(self, ws, hello: Dict[str, Any]) -> WindowEntry:
         """Build a WindowEntry from ``hello`` and make it visible, replacing any
@@ -432,6 +520,17 @@ class BrokerRegistry:
                 # docstring for the host+pid gate and its reach).
                 entry.mcp_mode = old.mcp_mode
                 entry.mcp_scope = old.mcp_scope
+            if old is not None:
+                # #238: a replaced producer's terminal is dead, and its
+                # controller (closed below with 1012 like every subscriber)
+                # loses it HERE, before the new entry is visible, so no claim
+                # on the new entry can be overtaken by the old one's release.
+                old.closing = True
+                self.force_release(old)
+            # The new entry starts free at the CURRENT seq: never below any
+            # gen this id has shown, so a free view does not go backwards.
+            entry.control_gen = self._control_seq
+            entry.published_view = entry.control_view()
             self._entries[window_id] = entry
             waiter = self._waiters.get(window_id)
         if old is not None:
@@ -463,6 +562,11 @@ class BrokerRegistry:
             if current is not None and (entry is None or current is entry):
                 del self._entries[window_id]
                 LOGGER.info("deregistered window %s", window_id)
+                # #238: the terminal exited or its producer dropped; either
+                # way its controller (if any) loses it now.
+                current.closing = True
+                self.force_release(current)
+                self._prune_control_lock(window_id)
 
     def get(self, window_id: int) -> Optional[WindowEntry]:
         return self._entries.get(int(window_id))
@@ -506,6 +610,150 @@ class BrokerRegistry:
                         await ws.close(code=code, reason="deactivated")
                     except Exception:
                         pass
+
+    # -- terminal control (#238) --------------------------------------------
+    #
+    # Four SYNC transition ops commit a change in one step (nothing awaits
+    # between the check and the set, so the relay gate sees the new state at
+    # once) and enqueue its publication. Each returns None on success or the
+    # refusal reason the caller reports. The publication of every change runs
+    # in a registry-owned task, serialized FIFO per terminal id: the revoked
+    # frame (if any) to the controller that lost it, then that change's OWN
+    # view to every subscriber, then the on_control hook. So every socket gets
+    # every change, in gen order, and rests on the live view.
+
+    def is_live(self, entry: WindowEntry) -> bool:
+        """Whether ``entry`` is the registered entry for its id and not dying.
+        Every control op checks it first."""
+        return self._entries.get(entry.id) is entry and not entry.closing
+
+    def _next_gen(self) -> int:
+        self._control_seq += 1
+        return self._control_seq
+
+    def claim(self, entry: WindowEntry, ws, label: Any,
+              now_ms: Optional[int] = None) -> Optional[str]:
+        """``ws`` claims ``entry``. A claim while another socket holds it takes
+        over (that socket is revoked ``by: claim``); a re-claim from the
+        holder itself is a relabel at a new gen. Refusals: ``unknown_session``
+        (not live), ``bad_label``."""
+        if not self.is_live(entry):
+            return "unknown_session"
+        if not protocol.control_label_ok(label):
+            return "bad_label"
+        since = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        prev = entry.controller
+        gen = self._next_gen()
+        entry.controller = _Controller(ws, label, since, gen)
+        entry.control_gen = gen
+        entry.revoked.discard(ws)
+        revoked_ws = None
+        if prev is not None and prev.ws is not ws:
+            revoked_ws = prev.ws
+            entry.revoked.add(revoked_ws)
+        self._enqueue(entry, revoked_ws, "claim")
+        return None
+
+    def release_by_ws(self, entry: WindowEntry, ws) -> Optional[str]:
+        """The controller's own release (its ``release`` frame, or its socket
+        closing). Refusals: ``unknown_session``, ``not_controller``."""
+        if not self.is_live(entry):
+            return "unknown_session"
+        ctl = entry.controller
+        if ctl is None or ctl.ws is not ws:
+            return "not_controller"
+        self._release(entry)
+        return None
+
+    def release_by_gen(self, entry: WindowEntry, gen: int) -> Optional[str]:
+        """The desktop takes the terminal back (POST /session/control). Only
+        the controller at exactly ``gen`` is released, so a double click or a
+        crossed claim never releases a newer one; it is revoked ``by:
+        browser`` and keeps watching. Refusals: ``unknown_session``,
+        ``stale_gen`` (free, or another gen)."""
+        if not self.is_live(entry):
+            return "unknown_session"
+        ctl = entry.controller
+        if ctl is None or ctl.gen != gen:
+            return "stale_gen"
+        entry.revoked.add(ctl.ws)
+        self._release(entry, ctl.ws, "browser")
+        return None
+
+    def force_release(self, entry: WindowEntry) -> None:
+        """Release whatever controls a DYING entry (exit, producer drop,
+        replacement); no liveness check, no revoked frame. A no-op when
+        nothing controls it."""
+        if entry.controller is not None:
+            self._release(entry)
+
+    def _release(self, entry: WindowEntry, revoked_ws=None,
+                 by: Optional[str] = None) -> None:
+        entry.controller = None
+        entry.control_gen = self._next_gen()
+        self._enqueue(entry, revoked_ws, by)
+
+    def _enqueue(self, entry: WindowEntry, revoked_ws, by) -> None:
+        # The view is captured NOW, at commit: each change publishes its own.
+        view = entry.control_view()
+        task = asyncio.get_running_loop().create_task(
+            self._publish(entry, view, revoked_ws, by))
+        self._control_tasks.add(task)
+        task.add_done_callback(self._control_tasks.discard)
+
+    async def _publish(self, entry: WindowEntry, view: Dict[str, Any],
+                       revoked_ws, by) -> None:
+        async with self.control_section(entry.id):
+            if revoked_ws is not None:
+                try:
+                    await revoked_ws.send(
+                        protocol.control_revoked_frame(by, view["gen"]))
+                except Exception:
+                    entry.remove_subscriber(revoked_ws)
+            await entry.broadcast_text(protocol.control_frame(view))
+            entry.published_view = view
+            hook = self.on_control
+            if hook is not None:
+                try:
+                    await hook(entry.id, view)
+                except Exception:
+                    LOGGER.exception("on_control hook failed for window %s",
+                                     entry.id)
+
+    @contextlib.asynccontextmanager
+    async def control_section(self, window_id: int):
+        """Hold terminal ``window_id``'s publisher lock: the publication of
+        each change runs in one, and so does a /ws attach (subscribe, then
+        ``resized``, then the published view), so an attach never interleaves
+        with a publication."""
+        wid = int(window_id)
+        lock = self._control_locks.get(wid)
+        if lock is None:
+            lock = self._control_locks[wid] = asyncio.Lock()
+        self._control_users[wid] = self._control_users.get(wid, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            left = self._control_users[wid] - 1
+            if left:
+                self._control_users[wid] = left
+            else:
+                del self._control_users[wid]
+                self._prune_control_lock(wid)
+
+    def _prune_control_lock(self, window_id: int) -> None:
+        # Drop an id's lock once it is deregistered and nobody holds or waits
+        # on it, so the map is bounded by the live ids.
+        wid = int(window_id)
+        if wid not in self._entries and wid not in self._control_users:
+            self._control_locks.pop(wid, None)
+
+    async def drain_control(self) -> None:
+        """Wait until every enqueued publication has run (tests, shutdown)."""
+        while self._control_tasks:
+            await asyncio.gather(*list(self._control_tasks),
+                                 return_exceptions=True)
 
     # -- launch waiters -----------------------------------------------------
 
@@ -601,6 +849,9 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 # reappear of a dead chip. Then stop reading: the producer is
                 # shutting down and sends nothing more. A transient WS drop
                 # carries NO exit frame, so reconnect grace is untouched.
+                # #238: dying from here on, BEFORE the first await, so no
+                # control op lands on it during the broadcast.
+                entry.closing = True
                 await entry.broadcast_text(protocol.exit_frame(_code(data)))
                 await registry.deregister(entry.id, entry)
                 break
