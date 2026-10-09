@@ -885,10 +885,13 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 `?token=`.
 
 **`GET /mcp/config`** →
-`{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
+`{"ok":true,"enabled":false,"token":"","admin_token":"","admin_token_env_pinned":false,
+"default_mode":"off","allow_launch":false,
 "token_env_pinned":false,"known_scopes":[],"python":"/usr/bin/python3",
 "pythonpath":"/opt/browserland","local_url":"http://127.0.0.1:4445"}` (`token`
-is the live secret, `""` when unset). `known_scopes` lists the scopes on live
+is the live secret, `""` when unset; `admin_token` the MCP admin credential
+#245, likewise `""` when unset, and `admin_token_env_pinned` whether
+`WEB_TERMINAL_MCP_ADMIN_TOKEN` pins it). `known_scopes` lists the scopes on live
 windows (any mode) and on stored per-window rows, sorted; a name a caller only
 declared on the header never appears. `python` is the interpreter running this
 broker (`sys.executable`), `pythonpath` the directory holding the `webterm`
@@ -901,8 +904,11 @@ absolute server paths, shown only to a holder of the browser token.
 (`off`/`read`/`readwrite`), `allow_launch`, `token`, or `generate:true` (mint a
 fresh `token_urlsafe(32)`). Validated before any write; returns the GET shape.
 While the env pins the token, `token`/`generate` edits are **ignored** (the live
-token stays the env value). Errors: `bad_json` (400), `bad_mode` (400),
-`bad_token` (400, non-string `token`).
+token stays the env value). #245 adds `admin_token` (clear with `null` or `""`)
+and `admin_generate:true` (mint/rotate the admin secret — never a
+client-chosen value), ignored likewise while `WEB_TERMINAL_MCP_ADMIN_TOKEN`
+pins it. Errors: `bad_json` (400), `bad_mode` (400),
+`bad_token` (400, non-string `token`/`admin_token`).
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
 "scope": <str>|null}`, both keys optional →

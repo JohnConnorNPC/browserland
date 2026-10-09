@@ -71,6 +71,14 @@ SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 #: reads it in exactly one place, app.py's ``_mcp_scope``.
 SCOPE_HEADER = "X-Browserland-Scope"
 
+#: The request header carrying the MCP ADMIN credential (#245) — a second
+#: secret ADDITIONAL to the MCP token (never instead of it, and never the
+#: query string; app.py's ``_mcp_auth_error`` refuses both abuses). Lives here
+#: beside SCOPE_HEADER for the same reason: ``webterm.mcptool`` imports it
+#: without pulling in the broker. Deliberately a different header from #191's
+#: ``X-Webterm-Admin`` so the two credential classes never share one slot.
+MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
+
 
 # ---------------------------------------------------------------------------
 # Producer -> broker

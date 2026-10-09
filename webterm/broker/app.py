@@ -824,20 +824,24 @@ def _empty_state() -> Dict[str, Any]:
 
 
 def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the live MCP runtime config: ``{token, default_mode, allow_launch,
-    enabled}``.
+    """Build the live MCP runtime config: ``{token, admin_token, default_mode,
+    allow_launch, enabled}``.
 
     Seeded from config/env defaults, then overlaid by the persisted sidecar
     (``webterm_mcp.json``) — the sidecar is what the Control Panel writes, so it
     is the durable source of truth across restarts. One exception, mirroring
     resolve_token's "env wins so a unit file can override": if the env token
-    ``WEB_TERMINAL_MCP_TOKEN`` is set it pins the token even over the sidecar.
-    Every field self-heals, so a hand-edited/truncated sidecar can never break
-    startup. The per-window overrides themselves are in-memory only (they live
-    on WindowEntry and reset on restart); only these broker-wide knobs persist."""
+    ``WEB_TERMINAL_MCP_TOKEN`` is set it pins the token even over the sidecar,
+    and ``WEB_TERMINAL_MCP_ADMIN_TOKEN`` (#245) pins the admin token the same
+    way. Every field self-heals, so a hand-edited/truncated sidecar can never
+    break startup. The per-window overrides themselves are in-memory only (they
+    live on WindowEntry and reset on restart); only these broker-wide knobs
+    persist."""
     env_token = os.environ.get(auth.MCP_TOKEN_ENV)
+    env_admin = os.environ.get(auth.MCP_ADMIN_TOKEN_ENV)
     cfg = {
         "token": auth.resolve_mcp_token(config),
+        "admin_token": auth.resolve_mcp_admin_token(config),
         "default_mode": _norm_mcp_mode(config.get("mcp_default_mode"), "off"),
         "allow_launch": bool(config.get("mcp_allow_launch", False)),
         "enabled": bool(config.get("mcp_enabled", False)),
@@ -851,6 +855,9 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         if "token" in data and not env_token:
             tok = data.get("token")
             cfg["token"] = tok if isinstance(tok, str) and tok else None
+        if "admin_token" in data and not env_admin:
+            atok = data.get("admin_token")
+            cfg["admin_token"] = atok if isinstance(atok, str) and atok else None
         if "default_mode" in data:
             cfg["default_mode"] = _norm_mcp_mode(
                 data.get("default_mode"), cfg["default_mode"])
@@ -7162,6 +7169,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # live token — it would drift from what the env pins on next restart.
         return bool(os.environ.get(auth.MCP_TOKEN_ENV))
 
+    def _mcp_admin_env_pinned() -> bool:
+        # #245: the same rule for the MCP ADMIN token. When set, the Control
+        # Panel can neither mint/rotate nor clear it.
+        return bool(os.environ.get(auth.MCP_ADMIN_TOKEN_ENV))
+
     def _mcp_cfg_public(cfg: Dict[str, Any],
                         request: Request) -> Dict[str, Any]:
         # known_scopes (#230): every scope a window carries, live (any mode,
@@ -7187,6 +7199,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # not on app.ctx), the port the worker binds.
         return {"ok": True, "enabled": bool(cfg["enabled"]),
                 "token": cfg["token"] or "",
+                # #245: the live MCP ADMIN secret, same exposure rules as the
+                # token above (browser realm — the root of trust that mints
+                # it), "" when unset, and whether the env pins it.
+                "admin_token": cfg["admin_token"] or "",
+                "admin_token_env_pinned": _mcp_admin_env_pinned(),
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
                 "token_env_pinned": _mcp_token_env_pinned(),
@@ -7217,7 +7234,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if ("token" in body and body.get("token") is not None
                 and not isinstance(body.get("token"), str)):
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
+        # #245: admin_token clears with null/"" and mints with
+        # admin_generate — a client-chosen secret is never accepted, so a
+        # non-string non-null value is a bad_token like above.
+        if ("admin_token" in body and body.get("admin_token") is not None
+                and not isinstance(body.get("admin_token"), str)):
+            return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         env_pinned = _mcp_token_env_pinned()
+        admin_env_pinned = _mcp_admin_env_pinned()
         # Shielded: the sidecar write awaits and the live ctx swap lands AFTER
         # it, so an unshielded cancel in that hop leaves disk ahead of memory —
         # the running broker keeps the old token/mode while a restart silently
@@ -7234,6 +7258,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 elif "token" in body:
                     tok = (body.get("token") or "").strip()
                     cfg["token"] = tok or None
+                # #245: the admin credential rides the same rules — mint/rotate
+                # with admin_generate, clear with null or "" — and the same env
+                # pin discipline (a pinned admin token ignores UI edits).
+                if not admin_env_pinned:
+                    if body.get("admin_generate"):
+                        cfg["admin_token"] = secrets.token_urlsafe(32)
+                    elif "admin_token" in body:
+                        atok = (body.get("admin_token") or "").strip()
+                        cfg["admin_token"] = atok or None
             if "default_mode" in body:
                 cfg["default_mode"] = body["default_mode"]
             if "allow_launch" in body:
@@ -7242,11 +7275,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 cfg["enabled"] = bool(body.get("enabled"))
             # Persist an EXPLICIT schema (never the whole dict) so a future
             # internal field can't accidentally land in the sidecar. When env
-            # pins the token, write None: _load_mcp_cfg ignores the sidecar
-            # token under an env pin anyway, and this keeps the env secret off
-            # disk.
+            # pins a credential, write None for it: _load_mcp_cfg ignores the
+            # sidecar value under an env pin anyway, and this keeps the env
+            # secret off disk.
             to_persist = {
                 "token": None if env_pinned else cfg["token"],
+                "admin_token": None if admin_env_pinned else cfg["admin_token"],
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
                 "enabled": bool(cfg["enabled"]),
