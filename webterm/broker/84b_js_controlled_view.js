@@ -22,7 +22,8 @@
         //     state at least that new. That is also what heals a missed push
         //     and a broker restart (whose gens are re-seeded from the clock);
         //   - a /control reconnect forgets that host's gens
-        //     (resetControlBaselines), so the next view per key is accepted.
+        //     (resetControlBaselines marks its records `unordered`), so the
+        //     next view per key is accepted; the record keeps its own gen.
         // A free poll row carries no gen: over a free record it keeps that
         // record's gen; over a controlled one it is recorded as gen null,
         // "no baseline", so the next view of any gen is accepted.
@@ -63,7 +64,7 @@
             if (src === 'poll') {
                 return typeof sentAt === 'number' && sentAt > rec.at;
             }
-            if (rec.gen === null) return true;
+            if (rec.gen === null || rec.unordered === true) return true;
             return view.gen > rec.gen;
         }
 
@@ -73,7 +74,7 @@
             const prefix = String(hostId) + ':';
             for (const k of Object.keys(terminalControl)) {
                 if (k.slice(0, prefix.length) === prefix) {
-                    terminalControl[k].gen = null;
+                    terminalControl[k].unordered = true;
                 }
             }
         }
@@ -115,7 +116,7 @@
         // A /sessions row (75's merged record, `sentAt` = when its poll left).
         // A row from a broker without `controller` says nothing. A free row
         // has no gen: it keeps the one already recorded when the record was
-        // free too, else records null ("no baseline").
+        // free (and still ordered) too, else records null ("no baseline").
         function applyControlRow(key, sess, sentAt) {
             if (!sess || !sess.controllerKnown) return false;
             const c = sess.controller;
@@ -125,7 +126,8 @@
                                         'poll', sentAt);
             }
             const rec = terminalControl[String(key)];
-            const gen = (rec && rec.state === 'free') ? rec.gen : null;
+            const gen = (rec && rec.state === 'free' && rec.unordered !== true)
+                ? rec.gen : null;
             return applyControlView(key, { state: 'free', label: null,
                                            since: null, gen: gen }, 'poll', sentAt);
         }
@@ -177,6 +179,7 @@
             if (win.detached) return;
             win.reattachAttempts = 0;
             win.reattachAt = 0;
+            win._leaveReattach = true;      // its attach `resized` is dropped (73)
             reattachWindow(win);
             if (frontId === win.id) focusWin(win);
         }
@@ -204,7 +207,9 @@
                 const msg = document.createElement('div');
                 msg.className = 'term-ctl-msg';
                 msg.appendChild(document.createTextNode('Controlled from '));
-                const who = document.createElement('b');
+                // <bdi>: the label's direction can never reorder the text
+                // around it (" since hh:mm"); still textContent only.
+                const who = document.createElement('bdi');
                 who.className = 'term-ctl-label';
                 msg.appendChild(who);
                 const since = document.createElement('span');
@@ -243,7 +248,12 @@
         //   409 not_active                -> another browser holds the lease:
         //                                    show the existing Become active
         //   404 unknown_session           -> the terminal is gone: close
-        //   anything else                 -> say so; nothing changes
+        //   anything else (another 404, a  -> say so; nothing changes, the
+        //   null or non-JSON body, a       button is usable again
+        //   stalled body: json() has a
+        //   deadline)
+        // A window without an integer gen never POSTs (the broker would
+        // refuse it as bad_gen): it asks for an immediate poll instead.
         // Closing or terminating a controlled window sends nothing: closing
         // does not release.
         async function takeBackControl(win) {
@@ -251,6 +261,11 @@
             const key = controlKey(win.hostId, win.sid);
             const host = hostById(win.hostId);
             if (!host) return;
+            if (!Number.isSafeInteger(win.controlled.gen)) {
+                showNotice('refreshing who controls session ' + win.sid + ' — try again');
+                refreshTaskbar();
+                return;
+            }
             win._takingBack = true;
             if (win.ctlBtn) win.ctlBtn.disabled = true;
             let r = null, j = null;
@@ -262,7 +277,14 @@
                                            gen: win.controlled.gen,
                                            clientId: CLIENT_ID }),
                 });
-                j = await r.json().catch(() => null);
+                // fetch's own deadline ends at the headers; the body gets one
+                // too, so a stalled answer can never keep the button disabled.
+                let bodyTimer = null;
+                j = await Promise.race([
+                    r.json().catch(() => null),
+                    new Promise((res) => { bodyTimer = setTimeout(() => res(null), FETCH_TIMEOUT_MS); }),
+                ]);
+                clearTimeout(bodyTimer);
             } catch (_) {
                 r = null;
             } finally {
@@ -279,7 +301,7 @@
                 showLeaseAffordance(win.hostId);
                 return;
             }
-            if (r && r.status === 404) {
+            if (r && r.status === 404 && err === 'unknown_session') {
                 const w = windows.get(key);
                 if (w && !w.disposed) {
                     w.staleSession = true;
@@ -311,6 +333,10 @@
         function seedControlledWindow(win) {
             const rec = terminalControl[controlKey(win.hostId, win.sid)];
             if (!rec || rec.state !== 'controlled') return;
+            // A controlled view without an integer gen is not a view (and
+            // could only POST a refused gen): attach instead; the attach's
+            // own `control` frame greys it with the real one.
+            if (!Number.isSafeInteger(rec.gen)) return;
             enterControlled(win, Object.freeze({ label: rec.label,
                                                  since: rec.since, gen: rec.gen }));
         }

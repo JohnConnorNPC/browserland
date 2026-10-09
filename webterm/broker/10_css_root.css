@@ -680,6 +680,7 @@
             border-left: 4px solid var(--accent, var(--accent-default));
         }
         .term-ctl-msg { margin-bottom: 8px; overflow-wrap: anywhere; }
+        .term-ctl-label { font-weight: bold; unicode-bidi: isolate; }
         .term-ctl-take { padding: 4px 14px; cursor: pointer; }
         /* A chip whose terminal another device drives (tooltip says which). */
         .taskbar-item.controlled { border-left-style: dashed; }

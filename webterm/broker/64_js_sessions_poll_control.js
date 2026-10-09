@@ -192,7 +192,9 @@
             if (sess && sess.mcp_scope) parts.push('scope ' + sess.mcp_scope);
             // #239: the device driving it (the broker-validated label).
             const ctl = sess && sess.key ? controlledViewFor(sess.key) : null;
-            if (ctl) parts.push('controlled from ' + ctl.label);
+            // FSI..PDI isolate the label so its direction cannot reorder the
+            // rest of the tooltip.
+            if (ctl) parts.push('controlled from \u2068' + ctl.label + '\u2069');
             // Which broker it lives on — only interesting with >1 of them.
             if (sess && sess.hostLabel && getHosts().length > 1) {
                 parts.push('on ' + sess.hostLabel);

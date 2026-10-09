@@ -31309,8 +31309,9 @@ terminalControl['h1:5'] = {state: 'free', gen: 40, at: 1};
 terminalControl['h1:6'] = {state: 'controlled', gen: 41, at: 1};
 terminalControl['h10:5'] = {state: 'free', gen: 42, at: 1};
 resetControlBaselines('h1');
-out.reset = [terminalControl['h1:5'].gen, terminalControl['h1:6'].gen,
-             terminalControl['h10:5'].gen];
+out.reset = [terminalControl['h1:5'].unordered, terminalControl['h1:6'].unordered,
+             terminalControl['h10:5'].unordered === undefined];
+out.keptGens = [terminalControl['h1:5'].gen, terminalControl['h1:6'].gen];
 out.afterReset = controlViewAccept(terminalControl['h1:5'], F(2), 'push');
 out.key = controlKey('local', 77);
 console.log(JSON.stringify(out));
@@ -31330,7 +31331,8 @@ console.log(JSON.stringify(out));
         assert r[bad] is None, bad
     assert r["label64"] is True, "64 astral code points is a legal label"
     assert r["badSince"] is None
-    assert r["reset"] == [None, None, 42], "only that host's gens are forgotten"
+    assert r["reset"] == [True, True, True], "only that host's gens are forgotten"
+    assert r["keptGens"] == [40, 41], "a record keeps its own gen (Take back sends it)"
     assert r["afterReset"] is True
     assert r["key"] == "local:77"
 
@@ -31439,6 +31441,17 @@ const s = mkWin('h3:4');
 seedControlledWindow(s);
 out.seed = take();
 out.seedGen = s.controlled && s.controlled.gen;
+// R7: a controlled record without an integer gen seeds nothing.
+terminalControl['h3:5'] = {state: 'controlled', label: 'phone', since: 1, gen: null, at: 1};
+const s2 = mkWin('h3:5');
+seedControlledWindow(s2);
+out.seedNullGen = [take(), s2.controlled];
+// R6: two brokers, the SAME wire id, keyed apart (the push computes its key
+// with controlKey(hid, msg.id)).
+const wa = mkWin('local:9'); windows.set('local:9', wa);
+const wb = mkWin('r:9'); windows.set('r:9', wb);
+applyControlView(controlKey('r', 9), C(3), 'push');
+out.twoHosts = [wa.controlled, !!wb.controlled, take()];
 console.log(JSON.stringify(out));
 """)
     assert r["freeFree"] == [], "free -> free must never reattach or fire"
@@ -31456,6 +31469,8 @@ console.log(JSON.stringify(out));
     assert r["viewFor"] == [None, None]
     assert r["seed"] == ["close:h3:4", "paint:h3:4:phone"]
     assert r["seedGen"] == 9
+    assert r["seedNullGen"] == [[], None]
+    assert r["twoHosts"] == [None, True, ["close:r:9", "paint:r:9:phone", "hook:r:9"]]
 
 
 def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
@@ -31464,8 +31479,11 @@ def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
                  "document.write"):
         assert sink not in s84b, f"84b must not use {sink}: the label is wire text"
     assert "win.ctlLabel.textContent = c.label;" in s84b
-    # The tooltip carries it as a string too (textContent / title only).
-    assert "parts.push('controlled from ' + ctl.label);" in \
+    # Bidi isolation (N3): the label is a <bdi>, styled `unicode-bidi:
+    # isolate`, and the tooltip wraps it in FSI..PDI, so a label's direction
+    # can never reorder " since hh:mm" or the rest of the tooltip.
+    assert "const who = document.createElement('bdi');" in s84b
+    assert "parts.push('controlled from \\u2068' + ctl.label + '\\u2069');" in \
         _src239("64_js_sessions_poll_control.js")
     css = _src239("10_css_root.css")
     rule = css[css.index(".term-window.controlled .term-body .xterm {"):]
@@ -31474,9 +31492,13 @@ def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
     # The overlay is a sibling of .xterm, so nothing may dim .term-body itself.
     assert ".term-window.controlled .term-body {" not in css
     assert ".taskbar-item.controlled {" in css
+    assert ".term-ctl-label { font-weight: bold; unicode-bidi: isolate; }" in css
     ov = css[css.index(".term-ctl-overlay {"):]
     ov = ov[:ov.index("}")]
-    assert "z-index: 20;" in ov, "the overlay must stack above xterm's layers (max 10)"
+    # Pins the DECLARATION, not stacking: without it the overlay still wins by
+    # DOM order over the greyed .xterm (its own stacking context), so no hit
+    # test can fail; the explicit 20 is above xterm.css's layers (max 10).
+    assert "z-index: 20;" in ov
 
 
 def test_controlled_view_poll_rows(tmp_path):
@@ -31498,6 +31520,11 @@ terminalControl['h:3'] = {state: 'controlled', label: 'p', since: 1, gen: 1000, 
 applyControlRow('h:3', {controllerKnown: true, controller: null}, 5);
 out.nullGen = terminalControl['h:3'].gen;
 out.thenPush = applyControlView('h:3', {state: 'controlled', label: 'q', since: 2, gen: 4}, 'push');
+// A free row over a free record a /control reconnect marked unordered does not
+// re-arm that (pre-restart) gen: the next push of any gen is still taken.
+terminalControl['h:5'] = {state: 'free', label: null, since: null, gen: 900, at: 1, unordered: true};
+applyControlRow('h:5', {controllerKnown: true, controller: null}, 5);
+out.unorderedFree = terminalControl['h:5'].gen;
 // A controlled row carries its own gen.
 applyControlRow('h:4', {controllerKnown: true,
                         controller: {label: 'phone', since: 9, gen: 77}}, 5);
@@ -31507,6 +31534,7 @@ console.log(JSON.stringify(out));
     assert r["unknown"] is False and r["unknownRec"] is False
     assert r["keptGen"] == 30
     assert r["nullGen"] is None and r["thenPush"] is True
+    assert r["unorderedFree"] is None
     assert {k: r["controlled"][k] for k in ("state", "label", "since", "gen")} \
         == {"state": "controlled", "label": "phone", "since": 9, "gen": 77}
 
@@ -31564,6 +31592,8 @@ async function hostFetch(host, path, opts) {
     sent.push({host: host.id, path, body: JSON.parse(opts.body)});
     const a = nextAnswer;
     if (a === 'throw') throw new TypeError('network');
+    if (a.stall) return {status: 200, json: () => new Promise(() => {})};
+    if (a.notJson) return {status: a.status, json: async () => { throw new SyntaxError('html'); }};
     return {status: a.status, json: async () => a.body};
 }
 function applyControlView(key, j, src) { log.push(['apply', key, src, j.state, j.gen]); }
@@ -31573,6 +31603,8 @@ function showBecomeActiveOverlay() { log.push(['overlay']); }
 function applyRemoteLease(h, a) { log.push(['remoteLease', h, a]); }
 const _leaseAffordance = {armed: false, asked: false};
 function controlKey(h, s) { return String(h) + ':' + String(s); }
+const FETCH_TIMEOUT_MS = 50;
+function refreshTaskbar() { log.push(['refresh']); }
 """
 
 
@@ -31591,9 +31623,10 @@ const mk = (hostId) => {
     windows.set(w.id, w);
     return w;
 };
-const run = async (ans, hostId) => {
+const run = async (ans, hostId, gen) => {
     log.length = 0; sent.length = 0; nextAnswer = ans;
     const w = mk(hostId || 'local');
+    if (gen !== undefined) w.controlled = Object.freeze({label: 'phone', since: 1, gen});
     await takeBackControl(w);
     return {log: log.slice(), sent: sent.slice(), busy: w._takingBack,
             btn: w.ctlBtn.disabled};
@@ -31606,6 +31639,12 @@ out.notActiveRemote = await run({status: 409, body: {ok: false, error: 'not_acti
 out.gone = await run({status: 404, body: {ok: false, error: 'unknown_session'}});
 out.net = await run('throw');
 out.other = await run({status: 400, body: {ok: false, error: 'bad_gen'}});
+out.gone404Null = await run({status: 404, body: null});
+out.gone404Other = await run({status: 404, body: {ok: false, error: 'not_found'}});
+out.gone404Html = await run({status: 404, notJson: true});
+out.stalled = await run({stall: true});
+out.remoteOk = await run({status: 200, body: {ok: true, id: 5, state: 'free', label: null, since: null, gen: 42}}, 'h2');
+out.nullGen = await run({status: 200, body: {ok: true}}, 'local', null);
 console.log(JSON.stringify(out));
 })();
 """)
@@ -31616,7 +31655,8 @@ console.log(JSON.stringify(out));
     assert r["stale"]["log"] == [["apply", "local:5", "post", "controlled", 43]]
     # The button is usable again after every answer (a stale_gen relabel keeps
     # the window controlled and the user must be able to retry).
-    for k in ("ok", "stale", "notActiveHome", "notActiveRemote", "gone", "net", "other"):
+    for k in ("ok", "stale", "notActiveHome", "notActiveRemote", "gone", "net",
+              "other", "gone404Null", "gone404Other", "gone404Html", "stalled"):
         assert r[k]["busy"] is False, k
     assert r["stale"]["btn"] is False
     assert r["notActiveHome"]["log"] == [["overlay"]]
@@ -31626,6 +31666,20 @@ console.log(JSON.stringify(out));
                                 ["close", "local:5"]]
     assert r["net"]["log"] == [["notice", "take back failed"]]
     assert r["other"]["log"] == [["notice", "take back failed: bad_gen"]]
+    # R5: only the broker's own unknown_session closes the window; any other
+    # 404 (a proxy's, a peer without the route, no JSON at all) is transient.
+    assert r["gone404Null"]["log"] == [["notice", "take back failed"]]
+    assert r["gone404Other"]["log"] == [["notice", "take back failed: not_found"]]
+    assert r["gone404Html"]["log"] == [["notice", "take back failed"]]
+    # A body that never ends is cut off by its own deadline.
+    assert r["stalled"]["log"] == [["notice", "take back failed"]]
+    assert r["stalled"]["btn"] is False
+    # R6: the POST goes to the window's OWN broker, never same-origin.
+    assert [x["host"] for x in r["remoteOk"]["sent"]] == ["h2"]
+    assert r["remoteOk"]["log"] == [["apply", "h2:5", "post", "free", 42]]
+    # R7: no integer gen, no POST: an immediate poll instead.
+    assert r["nullGen"]["sent"] == []
+    assert r["nullGen"]["log"][-1] == ["refresh"]
 
 
 def test_controlled_view_lease_overlay_comes_down_only_on_its_own_answer(tmp_path):
@@ -31667,10 +31721,172 @@ def test_controlled_view_is_documented():
     assert "Closing the window does not release control" in sec
     assert "does not resize the terminal" in sec
     hosts = (wiki / "Hosts-and-Multi-Browser.md").read_text(encoding="utf-8")
-    assert "**Take back control** needs the lease" in hosts
+    assert ("**Take back control** is refused while another browser holds "
+            "the lease") in hosts
+    assert "needs the lease" not in hosts, "with no lease holder it passes (#238 Q6)"
     assert "[[Window-Types#controlled-from-another-device]]" in hosts
     tr = (wiki / "Technical-Reference.md").read_text(encoding="utf-8")
     side = tr[tr.index("**The desktop's side (#239).**"):tr.index("## MCP HTTP interface")]
     assert "`isResizable` refuses it too" in side
     assert "`attachWebSocket` refuses to dial while `win.controlled` is set" in side
     assert "a new `/control` socket to a host forgets that host's gens" in side
+
+
+# ---- #239 review round 1: the frame paths, run from the SHIPPED functions ---
+# 73's attachWebSocket itself (with its nested applyResized and the attach
+# hold) is executed against a fake WebSocket, so the hold, the drop on a
+# controlled frame, the drop on a leave's reattach and the pre-#238 flush on
+# every other frame kind are each pinned under pytest, not only by the
+# out-of-band Playwright script.
+_ATTACH239_STUBS = r"""
+const WS_CONNECT_TIMEOUT_MS = 5000;
+const CLIENT_ID = 'page';
+const log = [];
+let lastWs = null;
+class WebSocket {
+    constructor(url) { this.url = url; this.readyState = 0; this.sent = []; lastWs = this; }
+    send(m) { this.sent.push(m); }
+    close() { this.closed = true; }
+}
+WebSocket.CONNECTING = 0; WebSocket.OPEN = 1; WebSocket.CLOSED = 3;
+function hostById(id) { return {id, label: id}; }
+function hostWsUrl(h, p) { return 'ws://x' + p; }
+function closeWindow() {}
+function dispatchTermOut() {}
+const sessions = new Map();
+function showNotice() {}
+function isDetachedSurface() { return false; }
+function isSizeLocked() { return false; }
+function readCellDims() { return null; }
+function maybeSendInitialResize() {}
+function flashMcpBtn() {}
+function formatTitle() { return ''; }
+function updateTaskbarLabel() {}
+function pollStateFor() { return {}; }
+function showAuthOverlay() {}
+function renderHostStatus() {}
+function scheduleReattach() {}
+function controlKey(h, s) { return h + ':' + s; }
+let win = null;
+// The window enters (closes this socket) on a controlled view, as 84b does.
+function applyControlView(key, data, src) {
+    log.push('control:' + data.state);
+    if (data.state === 'controlled') { win.controlled = {gen: data.gen}; win.ws = null; }
+}
+function fresh(extra) {
+    win = Object.assign({id: 'local:5', hostId: 'local', sid: '5', controlled: null,
+        disposed: false, tiled: false,
+        term: {write() {}, resize(c, r) { log.push('resize:' + c + 'x' + r); }}}, extra || {});
+    log.length = 0;
+    attachWebSocket(win);
+    return lastWs;
+}
+const J = (o) => ({data: JSON.stringify(o)});
+const RES = J({type: 'resized', cols: 50, rows: 15});
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_controlled_view_attach_frames_hold_the_first_resized(tmp_path):
+    r = _node239(tmp_path, _ATTACH239_STUBS
+                 + _fn239("73_js_window_runtime.js", "function attachWebSocket(") + r"""
+const out = {};
+let ws;
+// free: the held grid is applied once the control frame says free
+ws = fresh(); ws.onmessage(RES); out.beforeControl = log.slice();
+ws.onmessage(J({type: 'control', state: 'free', gen: 2}));
+out.free = log.slice();
+// controlled: the held grid is the controller's and is dropped (A)
+ws = fresh(); ws.onmessage(RES); ws.onmessage(J({type: 'control', state: 'controlled', label: 'p', since: 1, gen: 3}));
+out.controlled = log.slice();
+// a socket leaveControlled dialed: its attach grid is never applied (R2),
+// and the flag is spent by that one dial
+ws = fresh({_leaveReattach: true}); ws.onmessage(RES);
+ws.onmessage(J({type: 'control', state: 'free', gen: 4}));
+out.leave = log.slice();
+out.flagSpent = win._leaveReattach;
+// a later `resized` on that socket (the echo of the page's own size) applies
+ws.onmessage(J({type: 'resized', cols: 90, rows: 30}));
+out.leaveEcho = log.slice();
+// a broker older than #238 sends no control frame: any next frame applies it (E)
+ws = fresh(); ws.onmessage(RES); ws.onmessage({data: new ArrayBuffer(3)});
+out.binary = log.slice();
+ws = fresh(); ws.onmessage(RES); ws.onmessage({data: 'not json'});
+out.text = log.slice();
+ws = fresh(); ws.onmessage(RES); ws.onmessage(J({type: 'output', data: 'x'}));
+out.output = log.slice();
+// only the FIRST resized is held; a second one flushes it and applies
+ws = fresh(); ws.onmessage(RES); ws.onmessage(J({type: 'resized', cols: 60, rows: 20}));
+out.second = log.slice();
+// G: a controlled window is never dialed
+lastWs = null; fresh({controlled: {gen: 1}}); out.gDial = lastWs === null;
+console.log(JSON.stringify(out));
+process.exit(0);
+""")
+    assert r["beforeControl"] == [], "the first resized must wait for the control frame"
+    assert r["free"] == ["control:free", "resize:50x15"]
+    assert r["controlled"] == ["control:controlled"], "the controller's grid was applied"
+    assert r["leave"] == ["control:free"], "a leave's reattach applied the controller's grid"
+    assert r["flagSpent"] is False
+    assert r["leaveEcho"] == ["control:free", "resize:90x30"]
+    assert r["binary"] == ["resize:50x15"]
+    assert r["text"] == ["resize:50x15"]
+    assert r["output"] == ["resize:50x15"]
+    assert r["second"] == ["resize:50x15", "resize:60x20"]
+    assert r["gDial"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_controlled_view_chip_focus_and_lease_ask(tmp_path):
+    s66 = _src239("66_js_notices_zorder.js")
+    s64 = _src239("64_js_sessions_poll_control.js")
+    r = _node239(tmp_path, r"""
+const terminalControl = Object.create(null);
+const windows = new Map();
+let frontId = null;
+function mkChip(id) {
+    const cls = new Set();
+    return {dataset: {sessionId: id}, cls,
+            classList: {toggle(c, on) { if (on) cls.add(c); else cls.delete(c); }}};
+}
+const chips = [mkChip('local:1'), mkChip('local:2'), mkChip('r:3')];
+const document = {querySelectorAll: () => chips};
+const log = [];
+const _leaseAffordance = {armed: false, asked: false};
+const controlSockets = new Map();
+const WebSocket = {OPEN: 1};
+function localHost() { return {id: 'local'}; }
+function homeHostId() { return 'local'; }
+""" + "".join(_fn239("84b_js_controlled_view.js", sig) for sig in (
+        "function controlledViewFor(",))
+      + _frag_fn(s66, "function updateTaskbarActive(") + "\n        }\n"
+      + _frag_fn(s66, "function focusWin(") + "\n        }\n"
+      + _frag_fn(s64, "function sendBecomeActive(") + "\n        }\n" + r"""
+const out = {};
+// B: the chip mark comes from the live window, else the record
+windows.set('local:1', {controlled: {label: 'p', gen: 1}});
+windows.set('local:2', {controlled: null});
+terminalControl['r:3'] = {state: 'controlled', label: 'q', gen: 2};
+updateTaskbarActive();
+out.chips = chips.map((c) => c.cls.has('controlled'));
+// C: focus goes to the usable button, else the overlay, never the xterm
+const btn = {isConnected: true, disabled: false, focus() { log.push('btn'); }};
+const ov = {focus() { log.push('overlay'); }};
+const term = {focus() { log.push('term'); }};
+focusWin({controlled: {gen: 1}, ctlBtn: btn, ctlOverlay: ov, term});
+btn.disabled = true;
+focusWin({controlled: {gen: 1}, ctlBtn: btn, ctlOverlay: ov, term});
+focusWin({controlled: null, term});
+out.focus = log.splice(0);
+// D: Become active pressed while the affordance is armed records the ask
+controlSockets.set('local', {ws: {readyState: 1, send(m) { log.push(m); }}});
+sendBecomeActive();
+out.unarmedAsk = _leaseAffordance.asked;
+_leaseAffordance.armed = true;
+sendBecomeActive();
+out.armedAsk = _leaseAffordance.asked;
+console.log(JSON.stringify(out));
+""")
+    assert r["chips"] == [True, False, True]
+    assert r["focus"] == ["btn", "overlay", "term"]
+    assert r["unarmedAsk"] is False and r["armedAsk"] is True

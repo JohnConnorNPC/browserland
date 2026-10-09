@@ -182,6 +182,13 @@
             // applies the held one, so nothing changes there.
             let firstResized = true;
             let heldResized = null;
+            // A socket leaveControlled (84b) dialed: its attach `resized` is
+            // still the CONTROLLER's grid (the PTY has not heard from this
+            // window yet), so it is never applied, not even on a free frame.
+            // The window keeps its own box and grid; onopen's forced resize
+            // is what the producer gets, and its echo is applied as usual.
+            const dropAttachResized = win._leaveReattach === true;
+            win._leaveReattach = false;
             const flushHeldResized = () => {
                 const h = heldResized;
                 heldResized = null;
@@ -245,7 +252,7 @@
                     // `control` frame (heldResized, above).
                     if (firstResized) {
                         firstResized = false;
-                        heldResized = data;
+                        if (!dropAttachResized) heldResized = data;
                         return;
                     }
                     applyResized(data);

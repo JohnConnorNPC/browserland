@@ -69,7 +69,7 @@ terminal bytes and are not part of the input funnel.
 
 | Where | Call | What it carries | Hookable? |
 |---|---|---|---|
-| `73_js_window_runtime.js` `resized` handler | `win.term.resize(cols, rows)` | the applied grid (broker-confirmed) | yes |
+| `73_js_window_runtime.js` `applyResized` (each `resized` frame; a socket's first one is held for its first `control` frame, #239) | `win.term.resize(cols, rows)` | the applied grid (broker-confirmed) | yes |
 | `73_js_window_runtime.js` `sendResize` | `win.ws.send({type:'resize',cols,rows})` | the requested grid | yes |
 
 Core measures cells itself (`readCellDims`) and requests a grid over the wire;
