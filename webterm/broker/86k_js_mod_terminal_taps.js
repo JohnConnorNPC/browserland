@@ -587,10 +587,10 @@
             return st;
         }
 
-        // `seen` is written BEFORE the call, so a handler that throws, or one
-        // that causes a nested dispatch, is never told this state again. The
-        // log line has its own try: a replaced console must not be able to
-        // turn one subscriber's throw into its siblings' silence.
+        // `seen` is the state this subscriber was last handed, recorded even
+        // when its handler throws, so a throw never earns a repeat. The log
+        // line has its own try: a replaced console must not be able to turn
+        // one subscriber's throw into its siblings' silence.
         function _deliverTermCtl(rec, view) {
             rec.seen = view;
             try { rec.fn(view); }
