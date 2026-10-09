@@ -327,9 +327,11 @@
             applyRemoteLease(hostId, false);
         }
 
-        // openWindow's tail (67): a terminal that is controlled right now is
-        // built greyed and is never attached (the tail's attach is refused).
-        // Not a change, so no controlStateChanged: the chip already says so.
+        // openWindow (67), right after the window is mapped and BEFORE its
+        // create-time emit: a terminal that is controlled right now is built
+        // greyed and never attached (the tail's attach is refused), and a mod
+        // subscribing at create already sees it controlled (#240). Not a
+        // change, so no controlStateChanged: the chip already says so.
         function seedControlledWindow(win) {
             const rec = terminalControl[controlKey(win.hostId, win.sid)];
             if (!rec || rec.state !== 'controlled') return;
@@ -353,8 +355,18 @@
 
         // The one post-apply hook: runs once per applied change, after enter
         // (socket already closed) or leave (reattachWindow already called; the
-        // dial is in flight), and for chip-only keys too.
+        // dial is in flight), and for chip-only keys too. Mods hear it last,
+        // through info.onControlChanged (#240, 86k), once the chip is painted;
+        // a terminal window only, and nothing a mod throws can escape into the
+        // source that applied the view.
         function controlStateChanged(key) {
             try { updateTaskbarActive(); } catch (_) {}
             try { updateTaskbarLabel(String(key)); } catch (_) {}
+            try {
+                const w = windows.get(String(key));
+                if (w && !w.disposed && w.type !== 'app'
+                    && typeof dispatchTermControl === 'function') {
+                    dispatchTermControl(w);
+                }
+            } catch (_) {}
         }

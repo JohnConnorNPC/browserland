@@ -32349,3 +32349,279 @@ def test_mod_control_removal_is_armed_before_the_replay(control_harness):
     assert r["errors"] == []
     assert r["seen"] == ["free"] and r["sent"] == 0, \
         "a replay that disabled its own mod left the subscription alive"
+
+
+# --- #240 A2: the core seam (84b controlStateChanged -> 86k) -----------------
+# The REAL 84b transition functions and controlStateChanged, the REAL 86k
+# ranges, and openWindow's map-insert -> seed -> create-emit lines lifted
+# VERBATIM out of 67. Stubbed: what 84b does to the world (socket close,
+# reattach, overlay paint, focus, chip paint), each counted, so a subscriber
+# can check at call time that core had already applied the state.
+
+_OPEN67_START = "            windows.set(id, win);"
+_OPEN67_END = "            // Restore-on-refresh"
+
+
+def _open67_source():
+    src = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    a = src.index(_OPEN67_START)
+    b = src.index(_OPEN67_END, a)
+    body = src[a:b]
+    assert "seedControlledWindow(win);" in body
+    assert "_emitTerminalCreate(win, cb);" in body
+    return body
+
+
+def _core84b_source():
+    return _rules239() + "".join(
+        _fn239("84b_js_controlled_view.js", sig) for sig in (
+            "function applyControlView(", "function transitionControlledWindow(",
+            "function enterControlled(", "function leaveControlled(",
+            "function seedControlledWindow(", "function controlStateChanged("))
+
+
+def test_mod_control_seed_runs_before_the_create_emit_inside_open_window():
+    src = _js_strip_comments_and_strings(
+        (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8"))
+    body = _frag_fn(src, "function openWindow(id, sess) {")
+    seed = body.index("seedControlledWindow(win);")
+    assert body.count("seedControlledWindow(") == 1
+    assert body.index("windows.set(id, win);") < seed \
+        < body.index("_emitTerminalCreate(win, cb);"), \
+        "a mod subscribing at create would replay free on a controlled window"
+
+
+_CORE_CTL_HARNESS = r"""
+'use strict';
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+function El(cls) {
+    this.className = cls || ''; this.children = []; this.parentNode = null;
+    const set = new Set();
+    this.classList = { add: (c) => set.add(c), remove: (c) => set.delete(c),
+                       has: (c) => set.has(c) };
+}
+El.prototype.appendChild = function (kid) { kid.parentNode = this; this.children.push(kid); return kid; };
+El.prototype.insertBefore = function (kid, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+const windows = new Map();
+const terminalControl = Object.create(null);
+let frontId = null;
+const performance = { t: 0, now() { return ++this.t; } };
+const n = { close: 0, reattach: 0, paint: 0, focus: 0, chipActive: 0, chipLabel: 0 };
+function _closeWinSocket(win) { n.close += 1; win.ws = null; }
+function reattachWindow(win) { n.reattach += 1; }
+function paintControlOverlay(win) { n.paint += 1; }
+function focusWin(win) { n.focus += 1; }
+function updateTaskbarActive() { n.chipActive += 1; }
+function updateTaskbarLabel(key) { n.chipLabel += 1; }
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__CONTROL__
+
+__UNLOADS__
+
+__CORE84B__
+
+function openWindowReduced(id) {
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const win = { id: id, type: 'term', dom: dom, body: new El('term-body'),
+                  hostId: id.split(':')[0], sid: id.split(':')[1],
+                  cleanups: [], disposed: false, detached: false,
+                  controlled: null, ws: {} };
+    // ---- 67 openWindow, verbatim: map insert -> seed -> create emit ----
+    __OPEN67__
+    return win;
+}
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = { id: id, ctxVersion: 1,
+        onUnload: function (fn) { if (typeof fn === 'function') rec.unloads.push(fn); },
+        windows: { onTerminalCreate: function (cb) {
+            const off = registerTerminalCreate(cb); rec.unloads.push(off); return off; } } };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+const C = (label, gen) => ({ state: 'controlled', label: label, since: 1000, gen: gen });
+const F = (gen) => ({ state: 'free', label: null, since: null, gen: gen });
+// A mod that records, AT CALL TIME, what core had already done.
+function watch(win) {
+    const seen = [];
+    const m = modCtx('w' + win.id);
+    m.ctx.windows.onTerminalCreate(function (info) {
+        if (info.win !== win) return;
+        info.onControlChanged(function (c) {
+            seen.push({ state: c.state, gen: c.gen === undefined ? null : c.gen,
+                        close: n.close, reattach: n.reattach,
+                        chipActive: n.chipActive, chipLabel: n.chipLabel,
+                        winCleared: win.controlled === null,
+                        same: c === info.control() });
+        });
+    });
+    return seen;
+}
+
+const CASES = {};
+
+CASES.claim_and_release = function () {
+    const win = openWindowReduced('h1:1');
+    const seen = watch(win);
+    applyControlView('h1:1', C('phone', 5), 'push');
+    applyControlView('h1:1', C('phone', 5), 'poll', performance.now() + 5);
+    applyControlView('h1:1', F(6), 'push');
+    return { seen: seen, errors: errors };
+};
+
+CASES.detached_leave = function () {
+    const win = openWindowReduced('h1:2');
+    win.detached = true;
+    const seen = watch(win);
+    applyControlView('h1:2', C('phone', 5), 'push');
+    applyControlView('h1:2', F(6), 'push');
+    return { seen: seen, reattach: n.reattach, errors: errors };
+};
+
+// Opened while the record says controlled: a mod registered BEFORE the open
+// is told controlled at create, once -- never free first.
+CASES.open_while_controlled = function () {
+    terminalControl['h1:3'] = { state: 'controlled', label: 'phone', since: 1,
+                                gen: 9, at: 0 };
+    const seen = [];
+    const m = modCtx('early');
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onControlChanged(function (c) { seen.push([c.state, c.gen || null]); });
+    });
+    const win = openWindowReduced('h1:3');
+    return { seen: seen, entered: !!win.controlled, close: n.close,
+             errors: errors };
+};
+
+// A dispatch that throws stays inside the hook: the view is applied, the chip
+// is painted, and nothing reaches the source that applied it.
+CASES.dispatch_throws = function () {
+    const win = openWindowReduced('h1:4');
+    watch(win);
+    const real = dispatchTermControl;
+    dispatchTermControl = function () { throw new Error('dispatch blew up'); };
+    let escaped = null, applied = null;
+    try { applied = applyControlView('h1:4', C('phone', 5), 'push'); }
+    catch (e) { escaped = String(e); }
+    dispatchTermControl = real;
+    return { applied: applied, escaped: escaped, controlled: !!win.controlled,
+             chipActive: n.chipActive, chipLabel: n.chipLabel, errors: errors };
+};
+
+// A chip-only key (no window) dispatches nothing.
+CASES.chip_only = function () {
+    const real = dispatchTermControl;
+    let calls = 0;
+    dispatchTermControl = function (w) { calls += 1; return real(w); };
+    applyControlView('h7:1', C('phone', 5), 'push');
+    applyControlView('h7:1', F(6), 'push');
+    dispatchTermControl = real;
+    return { calls: calls, chipActive: n.chipActive, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+process.stdout.write(JSON.stringify(CASES[want]()) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def core_control_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("corecontrol") / "harness.js"
+    path.write_text(
+        _CORE_CTL_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__CONTROL__", _term_control_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__CORE84B__", _core84b_source())
+        .replace("__OPEN67__", _open67_source()),
+        encoding="utf-8")
+    return path
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_core_tells_mods_after_it_applied_the_state(
+        core_control_harness):
+    r = _run_control(core_control_harness, "claim_and_release")
+    assert r["errors"] == []
+    free0, claim, release = r["seen"]
+    assert (free0["state"], claim["state"], release["state"]) == \
+        ("free", "controlled", "free")
+    assert len(r["seen"]) == 3, "the same poll row re-told a state"
+    # Enter: the socket was already closed and the chip already painted.
+    assert claim["close"] == 1 and claim["gen"] == 5
+    assert claim["chipActive"] == 1 and claim["chipLabel"] == 1, \
+        "mods heard of the claim before the chip was painted"
+    # Leave: win.controlled already cleared and the reattach already issued.
+    assert release["winCleared"] is True and release["reattach"] == 1
+    assert release["chipActive"] == 2 and release["chipLabel"] == 2
+    assert all(s["same"] for s in r["seen"]), "info.control() lagged"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_core_tells_a_detached_window_without_reattaching(
+        core_control_harness):
+    r = _run_control(core_control_harness, "detached_leave")
+    assert r["errors"] == []
+    assert [s["state"] for s in r["seen"]] == ["free", "controlled", "free"]
+    assert r["reattach"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_core_open_while_controlled_is_controlled_at_create(
+        core_control_harness):
+    r = _run_control(core_control_harness, "open_while_controlled")
+    assert r["errors"] == []
+    assert r["entered"] is True and r["close"] == 1
+    assert r["seen"] == [["controlled", 9]], \
+        "a mod saw free (or nothing, or twice) on a window opened controlled"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_core_a_throwing_dispatch_stays_in_the_hook(
+        core_control_harness):
+    r = _run_control(core_control_harness, "dispatch_throws")
+    assert r["escaped"] is None, f"a mod dispatch escaped: {r['escaped']}"
+    assert r["applied"] is True and r["controlled"] is True
+    assert r["chipActive"] == 1 and r["chipLabel"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_core_a_chip_only_key_dispatches_nothing(
+        core_control_harness):
+    r = _run_control(core_control_harness, "chip_only")
+    assert r["errors"] == []
+    assert r["calls"] == 0 and r["chipActive"] == 2
