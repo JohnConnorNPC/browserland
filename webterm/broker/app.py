@@ -91,6 +91,10 @@ from .launcher import LaunchError, Launcher, default_profiles
 # the per-window store that validates them (#228), and so are the scope
 # grammar and the header a client declares a scope on (#230).
 from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
+# #245: the MCP admin credential's header (see protocol.py). Re-exported
+# through mcp_windows' neighbours for symmetry with SCOPE_HEADER, which the
+# mcp_windows module re-exports from protocol.
+from ..protocol import MCP_ADMIN_HEADER
 from .registry import (CONTROL_SEND_TIMEOUT, BrokerRegistry,
                        run_producer_session)
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
@@ -4681,6 +4685,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _vary = response.headers["Vary"]
             if SCOPE_HEADER.lower() not in _vary.lower():
                 response.headers["Vary"] = _vary + ", " + SCOPE_HEADER
+            # #245: an /mcp/* body also depends on the admin header (the
+            # listing, /mcp/info's admin echo, 403 admin_required), so it
+            # rides Vary under the same ?token= reasoning as the scope.
+            _vary = response.headers["Vary"]
+            if MCP_ADMIN_HEADER.lower() not in _vary.lower():
+                response.headers["Vary"] = _vary + ", " + MCP_ADMIN_HEADER
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
@@ -4699,6 +4709,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _allow = "Authorization, Content-Type, " + SCOPE_HEADER
             if app.ctx.admin_token is not None:
                 _allow += ", " + ADMIN_HEADER
+            # MCP_ADMIN_HEADER (#245) is advertised UNCONDITIONALLY, and only
+            # on /mcp/* preflights — a deliberate divergence from #191's
+            # conditional rule above. #191's realm is boot-static config, so
+            # its conditional answer can never go stale; the MCP admin realm
+            # is RUNTIME-MUTABLE (minted/rotated/cleared from the Control
+            # Panel), and a cached conditional omission would keep a browser
+            # from sending the header for up to the 86400 Max-Age. The header
+            # NAME leaks nothing: /mcp/info's `admin` echo is token-gated.
+            if request.path.startswith("/mcp/"):
+                _allow += ", " + MCP_ADMIN_HEADER
             response.headers["Access-Control-Allow-Headers"] = _allow
             response.headers["Access-Control-Max-Age"] = "86400"
             # Chrome Private Network Access: a public-site page fetching a
@@ -6684,8 +6704,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return value
 
     def _mcp_auth_error(request: Request):
-        # Order: mcp_disabled, then the token, then the scope, so a caller
-        # without the token cannot probe which scope names are valid.
+        # Order: mcp_disabled, then the token, then the scope, then the admin
+        # header (#245), so a caller without the token cannot probe which
+        # scope names are valid, and one without the MCP admin credential
+        # learns nothing about it either.
         cfg = app.ctx.mcp_cfg
         if not cfg.get("enabled") or not cfg.get("token"):
             return sanic_json({"error": "mcp_disabled"}, status=403)
@@ -6696,12 +6718,60 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _mcp_scope(request)
         except ValueError:
             return sanic_json({"error": "bad_scope"}, status=400)
+        return _mcp_admin_error(request)
+
+    def _mcp_admin_error(request: Request):
+        """#245: step 4 of the /mcp refusal ladder, run by _mcp_auth_error on
+        every token route. The MCP admin credential travels ONLY in the
+        X-Browserland-Mcp-Admin header, ADDITIONAL to the MCP token: a request
+        carrying it in the query string is refused outright (keys as well as
+        values — the #191 _admin_auth_error rule, because a token in a URL is
+        a credential in every access log and Referer downstream), and a
+        header PRESENT but not matching the configured token is 403
+        admin_required. Three states, exactly: absent = a plain non-admin
+        caller (never an error here; admin-only ops 403 at their route),
+        present + matching = admin, present + wrong = 403. With NO admin
+        token configured this returns None before touching the request —
+        today's wire, byte for byte — and /mcp/info answers admin: false so a
+        client fails closed. Log lines name the route and the peer, never
+        the header or query value."""
+        admin = app.ctx.mcp_cfg["admin_token"]
+        if admin is None:
+            return None
+        for _key, val in request.query_args:
+            if (auth.token_matches(val, admin)
+                    or auth.token_matches(_key, admin)):
+                LOGGER.warning("rejected admin token in query string on %s "
+                               "from %s (header-only transport)",
+                               request.path, request.ip)
+                return sanic_json({"error": "admin_token_in_url"}, status=400)
+        provided = request.headers.get(MCP_ADMIN_HEADER)
+        if provided is not None and not auth.token_matches(provided, admin):
+            LOGGER.warning("rejected non-admin /mcp call from %s", request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
         return None
+
+    def _mcp_is_admin(request: Request) -> bool:
+        # #245: this caller presented the configured MCP admin credential.
+        # _mcp_admin_error already refused a present-but-wrong header, so here
+        # the header is absent (plain caller) or right; constant-time compare
+        # either way, like every gate.
+        admin = app.ctx.mcp_cfg["admin_token"]
+        return admin is not None and auth.token_matches(
+            request.headers.get(MCP_ADMIN_HEADER), admin)
 
     def _mcp_effective_mode(entry) -> str:
         # Per-window override OR the live broker default, so flipping the
         # default live-updates every non-overridden window.
         return entry.mcp_mode or app.ctx.mcp_cfg["default_mode"]
+
+    def _mcp_unknown_or_off():
+        """#230/#243/#244: the ONE 404 every hidden-window refusal answers.
+        Missing, off and out-of-scope must stay byte-identical so the answer
+        cannot be used as an existence probe; /mcp/window's handle path and
+        the desktop routes answer these exact bytes too, which is why the
+        construction lives here instead of being repeated per route."""
+        return sanic_json({"error": "unknown_or_off"}, status=404)
 
     def _mcp_entry(request: Request):
         """Resolve {id} to a live entry whose effective mode != off and, when
@@ -6727,8 +6797,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         scope = _mcp_scope(request)
         if (entry is None or mode == "off"
                 or (scope is not None and entry.mcp_scope != scope)):
-            return None, None, sanic_json({"error": "unknown_or_off"},
-                                          status=404)
+            return None, None, _mcp_unknown_or_off()
         return entry, mode, None
 
     async def _mcp_info(request: Request):
@@ -6746,7 +6815,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            # scopes, or a proxy that dropped the header,
                            # answers without it or with null, and would
                            # otherwise hand it the unscoped view silently.
-                           "scope": _mcp_scope(request)})
+                           "scope": _mcp_scope(request),
+                           # #245: whether THIS caller holds the admin
+                           # credential. A broker predating admin answers
+                           # without the key, and a client must take absence
+                           # as false (the scope echo pattern).
+                           "admin": _mcp_is_admin(request)})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)

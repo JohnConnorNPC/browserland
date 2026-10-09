@@ -2180,8 +2180,14 @@ def _tokens(value):
 def test_a_preflight_allows_the_scope_header_without_an_admin_realm(
         tmp_path, monkeypatch):
     """#230: the scope header is in Access-Control-Allow-Headers on a broker
-    with no admin_token (the admin header is not), and a preflight never
-    runs the MCP gate, so one carrying even a bad scope is a plain 204."""
+    with no admin_token (the #191 admin header is not), and a preflight never
+    runs the MCP gate, so one carrying even a bad scope is a plain 204.
+
+    #245 (existing-test edit, design review [c11]): the MCP admin header is
+    advertised UNCONDITIONALLY on /mcp/* preflights — that realm is
+    runtime-mutable, so a conditional list would stale behind the Max-Age —
+    so the expected list grew by exactly that one name."""
+    from webterm.protocol import MCP_ADMIN_HEADER
     app = _wire_app(tmp_path, monkeypatch)
     assert app.ctx.admin_token is None
     for headers in ([], [(SCOPE_HEADER, "a:b")]):
@@ -2193,7 +2199,7 @@ def test_a_preflight_allows_the_scope_header_without_an_admin_realm(
                       "authorization, " + SCOPE_HEADER.lower()), *headers])
         assert resp.status == 204
         assert _tokens(resp.headers.get("Access-Control-Allow-Headers")) == [
-            "Authorization", "Content-Type", SCOPE_HEADER]
+            "Authorization", "Content-Type", SCOPE_HEADER, MCP_ADMIN_HEADER]
 
 
 def test_mcp_responses_vary_on_the_scope_header(tmp_path, monkeypatch):

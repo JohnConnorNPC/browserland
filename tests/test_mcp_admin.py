@@ -154,3 +154,180 @@ def test_config_rejects_non_string_admin_token(tmp_path, monkeypatch):
     _, resp = authed(app).post("/mcp/config", json={"admin_token": 3})
     assert (resp.status, resp.json["error"]) == (400, "bad_token")
     assert not _sidecar(tmp_path).exists()
+
+
+# ---- A2: the refusal ladder's admin step ----------------------------------
+
+_ABSENT_ADMIN = object()
+MCP_TOKEN_ROUTES = {
+    "/mcp/info": ("GET", None),
+    "/mcp/terminals": ("GET", None),
+    "/mcp/read": ("POST", {"id": 5}),
+    "/mcp/input": ("POST", {"id": 5, "data": "x"}),
+    "/mcp/reset": ("POST", {"id": 5}),
+    "/mcp/flush": ("POST", {"id": 5}),
+    "/mcp/pace": ("POST", {"id": 5, "pace_ms": 5}),
+    "/mcp/profiles": ("GET", None),
+    "/mcp/launch": ("POST", {}),
+}
+BAD_ADMIN = [("Authorization", f"Bearer {MCP_TOKEN}"),
+             (MCP_ADMIN_HEADER, "wrong-admin-credential")]
+
+
+def _mcp(app, path, *, token=MCP_TOKEN, admin=_ABSENT_ADMIN, params=None,
+         extra_headers=()):
+    headers = [("Authorization", f"Bearer {token}")]
+    if admin is not _ABSENT_ADMIN:
+        headers.append((MCP_ADMIN_HEADER, admin))
+    headers.extend(extra_headers)
+    method, body = MCP_TOKEN_ROUTES[path]
+    if method == "GET":
+        return app.test_client.get(path, headers=headers, params=params)
+    return app.test_client.post(path, json=body, headers=headers, params=params)
+
+
+def test_ladder_disabled_token_scope_admin_order(tmp_path, monkeypatch):
+    """#245: the ladder's order is pinned — a broker with MCP off answers
+    mcp_disabled whatever the admin header says; a bad MCP token answers 401
+    (the admin credential is ADDITIONAL, never a substitute); a bad scope
+    answers 400 before the admin step; only then does a present-but-wrong
+    admin header 403."""
+    disabled = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN,
+                         mcp_enabled=False)
+    _, resp = _mcp(disabled, "/mcp/info", admin="wrong-admin-credential")
+    assert (resp.status, resp.json["error"]) == (403, "mcp_disabled")
+
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/info", token="wrong-token",
+                   admin="wrong-admin-credential")
+    assert (resp.status, resp.json["error"]) == (401, "auth_required")
+
+    _, resp = _mcp(app, "/mcp/info", extra_headers=[
+        ("X-Browserland-Scope", "a:b"), (MCP_ADMIN_HEADER, "nope")])
+    assert (resp.status, resp.json["error"]) == (400, "bad_scope")
+
+    _, resp = _mcp(app, "/mcp/info", admin="wrong-admin-credential")
+    assert (resp.status, resp.json["error"]) == (403, "admin_required")
+
+
+def test_wrong_admin_header_403_and_nothing_written(tmp_path, monkeypatch):
+    """#245: a present-but-wrong admin header is 403 on a plain route, and
+    the refusal happens before anything is written: the MCP sidecar is
+    byte-identical afterwards."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    before = _sidecar(tmp_path).read_bytes() if _sidecar(tmp_path).exists() \
+        else None
+    for path in ("/mcp/info", "/mcp/terminals", "/mcp/launch"):
+        _, resp = _mcp(app, path, admin="wrong-admin-credential")
+        assert (resp.status, resp.json["error"]) == (403, "admin_required")
+    after = _sidecar(tmp_path).read_bytes() if _sidecar(tmp_path).exists() \
+        else None
+    assert after == before
+
+
+def test_absent_header_never_errors_on_plain_routes(tmp_path, monkeypatch):
+    """#245: the three states — absent is a plain non-admin caller and every
+    ordinary route answers 200 with admin: false; present + matching is
+    admin; present + wrong is 403 (pinned above). Configuring the admin
+    credential must not break a non-admin client."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/info")
+    assert resp.status == 200
+    assert resp.json["admin"] is False
+
+
+def test_admin_token_in_query_refused_even_with_correct_header(
+        tmp_path, monkeypatch):
+    """#245: the admin credential in the URL — as a value or as a KEY — is
+    refused with 400 admin_token_in_url even when the header is also
+    correct: the rule is about where the secret has BEEN (#191)."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/info", admin=ADMIN_TOKEN,
+                   params={"admin": ADMIN_TOKEN})
+    assert (resp.status, resp.json["error"]) == (400, "admin_token_in_url")
+    _, resp = _mcp(app, "/mcp/info", admin=ADMIN_TOKEN,
+                   params={ADMIN_TOKEN: "1"})
+    assert (resp.status, resp.json["error"]) == (400, "admin_token_in_url")
+
+
+def test_admin_header_ignored_when_unconfigured(tmp_path, monkeypatch):
+    """#245: with no admin token configured the header is ignored entirely —
+    the pre-#245 wire, byte for byte — and /mcp/info says admin: false so a
+    client fails closed."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, plain = _mcp(app, "/mcp/info")
+    _, with_header = _mcp(app, "/mcp/info", admin="anything-at-all")
+    assert with_header.status == 200
+    assert with_header.body == plain.body
+    assert plain.json["admin"] is False
+
+
+def test_info_echoes_admin_true_false(tmp_path, monkeypatch):
+    """#245: /mcp/info answers admin: true only for a caller that presented
+    the configured credential."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/info", admin=ADMIN_TOKEN)
+    assert resp.json["admin"] is True
+
+
+def test_mcp_route_ladder_inventory(tmp_path, monkeypatch):
+    """#245: derived from the RUNNING router, not a hand list: every /mcp/*
+    token route (the browser-realm /mcp/config and OPTIONS preflights
+    exempt) refuses an unauthenticated caller 401, a bad scope 400 and a
+    present-but-wrong admin header 403 — all from the shared ladder, before
+    the route's own checks."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    served = sorted(
+        ("/" + r.path, method) for r in app.router.routes
+        for method in r.methods
+        if r.path.startswith("mcp/") and method != "OPTIONS")
+    served = [entry for entry in served
+              if entry not in (("/mcp/config", "GET"), ("/mcp/config",
+                                                        "POST"))]
+    assert set(served) == {(path, method) for path, (method, _body)
+                           in MCP_TOKEN_ROUTES.items()}
+    for path, method in served:
+        _, resp = _mcp(app, path, token="wrong")
+        assert (resp.status, resp.json["error"]) == (401, "auth_required"), \
+            (path, method)
+        _, resp = _mcp(app, path, extra_headers=[
+            ("X-Browserland-Scope", "a:b"), (MCP_ADMIN_HEADER, "nope")])
+        assert (resp.status, resp.json["error"]) == (400, "bad_scope"), \
+            (path, method)
+        _, resp = _mcp(app, path, admin="wrong-admin-credential")
+        assert (resp.status, resp.json["error"]) == (403, "admin_required"), \
+            (path, method)
+
+
+def test_preflight_advertises_admin_header_unconditionally(tmp_path,
+                                                            monkeypatch):
+    """#245: MCP_ADMIN_HEADER is in Access-Control-Allow-Headers on every
+    /mcp/* preflight even with NO admin token configured (the realm is
+    runtime-mutable, so a conditional list would stale behind the Max-Age),
+    and never on a non-/mcp preflight."""
+    app = _make_app(tmp_path, monkeypatch)
+    assert app.ctx.mcp_cfg["admin_token"] is None
+    _, resp = app.test_client.options(
+        "/mcp/terminals",
+        headers=[("Origin", "https://elsewhere.example"),
+                 ("Access-Control-Request-Method", "GET")])
+    assert resp.status == 204
+    allowed = [t.strip() for t in
+               resp.headers["Access-Control-Allow-Headers"].split(",")]
+    assert MCP_ADMIN_HEADER in allowed
+    _, resp = app.test_client.options(
+        "/sessions",
+        headers=[("Origin", "https://elsewhere.example"),
+                 ("Access-Control-Request-Method", "GET")])
+    assert MCP_ADMIN_HEADER not in \
+        resp.headers["Access-Control-Allow-Headers"]
+
+
+def test_mcp_responses_vary_on_admin_header(tmp_path, monkeypatch):
+    """#245: an /mcp/* answer depends on the admin header (the listing, the
+    echo, the 403), so it rides Vary beside the scope header and Cookie."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, resp = _mcp(app, "/mcp/info")
+    vary = resp.headers.get("Vary", "")
+    assert MCP_ADMIN_HEADER in vary
+    assert "X-Browserland-Scope" in vary
