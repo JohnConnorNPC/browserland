@@ -494,15 +494,25 @@ try:
         page.wait_for_timeout(600)
         check(any(f.get("type") == "resize" and (f["cols"], f["rows"]) == (50, 15)
                   for f in PROD.frames), "P3 setup: the controller resized the PTY to 50x15")
+        # Observed by EVENTS, not by frames: a leave that applied the
+        # controller's grid would snap and snap back within one round trip,
+        # which per-frame sampling can miss. xterm's own onResize fires
+        # synchronously on every grid change; the MutationObserver keeps
+        # every intermediate style (attributeOldValue), so no change can
+        # hide between two samples. Width/height only: a click also rewrites
+        # style.zIndex, which is not a move.
         geo0 = page.evaluate("""(k) => { const w = windows.get(k);
-            // Sampled every frame: the box (style width/height; a click also
-            // rewrites style.zIndex, which is not a move) and the xterm grid.
-            window.__boxes = []; window.__cols = [];
-            const tick = () => { if (window.__cols.length < 400) {
-                window.__cols.push(w.term.cols);
+            window.__grids = [];
+            window.__gridSub = w.term.onResize((e) => window.__grids.push(e.cols + 'x' + e.rows));
+            const box = (st) => { const m = /width:\\s*([^;]+);.*height:\\s*([^;]+);/.exec(st || '');
+                                  return m ? m[1] + 'x' + m[2] : String(st); };
+            window.__boxes = [w.dom.style.width + 'x' + w.dom.style.height];
+            window.__boxObs = new MutationObserver((recs) => {
+                for (const r of recs) window.__boxes.push(box(r.oldValue));
                 window.__boxes.push(w.dom.style.width + 'x' + w.dom.style.height);
-                requestAnimationFrame(tick); } };
-            requestAnimationFrame(tick);
+            });
+            window.__boxObs.observe(w.dom, {attributes: true, attributeFilter: ['style'],
+                                            attributeOldValue: true});
             const blob = JSON.parse(localStorage.getItem('webterm:prefs:v1') || '{}');
             return {style: [w.dom.style.width, w.dom.style.height],
                     pref: JSON.stringify(getPref(k).geom || null),
@@ -513,23 +523,35 @@ try:
         # answered, so the one attach below can only be leaveControlled's.
         PROXY.stall_polls = True
         page.wait_for_timeout(2500)
+        # The controller's 50x15 is the LAST size the broker holds right
+        # before Take back, so the leave's attach `resized` carries it.
+        held = [s_ for s_ in http_json(BASE + "/sessions") if s_["id"] == WID]
+        check(bool(held) and (held[0]["cols"], held[0]["rows"]) == (50, 15),
+              "P3 setup: the broker holds the controller's 50x15 right before Take back")
         page.click(".term-window[data-session-id=\"%s\"] .term-ctl-take" % KEY)
         ok = wait_for(page, FREE_ATTACHED, 10, KEY)
         page.wait_for_timeout(1500)
         PROXY.stall_polls = False
+        n3 = PROXY.sockets_since(t3)
+        att = [f for (ts, n, f) in PROXY.ws_recv if n3 and n == n3[0] and f.get("type") == "resized"]
+        check(bool(att) and (att[0]["cols"], att[0]["rows"]) == (50, 15),
+              "P3 setup: the leave's attach `resized` carried the controller's 50x15")
         geo1 = page.evaluate("""(k) => { const w = windows.get(k);
             const blob = JSON.parse(localStorage.getItem('webterm:prefs:v1') || '{}');
             return {style: [w.dom.style.width, w.dom.style.height],
                     pref: JSON.stringify(getPref(k).geom || null),
                     stored: JSON.stringify((blob[k] || {}).geom || null),
-                    boxes: Array.from(new Set(window.__boxes)), cols: window.__cols}; }""", KEY)
+                    boxes: Array.from(new Set(window.__boxes)), grids: window.__grids.slice(),
+                    _off: (window.__gridSub.dispose(), window.__boxObs.disconnect(), 0)}; }""", KEY)
         check(geo1["style"] == geo0["style"]
               and geo1["boxes"] == ["%sx%s" % tuple(geo0["style"])],
               "P3 take back (R2): the float's box never moved toward the controller's grid %s"
               % (geo1["boxes"],))
         check(geo1["pref"] == geo0["pref"] and geo1["stored"] == geo0["stored"],
               "P3 take back (R2): the saved geometry (prefs + localStorage) is unchanged")
-        check(50 not in geo1["cols"], "P3 take back (R2): the xterm never took the controller's 50 cols")
+        check("50x15" not in geo1["grids"],
+              "P3 take back (R2): the xterm never took the controller's 50x15 (grids seen: %s)"
+              % (geo1["grids"],))
         cid = page.evaluate("CLIENT_ID")
         check(ok and posts == [{"id": str(WID), "op": "release", "gen": live["gen"], "clientId": cid}],
               "P3 take back: one POST with the live gen and this browser's clientId")
