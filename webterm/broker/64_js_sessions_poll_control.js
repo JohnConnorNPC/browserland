@@ -119,6 +119,13 @@
         // only unique per broker) and opaque everywhere downstream; `sid`
         // stays the bare wire id.
         const sessions = new Map();
+        // #239: who controls each terminal, by the same '<hostId>:<sid>' key
+        // -> {state, label, since, gen, at}. Runtime only, never /state or
+        // prefs: the broker is the truth and re-tells a reloaded page. Written
+        // only by applyControlView (84b); it survives teardownView, so a
+        // lease rebuild re-enters the state, and is pruned where the poll
+        // drops a session (75). Prototype-free: keys are wire data.
+        const terminalControl = Object.create(null);
 
         // #123: single source of truth for the taskbar/title label — order AND
         // per-component visibility. Returns the VISIBLE parts in `show.order`,

@@ -170,6 +170,11 @@ _ORDERED = [
     # to it. After 84 because its boot/rebuild hooks are called from there;
     # before 85 so its eval-time body class lands before startup paints.
     "84a_js_detached_view.js",
+    # #239: a terminal controlled from another device (#238) -- greyed, kept
+    # in place, socketless, with Take back control. Declarations only; called
+    # from 64/67/73/75 at runtime. After 84a because enter reuses its
+    # _closeWinSocket; its state map lives in 64 (no TDZ at boot).
+    "84b_js_controlled_view.js",
     "85_js_startup.js",
     # Frontend mod loader (#71): defines registerMod/loadMods/ctx. Ordered after
     # all core JS so a mod's init(ctx) sees the finished desktop, but BEFORE the

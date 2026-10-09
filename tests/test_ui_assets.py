@@ -31218,3 +31218,115 @@ def test_the_mcp_hint_names_the_scoped_launch_exception():
     assert 'new windows start in "default mode" (one a scoped MCP client ' \
            'launches starts read-write; a mode set on a window survives ' \
            'broker restarts)' in hint
+
+
+# --------------------------------------------------------------------------- #
+# #239: a terminal controlled from another device (84b)
+# --------------------------------------------------------------------------- #
+# The behaviour (claim, take back, reload, rebuild, the recording proxy) is
+# verified out of band with tests/playwright_control.py against a scratch
+# broker; these are the collected gates. Every name carries `controlled_view`
+# so `-k controlled_view` selects exactly this section.
+
+def _src239(name):
+    return (BROKER_DIR / name).read_text(encoding="utf-8")
+
+
+def _fn239(name, sig):
+    """A top-level fragment function, closing brace included, ready to eval."""
+    return _frag_fn(_src239(name), sig) + "\n        }\n"
+
+
+def _node239(tmp_path, script):
+    path = tmp_path / "harness239.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run([NODE, str(path)], capture_output=True,
+                          encoding="utf-8", timeout=120)
+    assert proc.returncode == 0, (
+        f"harness failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _rules239():
+    return "".join(_fn239("84b_js_controlled_view.js", sig) for sig in (
+        "function controlKey(", "function normalizeControlView(",
+        "function controlViewAccept(", "function resetControlBaselines("))
+
+
+def test_controlled_view_fragment_is_ordered_after_detached_and_before_startup():
+    order = ui._ORDERED
+    assert (order.index("84a_js_detached_view.js")
+            < order.index("84b_js_controlled_view.js")
+            < order.index("85_js_startup.js"))
+    # The record map is declared in 64, beside `sessions`, so no call can
+    # reach it in its TDZ, and it is prototype-free.
+    s64 = _src239("64_js_sessions_poll_control.js")
+    assert "const terminalControl = Object.create(null);" in s64
+    assert s64.index("const sessions = new Map();") \
+        < s64.index("const terminalControl")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_controlled_view_acceptance_rules(tmp_path):
+    r = _node239(tmp_path, "const terminalControl = Object.create(null);\n"
+                 + _rules239() + r"""
+const out = {};
+const C = (gen, label) => ({state: 'controlled', label: label === undefined ? 'phone' : label, since: 5, gen});
+const F = (gen) => ({state: 'free', label: null, since: null, gen});
+// R2: a push / ws frame / POST answer applies only when its gen is newer.
+const rec = {state: 'controlled', label: 'phone', since: 5, gen: 10, at: 100};
+out.olderPush = controlViewAccept(rec, F(9), 'push');
+out.equalPush = controlViewAccept(rec, F(10), 'push');
+out.newerPush = controlViewAccept(rec, F(11), 'push');
+out.equalWs = controlViewAccept(rec, C(10), 'ws');
+out.olderPost = controlViewAccept(rec, F(9), 'post');
+out.noRec = controlViewAccept(null, F(1), 'push');
+out.nullBaseline = controlViewAccept(Object.assign({}, rec, {gen: null}), F(1), 'push');
+// R3: a poll row applies only when its poll was sent after the last write.
+out.pollBefore = controlViewAccept(rec, F(null), 'poll', 99);
+out.pollAfter = controlViewAccept(rec, C(3), 'poll', 101);
+out.pollNoSentAt = controlViewAccept(rec, F(null), 'poll');
+// Validation.
+const n = (v, s) => normalizeControlView(v, s);
+out.okControlled = n(C(4, 'phone'), 'push');
+out.freeDropsLabel = n({state: 'free', label: 'x', since: 3, gen: 2}, 'push');
+out.pollFreeNoGen = n(F(null), 'poll');
+out.pushFreeNoGen = n(F(null), 'push');
+out.revoked = n({state: 'revoked', by: 'claim', gen: 3}, 'ws');
+out.negGen = n(F(-1), 'push');
+out.floatGen = n(F(1.5), 'push');
+out.boolGen = n(F(true), 'push');
+out.emptyLabel = n(C(1, ''), 'push');
+out.label64 = n(C(1, '\u{1F600}'.repeat(64)), 'push') !== null;
+out.label65 = n(C(1, 'x'.repeat(65)), 'push');
+out.badSince = n({state: 'controlled', label: 'a', since: 'x', gen: 1}, 'push').since;
+// Re-baseline: one host's gens are forgotten, the other's kept.
+terminalControl['h1:5'] = {state: 'free', gen: 40, at: 1};
+terminalControl['h1:6'] = {state: 'controlled', gen: 41, at: 1};
+terminalControl['h10:5'] = {state: 'free', gen: 42, at: 1};
+resetControlBaselines('h1');
+out.reset = [terminalControl['h1:5'].gen, terminalControl['h1:6'].gen,
+             terminalControl['h10:5'].gen];
+out.afterReset = controlViewAccept(terminalControl['h1:5'], F(2), 'push');
+out.key = controlKey('local', 77);
+console.log(JSON.stringify(out));
+""")
+    assert (r["olderPush"], r["equalPush"], r["newerPush"]) == (False, False, True)
+    assert r["equalWs"] is False and r["olderPost"] is False
+    assert r["noRec"] is True and r["nullBaseline"] is True
+    assert (r["pollBefore"], r["pollAfter"], r["pollNoSentAt"]) == (False, True, False)
+    assert r["okControlled"] == {"state": "controlled", "label": "phone",
+                                 "since": 5, "gen": 4}
+    assert r["freeDropsLabel"] == {"state": "free", "label": None,
+                                   "since": None, "gen": 2}
+    assert r["pollFreeNoGen"] == {"state": "free", "label": None,
+                                  "since": None, "gen": None}
+    for bad in ("pushFreeNoGen", "revoked", "negGen", "floatGen", "boolGen",
+                "emptyLabel", "label65"):
+        assert r[bad] is None, bad
+    assert r["label64"] is True, "64 astral code points is a legal label"
+    assert r["badSince"] is None
+    assert r["reset"] == [None, None, 42], "only that host's gens are forgotten"
+    assert r["afterReset"] is True
+    assert r["key"] == "local:77"
