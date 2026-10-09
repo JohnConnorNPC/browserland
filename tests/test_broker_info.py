@@ -300,3 +300,25 @@ def test_info_mcp_scopes_stays_behind_the_browser_token(tmp_path, monkeypatch):
     _, response = app.test_client.get("/info")
     assert response.status == 401
     assert "mcp_scopes" not in response.json
+
+
+# ---- /info terminal-control capability (#238) ------------------------------
+
+@pytest.mark.parametrize("admin_token", [None, "admin-secret-0123456789abcdef"])
+def test_info_advertises_terminal_control_version_1(tmp_path, monkeypatch,
+                                                    admin_token):
+    # The flag a client gates external control on: the INTEGER 1 (a contract
+    # version, not a bool), with or without an admin realm.
+    app = _make_app(tmp_path, monkeypatch, token=None, admin_token=admin_token)
+    _, response = authed(app).get("/info")
+    assert response.status == 200
+    value = response.json["terminal_control"]
+    assert value == 1 and type(value) is int
+
+
+def test_info_terminal_control_stays_behind_the_browser_token(tmp_path,
+                                                              monkeypatch):
+    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    _, response = app.test_client.get("/info")
+    assert response.status == 401
+    assert "terminal_control" not in response.json

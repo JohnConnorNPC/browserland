@@ -4273,6 +4273,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.active_client_id = None
     app.ctx.control_clients = {}        # clientId -> set[ws]
     app.ctx.lease_lock = asyncio.Lock()
+
+    async def _push_terminal_control(window_id, view):
+        # #238: every /control socket hears every terminal's control change
+        # (the registry's ordered publisher calls this once per change, in gen
+        # order per terminal). A controlled desktop window has closed its /ws,
+        # so this is how it learns of a release it did not cause. Remote
+        # brokers' pages hold a /control here too, so they hear it as well.
+        frame = protocol.terminal_control_frame(window_id, view)
+        socks = [sock for group in list(app.ctx.control_clients.values())
+                 for sock in list(group)]
+        for sock in socks:
+            try:
+                await sock.send(frame)
+            except Exception as exc:
+                LOGGER.debug("terminal_control push failed: %s", exc)
+
+    app.ctx.registry.on_control = _push_terminal_control
     # MCP HTTP interface runtime config (token + default mode + allow-launch +
     # master enable). Persisted in a sidecar beside the /state store (override
     # with "mcp_state_path"), seeded from config/env. The lock serializes the
@@ -6558,6 +6575,57 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "id": wid, "mode": mode,
                            "scope": scope})
 
+    def _control_lease_refusal(client_id):
+        """#238: the lease gate for taking a terminal back. STRICTER than PUT
+        /state's _lease_refusal by owner ruling: a None lease refuses too, so
+        a token alone (no browser holding the lease) never releases a
+        controller. Costs the page nothing: its /control auto-activates a None
+        lease before it can see a controlled row. Returns the 409, or None."""
+        active = app.ctx.active_client_id
+        if active is None or client_id != active:
+            return sanic_json({"ok": False, "error": "not_active"},
+                              status=409)
+        return None
+
+    async def _session_control(request: Request):
+        # #238: the desktop takes a terminal back from its external
+        # controller. Body {id, op: "release", gen, clientId}. The refusal
+        # ladder, in order: 401 auth_required; 400 bad_json/bad_id; 404
+        # unknown_session (a dying entry too); 400 bad_op; 400 bad_gen (not
+        # an int >= 0, a bool included); 409 not_active (the lease, above);
+        # 409 stale_gen with the live view (free, or another controller's
+        # gen: a double click or a crossed claim never releases a newer one);
+        # 200 with the new free view. The released controller is sent
+        # `revoked` (by: browser) and keeps its socket as a watcher.
+        err = _gated_auth_error(request, "/session/control")
+        if err is not None:
+            return err
+        resolved, resp = _session_entry(request)
+        if resp is not None:
+            return resp
+        entry, body = resolved
+        registry = app.ctx.registry
+        if not registry.is_live(entry):
+            return sanic_json({"ok": False, "error": "unknown_session"},
+                              status=404)
+        if body.get("op") != "release":
+            return sanic_json({"ok": False, "error": "bad_op"}, status=400)
+        gen = body.get("gen")
+        if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
+            return sanic_json({"ok": False, "error": "bad_gen"}, status=400)
+        client_id = body.get("clientId")
+        client_id = client_id.strip() if isinstance(client_id, str) else ""
+        refusal = _control_lease_refusal(client_id)
+        if refusal is not None:
+            return refusal
+        if registry.release_by_gen(entry, gen) is not None:
+            body_out = {"ok": False, "error": "stale_gen", "id": entry.id}
+            body_out.update(entry.control_view())
+            return sanic_json(body_out, status=409)
+        body_out = {"ok": True, "id": entry.id}
+        body_out.update(entry.control_view())
+        return sanic_json(body_out)
+
     # ---- MCP HTTP interface (/mcp/*) -------------------------------------
     # Consumed by an EXTERNAL MCP server against a documented contract. Gated
     # by the per-broker MCP token only — a realm entirely separate from the
@@ -6698,6 +6766,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          # /mcp/pace); the MCP server reads it so a no-delay_ms
                          # send auto-paces. 0 = single-burst.
                          "pace_ms": int(s.get("pace_ms", 0) or 0),
+                         # #238: a person is driving this terminal from
+                         # outside. MCP input is NOT gated by it (owner
+                         # decision): this only lets an agent see it.
+                         "controlled": s.get("controller") is not None,
                          # #134: whether the agent has pyte. False -> read_screen
                          # uses the dependency-free textgrid fallback (no
                          # attr_runs #128 / keyframe repair #130; sparse alt-screen
@@ -7442,7 +7514,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # override are durable (the per-window store). A broker
                 # without the key predates all three, so a client reads its
                 # absence as "no scopes here", never probes with a write.
-                "mcp_scopes": True}
+                "mcp_scopes": True,
+                # #238: this build enforces per-terminal external control
+                # (the /ws control frames, the relay gate, the
+                # terminal_control push, POST /session/control). Unconditional
+                # like mcp_scopes; a client reads its absence as "no external
+                # control here". The integer is the contract version.
+                "terminal_control": 1}
         # #191: the admin-class advertisement. e1ca8e6-style capability
         # reporting -- published ONLY by a build that actually enforces the
         # class (app.ctx.admin_token set), so an old/non-enforcing peer never
@@ -9687,6 +9765,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
     app.add_route(_session_mcp, "/session/mcp", methods=["POST"])
+    app.add_route(_session_control, "/session/control", methods=["POST"])
     app.add_route(_info, "/info", methods=["GET"])
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
@@ -9758,6 +9837,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
                              ("/session/mcp", "preflight_session_mcp"),
+                             ("/session/control",
+                              "preflight_session_control"),
                              ("/info", "preflight_info"),
                              ("/mods/policy", "preflight_mods_policy"),
                              ("/status/fetch", "preflight_status_fetch"),

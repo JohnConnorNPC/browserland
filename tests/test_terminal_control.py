@@ -1032,3 +1032,269 @@ def test_e2e_bad_label(broker, label, wid):
         for ws in (ctl, prod):
             await ws.close()
     asyncio.run(scenario())
+
+
+def test_e2e_take_back_over_post_and_the_control_push(broker):
+    port, base = broker
+
+    async def scenario():
+        lease = await _lease(port, "tc-post")
+        other = await websockets.connect(
+            f"ws://127.0.0.1:{port}/control?clientId=tc-post-other"
+            f"&token={TOKEN}")
+        prod = await _producer(port, base, 238071)
+        ctl, _ = await _browser(port, 238071, "ext-post")
+        claimed = await _claim(ctl)
+        # Every /control socket hears the claim.
+        for sock in (lease, other):
+            pushed = await _until(sock, lambda f: f.get("type")
+                                  == "terminal_control" and f["id"] == 238071)
+            assert pushed == dict(claimed, type="terminal_control",
+                                  id=238071)
+        assert _session(base, 238071)["controller"] == {
+            "label": claimed["label"], "since": claimed["since"],
+            "gen": claimed["gen"]}
+        body = {"id": 238071, "op": "release", "gen": claimed["gen"]}
+        # A browser that does not hold the lease is refused.
+        status, resp = _http("POST", f"{base}/session/control",
+                             json.dumps(dict(body, clientId="tc-post-other"))
+                             .encode(), AUTH)
+        assert (status, resp) == (409, {"ok": False, "error": "not_active"})
+        status, resp = _http("POST", f"{base}/session/control",
+                             json.dumps(dict(body, clientId="tc-post"))
+                             .encode(), AUTH)
+        assert status == 200 and resp["state"] == "free"
+        assert resp["gen"] > claimed["gen"]
+        # The controller is told first, then sees the free view; its socket
+        # stays open as a watcher and its input is dropped.
+        assert await _until(ctl, _is_control()) == {
+            "type": "control", "state": "revoked", "by": "browser",
+            "gen": resp["gen"]}
+        assert await _until(ctl, _is_control()) == {
+            "type": "control", "state": "free", "label": None,
+            "since": None, "gen": resp["gen"]}
+        for sock in (lease, other):
+            pushed = await _until(sock, lambda f: f.get("type")
+                                  == "terminal_control" and f["id"] == 238071)
+            assert pushed["state"] == "free" and pushed["gen"] == resp["gen"]
+        assert _session(base, 238071)["controller"] is None
+        page, _ = await _browser(port, 238071, "tc-post")
+        await ctl.send(json.dumps({"type": "input", "data": "dropped"}))
+        await page.send(json.dumps({"type": "input", "data": "page"}))
+        assert await _next_drive(prod) == {"type": "input", "data": "page"}
+        for ws in (ctl, page, prod, lease, other):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+# ---- HTTP surfaces, in process (app.py) ------------------------------------
+
+from webterm.broker import app as app_mod  # noqa: E402
+
+from tests.auth_helpers import TEST_TOKEN, authed  # noqa: E402
+
+MCP_TOKEN = "terminal-control-mcp-token"
+_app_seq = 0
+
+
+def _control_app(tmp_path, monkeypatch):
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    monkeypatch.delenv("WEB_TERMINAL_MCP_TOKEN", raising=False)
+    cfg = {
+        "state_path": str(tmp_path / "webterm_state.json"),
+        "mcp_state_path": str(tmp_path / "webterm_mcp.json"),
+        "mcp_windows_path": str(tmp_path / "webterm_mcp_windows.json"),
+        "auth_token": TEST_TOKEN,
+        "mcp_enabled": True,
+        "mcp_token": MCP_TOKEN,
+        "mcp_default_mode": "readwrite",
+    }
+    return app_mod.create_app(cfg, name=f"webterm-terminal-control-{_app_seq}")
+
+
+def _app_entry(app, wid):
+    return asyncio.run(app.ctx.registry.register(FakeWS(), _hello(wid)))
+
+
+def _app_claim(app, entry, label="phone"):
+    async def go():
+        ws = FakeWS()
+        entry.add_subscriber(ws, "ext")
+        assert app.ctx.registry.claim(entry, ws, label) is None
+        await app.ctx.registry.drain_control()
+        return ws
+    return asyncio.run(go())
+
+
+def _post_control(app, body, token=True):
+    client = authed(app) if token else app.test_client
+    _, resp = client.post("/session/control", json=body)
+    return resp.status, resp.json
+
+
+def test_post_session_control_refusal_ladder(tmp_path, monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 41)
+    _app_claim(app, entry)
+    gen = entry.control_gen
+    app.ctx.active_client_id = "page"
+    ok = {"id": 41, "op": "release", "gen": gen, "clientId": "page"}
+    assert _post_control(app, ok, token=False) == (
+        401, {"ok": False, "error": "auth_required"})
+    _, resp = authed(app).post("/session/control", data="[1]")
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_json"})
+    assert _post_control(app, dict(ok, id="x")) == (
+        400, {"ok": False, "error": "bad_id"})
+    assert _post_control(app, dict(ok, id=999)) == (
+        404, {"ok": False, "error": "unknown_session"})
+    for op in (None, "claim", "RELEASE"):
+        assert _post_control(app, dict(ok, op=op)) == (
+            400, {"ok": False, "error": "bad_op"})
+    for bad in ("5", True, False, -1, 1.5, None):
+        assert _post_control(app, dict(ok, gen=bad)) == (
+            400, {"ok": False, "error": "bad_gen"})
+    # Precedence: op before gen before the lease.
+    assert _post_control(app, dict(ok, op="x", gen="x", clientId="o")) == (
+        400, {"ok": False, "error": "bad_op"})
+    assert _post_control(app, dict(ok, gen="x", clientId="o")) == (
+        400, {"ok": False, "error": "bad_gen"})
+    for client in ("other", "", None, 5):
+        assert _post_control(app, dict(ok, clientId=client)) == (
+            409, {"ok": False, "error": "not_active"})
+    missing = dict(ok)
+    del missing["clientId"]
+    assert _post_control(app, missing) == (
+        409, {"ok": False, "error": "not_active"})
+    # The lease before the gen match: a stale gen from a non-holder is
+    # not_active, never a leak of the live view.
+    assert _post_control(app, dict(ok, gen=gen - 1, clientId="o")) == (
+        409, {"ok": False, "error": "not_active"})
+    # Nothing above released it.
+    assert entry.controller is not None and entry.control_gen == gen
+
+
+def test_post_session_control_refuses_a_none_lease(tmp_path, monkeypatch):
+    # Owner ruling (Q6, STRICT): unlike PUT /state, a None lease refuses.
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 42)
+    _app_claim(app, entry)
+    assert app.ctx.active_client_id is None
+    body = {"id": 42, "op": "release", "gen": entry.control_gen,
+            "clientId": "page"}
+    assert _post_control(app, body) == (
+        409, {"ok": False, "error": "not_active"})
+    assert _post_control(app, dict(body, clientId="")) == (
+        409, {"ok": False, "error": "not_active"})
+    assert entry.controller is not None
+
+
+def test_post_session_control_release_stale_and_double_click(tmp_path,
+                                                             monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 43)
+    app.ctx.active_client_id = "page"
+    free_gen = entry.control_gen
+    body = {"id": 43, "op": "release", "gen": free_gen, "clientId": " page "}
+    # A free terminal: stale_gen with the live (free) view.
+    assert _post_control(app, body) == (409, {
+        "ok": False, "error": "stale_gen", "id": 43, "state": "free",
+        "label": None, "since": None, "gen": free_gen})
+    _app_claim(app, entry, "phone")
+    claim = entry.controller
+    # Another gen: stale_gen with the live CONTROLLED view.
+    assert _post_control(app, dict(body, gen=claim.gen - 1)) == (409, {
+        "ok": False, "error": "stale_gen", "id": 43, "state": "controlled",
+        "label": "phone", "since": claim.since, "gen": claim.gen})
+    status, resp = _post_control(app, dict(body, gen=claim.gen))
+    assert status == 200
+    assert resp == {"ok": True, "id": 43, "state": "free", "label": None,
+                    "since": None, "gen": entry.control_gen}
+    assert entry.control_gen > claim.gen and entry.controller is None
+    # The double click finds it free.
+    assert _post_control(app, dict(body, gen=claim.gen)) == (409, {
+        "ok": False, "error": "stale_gen", "id": 43, "state": "free",
+        "label": None, "since": None, "gen": entry.control_gen})
+
+
+def test_post_session_control_crossed_claim_keeps_the_newer(tmp_path,
+                                                           monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 44)
+    app.ctx.active_client_id = "page"
+    _app_claim(app, entry, "phone")
+    seen_gen = entry.control_gen          # what the page's overlay holds
+    _app_claim(app, entry, "tablet")      # a crossed takeover
+    newer = entry.controller
+    assert _post_control(app, {"id": 44, "op": "release", "gen": seen_gen,
+                               "clientId": "page"}) == (409, {
+        "ok": False, "error": "stale_gen", "id": 44, "state": "controlled",
+        "label": "tablet", "since": newer.since, "gen": newer.gen})
+    assert entry.controller is newer
+
+
+def test_post_session_control_on_a_dying_terminal(tmp_path, monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 45)
+    app.ctx.active_client_id = "page"
+    _app_claim(app, entry)
+    entry.closing = True                  # an `exit` mid-broadcast
+    assert _post_control(app, {"id": 45, "op": "release",
+                               "gen": entry.control_gen,
+                               "clientId": "page"}) == (
+        404, {"ok": False, "error": "unknown_session"})
+
+
+def test_on_control_pushes_terminal_control_to_every_control_socket(
+        tmp_path, monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 46)
+    page_a, page_a2, page_b = FakeWS(), FakeWS(), FakeWS()
+    app.ctx.control_clients = {"a": {page_a, page_a2}, "b": {page_b}}
+    _app_claim(app, entry, "phone")
+    claimed = entry.control_view()
+
+    async def release():
+        app.ctx.registry.force_release(entry)
+        await app.ctx.registry.drain_control()
+    asyncio.run(release())
+    freed = entry.control_view()
+    for sock in (page_a, page_a2, page_b):
+        assert [json.loads(m) for m in sock.sent] == [
+            dict({"type": "terminal_control", "id": 46}, **claimed),
+            dict({"type": "terminal_control", "id": 46}, **freed)]
+
+
+def test_sessions_and_mcp_rows_report_the_controller(tmp_path, monkeypatch):
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 47)
+    mcp = {"Authorization": f"Bearer {MCP_TOKEN}"}
+
+    def rows():
+        _, sessions = authed(app).get("/sessions")
+        _, terms = app.test_client.get("/mcp/terminals", headers=mcp)
+        return (next(s for s in sessions.json if s["id"] == 47),
+                next(t for t in terms.json if t["id"] == 47))
+    session, term = rows()
+    assert session["controller"] is None and term["controlled"] is False
+    _app_claim(app, entry, "phone")
+    session, term = rows()
+    assert session["controller"] == {"label": "phone",
+                                     "since": entry.controller.since,
+                                     "gen": entry.controller.gen}
+    assert term["controlled"] is True
+
+
+def test_mcp_input_still_reaches_a_controlled_terminal(tmp_path, monkeypatch):
+    # Owner decision 1: MCP is not a viewer; its input bypasses the gate.
+    app = _control_app(tmp_path, monkeypatch)
+    entry = _app_entry(app, 48)
+    _app_claim(app, entry, "phone")
+    _, resp = app.test_client.post(
+        "/mcp/input", json={"id": 48, "data": "from-mcp"},
+        headers={"Authorization": f"Bearer {MCP_TOKEN}"})
+    assert resp.status == 200
+    assert {"type": "input", "data": "from-mcp"} in [
+        json.loads(m) for m in entry.ws.sent]
