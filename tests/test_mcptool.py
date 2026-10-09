@@ -17,7 +17,7 @@ pytest.importorskip("mcp")
 import httpx
 
 from webterm.mcptool import BrowserlandClient, BrowserlandError
-from webterm.protocol import SCOPE_HEADER
+from webterm.protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 
 
 # ---- client unit tests (httpx.MockTransport, no real broker) -------------
@@ -60,9 +60,13 @@ def _reset_server():
 
 @pytest.fixture(autouse=True)
 def _no_scope_env(monkeypatch):
-    """#232: --scope defaults from $BROWSERLAND_MCP_SCOPE, so a value in the
-    developer's shell must not leak into any argument-parsing cell."""
+    """#232/#245: --scope defaults from $BROWSERLAND_MCP_SCOPE and the admin
+    token from $BROWSERLAND_MCP_ADMIN_TOKEN / $WEB_TERMINAL_MCP_ADMIN_TOKEN,
+    so a value in the developer's shell must not leak into any
+    argument-parsing cell."""
     monkeypatch.delenv("BROWSERLAND_MCP_SCOPE", raising=False)
+    monkeypatch.delenv("BROWSERLAND_MCP_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("WEB_TERMINAL_MCP_ADMIN_TOKEN", raising=False)
 
 
 def test_info_get():
@@ -1276,8 +1280,8 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None),
-                                   ("b", "https://y:4445", "t2", None)]
+    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None),
+                                    ("b", "https://y:4445", "t2", None, None)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1304,7 +1308,8 @@ def test_resolve_hosts_single_default(monkeypatch):
     from webterm.mcptool import __main__ as m
     monkeypatch.delenv(m.HOSTS_ENV, raising=False)
     args = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
-    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None)]
+    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None,
+                                       None)]
 
 
 def test_resolve_hosts_multi_from_env(monkeypatch):
@@ -1312,7 +1317,7 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1321,7 +1326,7 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None)]
 
 
 def _hosts_json(*entries):
@@ -1334,8 +1339,8 @@ def _hosts_json(*entries):
 def test_parse_hosts_reads_a_per_host_scope():
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
-    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA"),
-                                   ("b", "http://b:4445", "t", None)]
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None),
+                                    ("b", "http://b:4445", "t", None, None)]
 
 
 @pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
@@ -1344,8 +1349,8 @@ def test_an_absent_or_empty_host_scope_inherits(entry):
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, entry)
     assert m._parse_hosts(raw, "proc") == [
-        ("a", "http://a:4445", "t", "teamA"), ("b", "http://b:4445", "t",
-                                               "proc")]
+        ("a", "http://a:4445", "t", "teamA", None),
+        ("b", "http://b:4445", "t", "proc", None)]
 
 
 @pytest.mark.parametrize("bad", ["a b", "a:b", "x" * 65, "-lead", 5, None,
@@ -1372,7 +1377,7 @@ def test_the_scope_env_applies_to_every_host(monkeypatch):
                                                        "envscope"]
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         "envscope")]
+                                         "envscope", None)]
 
 
 def test_a_host_scope_beats_the_env(monkeypatch):
@@ -1389,7 +1394,7 @@ def test_the_scope_flag_beats_the_env(monkeypatch):
     args = m._parse_args(["--scope", "flagscope", "--token", "t",
                           "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t",
-                                       "flagscope")]
+                                       "flagscope", None)]
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])
@@ -1418,8 +1423,8 @@ def test_main_wires_scopes_into_configure(monkeypatch):
     monkeypatch.setattr(server.mcp, "run", lambda: None)
     raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
     assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA"),
-                                 ("b", "http://b:4445", "t", "teamB")]
+    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None),
+                                 ("b", "http://b:4445", "t", "teamB", None)]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1834,8 +1839,8 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta", None),
-                                 ("b", "http://y:4445", "tb", None)]
+    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None),
+                                 ("b", "http://y:4445", "tb", None, None)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------
@@ -2156,3 +2161,94 @@ def test_the_readme_documents_scopes():
     launch = next(line for line in readme
                   if line.startswith("| `launch_terminal("))
     assert "mode?)" in launch and "`readwrite`" in launch
+
+
+# ---- #245 D1: the admin credential plumbs through every layer -------------
+
+def test_admin_header_sent_when_configured():
+    """#245: a client built with an admin token sends X-Browserland-Mcp-Admin
+    on EVERY request — beside the Bearer MCP token, never replacing it (the
+    admin credential unlocks admin-only ops; the MCP token still
+    authenticates the caller)."""
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append((req.headers.get(MCP_ADMIN_HEADER),
+                     req.headers.get("authorization")))
+        return httpx.Response(200, json={"ok": True})
+
+    with BrowserlandClient(base="http://broker:4445", token="t",
+                           admin_token="adm-sekrit",
+                           transport=httpx.MockTransport(handler)) as c:
+        for _label, call in _EVERY_CALL:
+            call(c)
+    assert seen == [("adm-sekrit", "Bearer t")] * len(_EVERY_CALL)
+
+
+def test_no_admin_header_without_token():
+    """#245: without an admin token the header is never sent — the wire is
+    exactly the pre-#245 surface for a non-admin host."""
+    broker = _ScopeBroker()
+    with _scoped(broker) as c:          # scope=None: plain unscoped client
+        c.list_terminals()
+        c.info()
+    assert all(MCP_ADMIN_HEADER not in r.headers for r in broker.requests)
+
+
+def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
+    """#245: --admin-token > $BROWSERLAND_MCP_ADMIN_TOKEN >
+    $WEB_TERMINAL_MCP_ADMIN_TOKEN (empty = none); a --hosts entry's own
+    "admin_token" is that host's credential (never inherited from the
+    process-wide value); the single-host fallback carries the resolved
+    token as the 5th descriptor field."""
+    from webterm.mcptool import __main__ as m
+
+    # flag beats both env vars
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "from-env")
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV_ALT, "from-alt")
+    args = m._parse_args(["--token", "t", "--admin-token", "from-flag"])
+    assert m._resolve_admin_token(args) == "from-flag"
+    # primary env beats the alt env
+    args = m._parse_args(["--token", "t"])
+    assert m._resolve_admin_token(args) == "from-env"
+    # alt env used when the primary is unset; nothing set -> None
+    monkeypatch.delenv(m.ADMIN_TOKEN_ENV, raising=False)
+    assert m._resolve_admin_token(args) == "from-alt"
+    monkeypatch.delenv(m.ADMIN_TOKEN_ENV_ALT, raising=False)
+    assert m._resolve_admin_token(args) is None
+
+    # --hosts entries carry their own admin_token; absent = None
+    raw = _hosts_json({"name": "a", "admin_token": "per-host"},
+                      {"name": "b"})
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", None,
+                                    "per-host"),
+                                   ("b", "http://b:4445", "t", None, None)]
+    with pytest.raises(ValueError) as ei:
+        m._parse_hosts(_hosts_json({"name": "a", "admin_token": 5}))
+    assert "admin_token" in str(ei.value) and "'a'" in str(ei.value)
+
+    # the single-host shorthand carries the resolved admin token
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "env-admin")
+    single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
+    assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
+                                         None, "env-admin")]
+
+
+def test_get_client_carries_the_hosts_admin_token():
+    """#245: _get_client builds each host's client with that host's admin
+    token (the header rides every request of that host), via the HostConfig
+    map configure() installs."""
+    from webterm.mcptool import server
+    server.configure([("a", "http://a:4445", "t", None, "adm-a"),
+                      server.HostConfig("b", "http://b:4445", "t")])
+    try:
+        a, b = server._get_client("a"), server._get_client("b")
+        assert (a.admin_token, b.admin_token) == ("adm-a", None)
+        # the internal map is HostConfig-shaped; a legacy positional tuple
+        # still reads back normalized (test injections keep working)
+        server._host_configs["legacy"] = ("http://c:4445", "t", "teamA")
+        assert server._get_client("legacy").admin_token is None
+        assert server._get_client("legacy").scope == "teamA"
+    finally:
+        server._host_configs.pop("legacy", None)
+        server.configure([])

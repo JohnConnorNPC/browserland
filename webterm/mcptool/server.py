@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
@@ -22,15 +22,42 @@ from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
 
-# Multi-host config (#24). configure() stores an ordered
-# ``name -> (base, token, scope)`` map; the per-host BrowserlandClient is built
-# lazily on first use, so importing this module has no side effects and stdio
-# startup never blocks on a probe (a scoped host's /mcp/info check, #232, runs
-# on its first call). Window ids in every tool are namespaced ``"<host>:<int>"``
-# and :func:`_route` splits one back to a ``(client, int_id)`` pair. A plain
+
+class HostConfig(NamedTuple):
+    """One configured host (#24 multi-host, #245 admin credential): the base
+    URL, the MCP token, the optional declared scope and the optional per-host
+    admin token. This NamedTuple replaces the positional tuples configure()
+    used to store, so a growing host map stays self-describing. Plain tuples
+    ``(name, base, token[, scope[, admin_token]])`` are still accepted at the
+    configure() seam and normalized (missing fields default to None), which
+    keeps every existing caller and test injection working."""
+
+    name: str
+    base: str
+    token: str
+    scope: Optional[str] = None
+    admin_token: Optional[str] = None
+
+
+def _as_host_config(name: str, raw: Any) -> HostConfig:
+    """Normalize one ``_host_configs`` value to a :class:`HostConfig`,
+    tolerating the legacy positional tuples tests inject directly."""
+    if isinstance(raw, HostConfig):
+        return raw
+    scope = raw[2] if len(raw) > 2 else None
+    admin = raw[3] if len(raw) > 3 else None
+    return HostConfig(name, raw[0], raw[1], scope, admin)
+
+
+# Multi-host config (#24). configure() stores an ordered name -> HostConfig
+# map; the per-host BrowserlandClient is built lazily on first use, so
+# importing this module has no side effects and stdio startup never blocks
+# on a probe (a scoped host's /mcp/info check, #232, runs on its first call).
+# Window ids in every tool are namespaced ``"<host>:<int>"`` and
+# :func:`_route` splits one back to a ``(client, int_id)`` pair. A plain
 # ``--broker-url``/``--token`` config is just a single host named ``"default"``.
-# name -> (base, token, scope or None), ordered
-_host_configs: Dict[str, Tuple[str, str, Optional[str]]] = {}
+# name -> HostConfig, ordered
+_host_configs: Dict[str, HostConfig] = {}
 _clients: Dict[str, BrowserlandClient] = {}       # name -> client (lazy)
 # Guards the lazy build in _get_client: FastMCP dispatches sync tools on a thread
 # pool, so two concurrent first-calls for one host could otherwise each construct
@@ -39,10 +66,11 @@ _clients_lock = threading.Lock()
 
 
 def configure(hosts) -> None:
-    """Install the host map from an ordered iterable of
-    ``(name, base, token, scope)`` descriptors (scope None = unscoped). Closes
-    any previously-built clients so their sockets aren't leaked; the new
-    clients are built lazily on first use."""
+    """Install the host map from an ordered iterable of descriptors —
+    :class:`HostConfig` or a positional ``(name, base, token[, scope[,
+    admin_token]])`` tuple (scope/admin_token None = unset). Closes any
+    previously-built clients so their sockets aren't leaked; the new clients
+    are built lazily on first use."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -51,23 +79,29 @@ def configure(hosts) -> None:
             except Exception:  # a flaky close must not abort reconfiguration
                 pass
         _clients = {}
-        _host_configs = {name: (base, token, scope)
-                         for name, base, token, scope in hosts}
+        new_configs: Dict[str, HostConfig] = {}
+        for h in hosts:
+            cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
+            new_configs[cfg.name] = cfg
+        _host_configs = new_configs
 
 
 def _get_client(name: str) -> BrowserlandClient:
     """Return the (lazily-built) client for an already-validated host name.
     Double-checked locking keeps concurrent first-calls from leaking a client.
     The client carries the host's scope (its header and its fail-closed
-    probe, #232) and its name for error messages."""
+    probe, #232), its per-host admin token (header, #245) and its name for
+    error messages."""
     client = _clients.get(name)
     if client is not None:
         return client
     with _clients_lock:
         client = _clients.get(name)
         if client is None:
-            base, token, scope = _host_configs[name]
-            client = BrowserlandClient(base, token, scope=scope, name=name)
+            cfg = _as_host_config(name, _host_configs[name])
+            client = BrowserlandClient(base=cfg.base, token=cfg.token,
+                                       scope=cfg.scope,
+                                       admin_token=cfg.admin_token, name=name)
             _clients[name] = client
         return client
 

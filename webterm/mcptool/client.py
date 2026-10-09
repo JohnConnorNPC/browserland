@@ -21,10 +21,10 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-# The header name comes from the dependency-free protocol module, never from
+# The header names come from the dependency-free protocol module, never from
 # webterm.broker: this package is the optional `mcp` extra and must not pull
 # in the broker (and sanic with it).
-from ..protocol import SCOPE_HEADER
+from ..protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 
 # Broker error codes -> human-readable messages. Source of truth is the error
 # table in wiki/Technical-Reference.md ("MCP HTTP interface" error reference). Codes not
@@ -64,6 +64,16 @@ _ERROR_MESSAGES = {
     "scope_unsupported": "The broker did not confirm this server's scope, so "
                          "its answers could include windows outside it; every "
                          "call to this host is refused.",
+    # #245: the admin credential's error surface.
+    "admin_required": "The broker refused this server's admin credential for "
+                      "an admin-only operation. If the admin token was rotated "
+                      "in the broker's Control Panel (MCP access), refresh "
+                      "this server's config — the hosts entry's "
+                      "\"admin_token\", or $BROWSERLAND_MCP_ADMIN_TOKEN — and "
+                      "restart it; an unrotated credential never yields this.",
+    "admin_token_in_url": "The broker refused the request: an admin token must "
+                          "travel in the X-Browserland-Mcp-Admin header, never "
+                          "the URL query string.",
 }
 
 
@@ -86,7 +96,8 @@ class BrowserlandClient:
     def __init__(self, base: str = "http://127.0.0.1:4445", token: str = "",
                  timeout: float = 10.0, read_timeout: float = 30.0,
                  transport: Optional[httpx.BaseTransport] = None,
-                 scope: Optional[str] = None, name: Optional[str] = None):
+                 scope: Optional[str] = None, name: Optional[str] = None,
+                 admin_token: Optional[str] = None):
         self.base = base.rstrip("/")
         #: The scope this client declares (#232), or None. An empty string is
         #: unscoped, exactly as the broker reads an empty header.
@@ -94,6 +105,11 @@ class BrowserlandClient:
         #: What error messages call this host: its configured name, else the
         #: base URL.
         self.name = name or self.base
+        #: The per-host MCP admin credential (#245), or None. Sent IN
+        #: ADDITION to the MCP token (never instead of it): the admin header
+        #: unlocks admin-only ops on brokers that have an admin token
+        #: configured; a broker without one ignores the header.
+        self.admin_token = admin_token or None
         # `read` does a producer round-trip on the broker, so it gets a longer
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
@@ -101,6 +117,8 @@ class BrowserlandClient:
         headers = {"Authorization": f"Bearer {token}"}
         if self.scope:
             headers[SCOPE_HEADER] = self.scope
+        if self.admin_token:
+            headers[MCP_ADMIN_HEADER] = self.admin_token
         # Set once /mcp/info has echoed our scope; see _check_scope.
         self._scope_confirmed = False
         # `transport` is an injection seam for tests (httpx.MockTransport); in
