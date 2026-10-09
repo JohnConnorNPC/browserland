@@ -32232,14 +32232,27 @@ CASES.teardown_mid_walk = function () {
     return { seenB: seenB, errors: errors };
 };
 
-// Closing the window releases the subscription record itself (the dispose
-// half of the removal), not only its deliveries.
+// Closing the window releases the subscription record itself, not only its
+// deliveries. A37's onModTeardown fires on close as well, so the DISPOSE half
+// of the removal (info.onDispose) is what does it on a bag without that
+// member: the second window is opened after A37's extender is taken out.
 CASES.dispose_releases_the_record = function () {
     const win = openTerminal();
     bagFor(modCtx('a'), win).onControlChanged(function () {});
     const before = _termCtlState(win, false).subs.length;
     closeWindow(win.id);
-    return { before: before, after: _termCtlState(win, false).subs.length,
+    const after = _termCtlState(win, false).subs.length;
+    const i = _ctxExtenders.indexOf(_ctxTerminalTeardown);
+    if (i !== -1) _ctxExtenders.splice(i, 1);
+    const bare = openTerminal();
+    const bag = bagFor(modCtx('b'), bare);
+    bag.onControlChanged(function () {});
+    const bareBefore = _termCtlState(bare, false).subs.length;
+    closeWindow(bare.id);
+    return { before: before, after: after,
+             noTeardownMember: typeof bag.onModTeardown !== 'function',
+             bareBefore: bareBefore,
+             bareAfter: _termCtlState(bare, false).subs.length,
              errors: errors };
 };
 
@@ -33277,6 +33290,9 @@ def test_mod_control_closing_the_window_releases_the_record(control_harness):
     assert r["errors"] == []
     assert (r["before"], r["after"]) == (1, 0), \
         "a closed window still holds the subscription record"
+    assert r["noTeardownMember"] is True
+    assert (r["bareBefore"], r["bareAfter"]) == (1, 0), \
+        "without onModTeardown, closing the window kept the record (dispose half)"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
