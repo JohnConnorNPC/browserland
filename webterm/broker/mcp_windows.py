@@ -11,6 +11,7 @@ Schema (explicit; nothing else is ever persisted)::
 
     {"windows": {"<wid>": {"scope": str|null, "mode": str|null,
                            "pid": int|null, "host": str|null,
+                           "owner": sha256hex|null, "admin_set": bool|null,
                            "seen": epoch seconds}}}
 
 * ``mode`` is the RAW override: null means "inherit the broker default", and
@@ -32,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -75,12 +77,18 @@ SEEN_REFRESH_S = 86400
 MAX_SIDECAR_BYTES = 8 * 2**20
 
 _UNSET = object()
+# owner (#243) is the sha256 hexdigest of a launch HANDLE: the durable half
+# of "the terminals it launched" ownership. Only the HASH is ever stored —
+# the plaintext handle lives in the launch response alone — so the sidecar
+# cannot leak a credential a later reader could replay. A row kept alive by
+# owner alone (scope and mode both null) is the owner's management handle:
+# clearing both overrides must not silently revoke it.
 # admin_set (#245) rides the row as the durable ADMIN badge: True exactly on
 # windows an admin agent launched (or, from #243's /mcp/window, set by an
 # admin write) and cleared by a /session/mcp edit (the human took the window
 # back). It never keeps a row alive on its own (a launch always writes a
 # mode); it is metadata on a row that exists for scope/mode reasons.
-_FIELDS = ("scope", "mode", "pid", "host", "admin_set", "seen")
+_FIELDS = ("scope", "mode", "pid", "host", "owner", "admin_set", "seen")
 
 
 def _empty_payload() -> Dict[str, Any]:
@@ -112,6 +120,15 @@ def _valid_admin_set(value: Any) -> bool:
     return value is None or (isinstance(value, bool))
 
 
+#: A sha256 hexdigest is exactly this: 64 lowercase hex characters.
+_OWNER_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _valid_owner(value: Any) -> bool:
+    return value is None or (isinstance(value, str)
+                             and _OWNER_RE.fullmatch(value) is not None)
+
+
 def _valid_seen(value: Any) -> bool:
     # bool is excluded for the same reason as in _valid_pid.
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -132,17 +149,21 @@ def _canonical_id(key: Any) -> Optional[int]:
 
 
 def _parse_row(raw: Any) -> Optional[Dict[str, Any]]:
-    """A validated row, or None. A row that carries neither a scope nor a mode
-    counts as malformed: set() never writes one (see there)."""
+    """A validated row, or None. A row that carries none of scope, mode or
+    owner counts as malformed: set() never writes one (see there — #243
+    widened liveness so an owner keeps its row with both overrides
+    cleared)."""
     if not isinstance(raw, dict):
         return None
     row = {field: raw.get(field) for field in _FIELDS}
     if not (_valid_scope(row["scope"]) and _valid_mode(row["mode"])
             and _valid_pid(row["pid"]) and _valid_host(row["host"])
+            and _valid_owner(row["owner"])
             and _valid_admin_set(row["admin_set"])
             and _valid_seen(row["seen"])):
         return None
-    if row["scope"] is None and row["mode"] is None:
+    if (row["scope"] is None and row["mode"] is None
+            and row["owner"] is None):
         return None
     return row
 
@@ -374,8 +395,9 @@ class McpWindowStore:
             and (old["host"] is None or old["host"] == host))
 
     def set(self, wid: int, *, scope: Any = _UNSET, mode: Any = _UNSET,
-            admin_set: Any = _UNSET, pid: Optional[int] = None,
-            host: Optional[str] = None, now: float) -> bool:
+            owner: Any = _UNSET, admin_set: Any = _UNSET,
+            pid: Optional[int] = None, host: Optional[str] = None,
+            now: float) -> bool:
         """Write ``scope`` and/or the RAW ``mode`` for the producer
         ``(pid, host)`` on ``wid``, in memory. Returns whether the row
         changed. Call it only on the working copy inside create_app's shared
@@ -390,16 +412,22 @@ class McpWindowStore:
           hello from the right producer claims it).
         * ``mode=None`` stores null (inherit). A field not passed is left as
           it was, so a scope-only change never materialises the default mode.
+        * ``owner`` (#243) rides the same merge/replace rules and joins the
+          no-op comparison (clearing it is a real change). A row survives
+          with scope and mode both cleared while it has an owner: revoking
+          the handle must be its own decision, never a side effect of the
+          owner clearing its overrides.
         * ``admin_set`` (#245) rides the same merge/replace rules: carried on
           a merge, dropped to None by a replace that does not pass it, and
           part of the no-op comparison (clearing the badge is a real change).
-        * A row left with neither a scope nor a mode carries nothing and would
-          only block apply()'s fallback carry-over, so it is DELETED whatever
-          its pid/host. No reservation-only row is needed: the launch writer
-          (#231) always writes a scope. Only a NULL pid is a wildcard: a pid
-          of 0 is unknown, as in same_producer, so a pid-0 write never merges
-          and each write for a pid-0 producer replaces its row (such a row is
-          never re-applied at register anyway).
+        * A row left with none of scope, mode or owner carries nothing and
+          would only block apply()'s fallback carry-over, so it is DELETED
+          whatever its pid/host. No reservation-only row is needed: the
+          launch writer (#231/#243) always writes a mode or an owner. Only a
+          NULL pid is a wildcard: a pid of 0 is unknown, as in
+          same_producer, so a pid-0 write never merges and each write for a
+          pid-0 producer replaces its row (such a row is never re-applied at
+          register anyway).
         * A no-op returns False and leaves the row as it was, ``seen``
           included; a change sets ``seen = now``.
 
@@ -410,6 +438,8 @@ class McpWindowStore:
             raise ValueError("bad scope")
         if mode is not _UNSET and not _valid_mode(mode):
             raise ValueError("bad mode")
+        if owner is not _UNSET and not _valid_owner(owner):
+            raise ValueError("bad owner")
         if admin_set is not _UNSET and not _valid_admin_set(admin_set):
             raise ValueError("bad admin_set")
         if not _valid_pid(pid) or not _valid_host(host):
@@ -421,17 +451,20 @@ class McpWindowStore:
                 else {"scope": None, "mode": None})
         new = {"scope": base["scope"] if scope is _UNSET else scope,
                "mode": base["mode"] if mode is _UNSET else mode,
+               "owner": (base.get("owner") if owner is _UNSET else owner),
                "admin_set": (base.get("admin_set") if admin_set is _UNSET
                              else admin_set),
                "pid": pid, "host": host}
-        if new["scope"] is None and new["mode"] is None:
+        if (new["scope"] is None and new["mode"] is None
+                and new["owner"] is None):
             if old is None:
                 return False
             del self._rows[wid]
             return True
         if old is not None and all(old[field] == new[field]
-                                   for field in ("scope", "mode", "admin_set",
-                                                 "pid", "host")):
+                                   for field in ("scope", "mode", "owner",
+                                                 "admin_set", "pid",
+                                                 "host")):
             return False
         new["seen"] = now
         self._rows[wid] = new

@@ -92,12 +92,14 @@ DAY = 86400.0
 STORE_LOGGER = "webterm.broker.mcp_windows"
 
 
-def _row(scope=None, mode=None, pid=None, host=None, seen=T, admin_set=None):
+def _row(scope=None, mode=None, pid=None, host=None, seen=T, admin_set=None,
+         owner=None):
     # admin_set (#245, existing-test edit): the row schema grew a sixth key;
     # None is what every pre-#245 write stores, so existing call sites keep
-    # their meaning.
+    # their meaning. owner (#243, existing-test edit): the seventh key, same
+    # rule.
     return {"scope": scope, "mode": mode, "pid": pid, "host": host,
-            "admin_set": admin_set, "seen": seen}
+            "owner": owner, "admin_set": admin_set, "seen": seen}
 
 
 def _write_sidecar(path: Path, windows) -> None:
@@ -288,8 +290,9 @@ def test_to_persist_is_the_explicit_schema(tmp_path):
     """#228: exactly {"windows": {"<wid>": the _FIELDS}}, ids in int order, and
     nothing else a row carries in memory reaches the payload.
 
-    #245 (existing-test edit): the schema grew its sixth field, admin_set
-    (after host, before seen); every other key stays out."""
+    #245/#243 (existing-test edits): the schema grew its sixth field,
+    admin_set, and its seventh, owner (after host and before admin_set);
+    every other key stays out."""
     store = _loaded(tmp_path, {"10": _row(scope="a", pid=1, host="h"),
                                "9": _row(mode="off", pid=2, host="h")})
     store._rows[10]["internal"] = "must not persist"
@@ -297,8 +300,8 @@ def test_to_persist_is_the_explicit_schema(tmp_path):
     assert list(payload) == ["windows"]
     assert list(payload["windows"]) == ["9", "10"]
     for row in payload["windows"].values():
-        assert list(row) == ["scope", "mode", "pid", "host", "admin_set",
-                             "seen"]
+        assert list(row) == ["scope", "mode", "pid", "host", "owner",
+                             "admin_set", "seen"]
 
 
 def test_dirty_is_derived_from_the_payload(tmp_path):
