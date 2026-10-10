@@ -183,6 +183,7 @@ def _probe_admin_hosts() -> None:
         name for name, ok in zip(names, qualified) if ok)
     if _admin_hosts and not _admin_tools_registered:
         mcp.tool(name="set_mcp_knobs")(set_mcp_knobs)
+        mcp.tool(name="workspaces")(workspaces)
         _admin_tools_registered = True
 
 
@@ -970,3 +971,209 @@ def set_mcp_knobs(host: str, default_mode: str = "",
     # tools); a successful change refreshes the host's cached flags.
     client.capabilities(refresh=True)
     return result
+
+
+def _require_desktop(client: BrowserlandClient, host: str) -> None:
+    """The #244 fail-closed gate, shared by every desktop tool: the relay is
+    opt-in (``allow_desktop``), and a broker that does not advertise it on
+    /mcp/info never sees a desktop request."""
+    if not client.capabilities()["allow_desktop"]:
+        raise BrowserlandError(
+            0, "desktop_unsupported",
+            f"host {host!r} does not advertise allow_desktop on /mcp/info "
+            "(enable the desktop relay in Control Panel → MCP access); the "
+            "desktop tools are refused without sending.")
+
+
+@mcp.tool()
+def get_desktop(host: str = "") -> Dict[str, Any]:
+    """Read a browser's desktop (#244): every window with its layout
+    (tiled column/row/width preset, or floating x/y/w/h), the viewport, the
+    focused column, and the workspaces when the workspaces mod is on. The
+    snapshot comes from the browser holding the control lease; `home` says
+    whether that browser's home is this broker, and floating geometry is
+    AS THAT BROWSER SEES IT (per-browser state, not stored on the broker).
+
+    With `host` set, returns that one host's snapshot. Omit `host` (or pass
+    "") for a dict keyed by host name — each value is that host's snapshot,
+    or `{"ok": false, "error": ...}` when its relay is off or it has no
+    active browser. Fails closed per host: a broker that does not advertise
+    `allow_desktop` is never asked."""
+    if host:
+        client = _named_client(host)
+        _require_desktop(client, host)
+        return client.get_desktop()
+    out: Dict[str, Any] = {}
+    for name in _host_configs:
+        try:
+            client = _get_client(name)
+            _require_desktop(client, name)
+            out[name] = client.get_desktop()
+        except Exception as exc:
+            out[name] = {"ok": False, "error": str(exc)}
+    return out
+
+
+#: The mutating window ops arrange_window relays (the read side is
+#: get_desktop's snapshot; `get` is not arrangeable).
+_ARRANGE_OPS = ("focus", "move_column", "set_width", "tile", "float",
+                "set_geometry", "tab_into", "split")
+
+
+@mcp.tool()
+def arrange_window(id: str, op: str, to: str = "", preset: str = "",
+                   x: int = -1, y: int = -1, w: int = -1, h: int = -1,
+                   target: str = "", axis: str = "") -> Dict[str, Any]:
+    """Arrange a window on the lease-holding browser's desktop (#244). Pass
+    the namespaced window id ("<host>:<int>") and one op:
+      - `focus` — focus the window's column;
+      - `move_column` `to`="left"/"right" or a column index;
+      - `set_width` `preset`="1/3"/"1/2"/"2/3"/"max";
+      - `tile` / `float`;
+      - `set_geometry` `x`,`y`,`w`,`h` (floating only; the browser clamps to
+        the viewport);
+      - `tab_into` `target`=<namespaced id> — tab the window into the
+        target's tile;
+      - `split` `target`=<namespaced id> `axis`="row"/"column" — split after
+        the target.
+    `target` must be a window id on the SAME host as `id`. Ops apply on the
+    browser holding the control lease (window placement is per-browser
+    render, so any holder works) and are applied instantly. Fails closed
+    when the host does not advertise `allow_desktop` on /mcp/info."""
+    if op not in _ARRANGE_OPS:
+        raise BrowserlandError(
+            0, "bad_op",
+            f"arrange_window: unknown op {op!r}; use one of: "
+            + ", ".join(_ARRANGE_OPS) + ".")
+    client, int_id = _route(id)
+    host = id.partition(":")[0]
+    args: Dict[str, Any] = {"id": int_id}
+
+    def _target_int(what: str) -> int:
+        if not target:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"arrange_window: {what} needs target (a namespaced window "
+                "id on the same host).")
+        tclient, t_id = _route(target)
+        if tclient is not client:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"arrange_window: target {target!r} is on another host than "
+                f"{id!r}.")
+        return t_id
+
+    if op == "move_column":
+        if to in ("left", "right"):
+            args["to"] = to
+        else:
+            try:
+                args["to"] = int(to)
+            except ValueError:
+                raise BrowserlandError(
+                    0, "bad_args",
+                    "arrange_window: move_column's to must be 'left', "
+                    "'right' or a column index.") from None
+    elif op == "set_width":
+        if not preset:
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: set_width needs preset ('1/3', '1/2', "
+                "'2/3' or 'max').")
+        args["preset"] = preset
+    elif op == "set_geometry":
+        if min(x, y, w, h) < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: set_geometry needs x, y, w and h (all >= "
+                "0).")
+        args.update(x=x, y=y, w=w, h=h)
+    elif op == "tab_into":
+        args["target"] = _target_int("tab_into")
+    elif op == "split":
+        if axis not in ("row", "column"):
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: split needs axis 'row' or 'column'.")
+        args["target"] = _target_int("split")
+        args["axis"] = axis
+    _require_desktop(client, host)
+    return client.desktop_op(op, args)
+
+
+#: The workspace ops the `workspaces` tool relays (prefixed
+#: "workspaces:<op>" on the wire, the broker's allowlist).
+_WORKSPACE_OPS = ("list", "add", "rename", "remove", "switch", "send-window")
+
+
+def workspaces(host: str, op: str, name: str = "", index: int = -1,
+               target: int = -1, win: str = "",
+               force: bool = False) -> Dict[str, Any]:
+    """Manage the workspaces of a browser's desktop (#244 — ADMIN ONLY;
+    workspace data spans every window, whatever its scope). Ops:
+      - `list` — the workspaces and the active index;
+      - `add` `name?`;
+      - `rename` `index` `name`;
+      - `remove` `index` — a NON-EMPTY workspace answers needs_confirm
+        unless `force=true` (its windows move to the adjacent workspace; no
+        dialog is ever shown); the last workspace is always refused;
+      - `switch` `index`;
+      - `send-window` `win`=<namespaced window id on this host>
+        `target`=<workspace index>.
+    Requires a host whose admin credential this server confirmed at
+    startup, and whose relay advertises `allow_desktop`. The op runs on the
+    browser holding the control lease, and workspace data belongs to a
+    browser's HOME desktop: when that browser's home is another broker the
+    op answers `not_home` — run workspace ops from the home broker's host.
+    With the workspaces mod off the op answers
+    `{"ok": false, "reason": "absent"}` (or "inactive") instead of a silent
+    no-op."""
+    if op not in _WORKSPACE_OPS:
+        raise BrowserlandError(
+            0, "bad_op",
+            f"workspaces: unknown op {op!r}; use one of: "
+            + ", ".join(_WORKSPACE_OPS) + ".")
+    if host not in _admin_hosts:
+        raise BrowserlandError(
+            0, "admin_required",
+            f"host {host!r} has no confirmed admin credential (its --hosts "
+            'entry needs "admin_token", and the startup probe must see '
+            "admin: true on /mcp/info); workspaces refuses without "
+            "sending.")
+    client = _named_client(host)
+    args: Dict[str, Any] = {}
+    if op == "add":
+        if name:
+            args["name"] = name
+    elif op == "rename":
+        if not name or index < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces rename needs index and name.")
+        args.update(index=index, name=name)
+    elif op == "remove":
+        if index < 0:
+            raise BrowserlandError(
+                0, "bad_args", "workspaces remove needs index.")
+        args["index"] = index
+        if force:
+            args["force"] = True
+    elif op == "switch":
+        if index < 0:
+            raise BrowserlandError(
+                0, "bad_args", "workspaces switch needs index.")
+        args["index"] = index
+    elif op == "send-window":
+        if not win or target < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces send-window needs win (a namespaced window id "
+                "on this host) and target (a workspace index).")
+        wclient, w_id = _route(win)
+        if wclient is not client:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"workspaces: win {win!r} is on another host than {host!r}.")
+        args.update(win=w_id, target=target)
+    _require_desktop(client, host)
+    return client.desktop_op(f"workspaces:{op}", args)

@@ -1855,10 +1855,10 @@ async def test_tools_registered():
 
     tools = await server.mcp.list_tools()
     names = sorted(t.name for t in tools)
-    assert names == ["flush_input", "launch_terminal", "list_profiles",
-                     "list_terminals", "mcp_info", "read_screen",
-                     "reset_terminal", "send_input", "send_keys", "set_pace",
-                     "set_window"]
+    assert names == ["arrange_window", "flush_input", "get_desktop",
+                     "launch_terminal", "list_profiles", "list_terminals",
+                     "mcp_info", "read_screen", "reset_terminal",
+                     "send_input", "send_keys", "set_pace", "set_window"]
 
 
 def test_tools_round_trip_through_http():
@@ -2678,3 +2678,159 @@ def test_rotated_admin_token_error_names_rotation():
         _reset_server()
     assert ei.value.code == "admin_required"
     assert "'h'" in str(ei.value) and "rotated" in str(ei.value)
+
+
+# ---- #244 D4: get_desktop / arrange_window / workspaces --------------------
+
+def test_get_desktop_fails_closed_without_allow_desktop():
+    """#244: a broker whose /mcp/info does not advertise allow_desktop never
+    sees a /mcp/desktop request — the named form raises desktop_unsupported
+    after exactly one capability fetch, and the host-less aggregate reports
+    the refusal as that host's error entry instead of sinking the call."""
+    broker = _ToolBroker(caps={"admin": True, "window_edit": True,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.get_desktop("h")
+        agg = server.get_desktop()
+    finally:
+        _reset_server()
+    assert ei.value.code == "desktop_unsupported"
+    assert broker.count("/mcp/info") == 1     # cached; the aggregate re-reads it
+    assert broker.count("/mcp/desktop") == 0
+    assert agg["h"]["ok"] is False
+    assert "allow_desktop" in agg["h"]["error"]
+
+
+def test_get_desktop_returns_the_snapshot():
+    """#244: with allow_desktop on, GET /mcp/desktop answers the snapshot the
+    browser produced (the broker re-identifies rows against its registry
+    before answering)."""
+    snapshot = {"ok": True, "viewport": {"w": 1920, "h": 1040},
+                "home": True, "windows": [{"id": 7, "title": "t",
+                                           "tiled": True}]}
+    broker = _ToolBroker(responses={"/mcp/desktop": lambda req: httpx.Response(
+        200, json=snapshot)})
+    server = _install({"h": broker})
+    try:
+        out = server.get_desktop("h")
+    finally:
+        _reset_server()
+    assert out == snapshot
+
+
+def test_arrange_window_builds_op_args_and_routes_id():
+    """#244: every op composes its args from the non-default params only,
+    the namespaced id is SPLIT to the bare int on the wire, a numeric
+    move_column `to` rides as an int, and a same-host `target` rides as an
+    int too."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        server.arrange_window("h:7", "focus")
+        server.arrange_window("h:7", "move_column", to="left")
+        server.arrange_window("h:7", "move_column", to="2")
+        server.arrange_window("h:7", "set_width", preset="1/3")
+        server.arrange_window("h:7", "tile")
+        server.arrange_window("h:7", "set_geometry", x=10, y=20, w=640, h=480)
+        server.arrange_window("h:7", "tab_into", target="h:9")
+        server.arrange_window("h:7", "split", target="h:9", axis="row")
+    finally:
+        _reset_server()
+    assert broker.bodies("/mcp/desktop") == [
+        {"op": "focus", "args": {"id": 7}},
+        {"op": "move_column", "args": {"id": 7, "to": "left"}},
+        {"op": "move_column", "args": {"id": 7, "to": 2}},
+        {"op": "set_width", "args": {"id": 7, "preset": "1/3"}},
+        {"op": "tile", "args": {"id": 7}},
+        {"op": "set_geometry", "args": {"id": 7, "x": 10, "y": 20,
+                                        "w": 640, "h": 480}},
+        {"op": "tab_into", "args": {"id": 7, "target": 9}},
+        {"op": "split", "args": {"id": 7, "target": 9, "axis": "row"}},
+    ]
+
+
+def test_arrange_window_rejects_unknown_op_locally():
+    """#244: an unknown op, a missing required param and a cross-host target
+    are all LOCAL refusals — the broker sees nothing, not even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker, "o": _ToolBroker()})
+    try:
+        for kwargs in (
+                {"op": "explode"},                              # unknown op
+                {"op": "set_width"},                            # no preset
+                {"op": "move_column"},                          # no to
+                {"op": "set_geometry"},                         # no x/y/w/h
+                {"op": "tab_into"},                             # no target
+                {"op": "split", "target": "h:9"},               # no axis
+                {"op": "tab_into", "target": "o:9"}):           # other host
+            with pytest.raises(BrowserlandError) as ei:
+                server.arrange_window("h:7", kwargs.pop("op"), **kwargs)
+            assert ei.value.code in ("bad_op", "bad_args"), ei.value
+    finally:
+        _reset_server()
+    assert broker.requests == []
+
+
+def test_workspaces_admin_gate_and_arg_building():
+    """#244: workspace ops are admin-only — a host without a confirmed
+    admin credential refuses locally and sees nothing — and the ops compose
+    their args (bare ints for win, force only when true, the wire op
+    prefixed workspaces:)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.workspaces("h", "list")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert broker.requests == []
+
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")     # what the startup probe would set
+    try:
+        server.workspaces("h", "list")
+        server.workspaces("h", "add", name="build")
+        server.workspaces("h", "rename", index=1, name="w2")
+        server.workspaces("h", "remove", index=1, force=True)
+        server.workspaces("h", "switch", index=0)
+        server.workspaces("h", "send-window", win="h:5", target=2)
+        with pytest.raises(BrowserlandError) as bad:
+            server.workspaces("h", "send-window", target=2)   # no win
+    finally:
+        _reset_server()
+    assert bad.value.code == "bad_args"
+    assert broker.bodies("/mcp/desktop") == [
+        {"op": "workspaces:list", "args": {}},
+        {"op": "workspaces:add", "args": {"name": "build"}},
+        {"op": "workspaces:rename", "args": {"index": 1, "name": "w2"}},
+        {"op": "workspaces:remove", "args": {"index": 1, "force": True}},
+        {"op": "workspaces:switch", "args": {"index": 0}},
+        {"op": "workspaces:send-window", "args": {"win": 5, "target": 2}},
+    ]
+
+
+def test_desktop_error_codes_map_to_readable_messages():
+    """#244: the relay's error codes surface as readable tool errors via the
+    client's table (never a raw code passthrough): no holder, not_home, and
+    the needs_confirm + force guidance."""
+    cases = [
+        ("no_active_browser", 409, "control lease"),
+        ("not_home", 409, "home"),
+        ("needs_confirm", 409, "force"),
+        ("desktop_timeout", 504, "answer"),
+    ]
+    for code, status, fragment in cases:
+        broker = _ToolBroker(responses={
+            "/mcp/desktop": lambda req, code=code, status=status: (
+                httpx.Response(status, json={"error": code}))})
+        server = _install({"h": broker})
+        try:
+            with pytest.raises(BrowserlandError) as ei:
+                server.arrange_window("h:7", "focus")
+        finally:
+            _reset_server()
+        assert ei.value.code == code
+        assert fragment in str(ei.value), (code, str(ei.value))

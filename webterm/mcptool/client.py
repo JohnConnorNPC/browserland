@@ -74,6 +74,26 @@ _ERROR_MESSAGES = {
     "admin_token_in_url": "The broker refused the request: an admin token must "
                           "travel in the X-Browserland-Mcp-Admin header, never "
                           "the URL query string.",
+    # #244: the desktop relay's error surface (workspace results answer
+    # 200 {"ok": false, "reason": "absent"|"inactive"} and are DATA, not
+    # errors — the mod being off is a state, not a failure).
+    "desktop_disabled": "The desktop relay is off on the broker (enable "
+                        "it in Control Panel → MCP access).",
+    "no_active_browser": "No browser holds the control lease: open the "
+                         "Browserland desktop (or bring it active) and "
+                         "retry; ops are never queued.",
+    "not_home": "The lease-holding browser's HOME is another broker, and "
+                "workspace data belongs to a browser's home desktop — run "
+                "workspace ops from the home broker's host.",
+    "lost_lease": "The browser lost the control lease mid-op and nothing "
+                  "was half-applied — check the screen and retry.",
+    "needs_confirm": "That workspace is not empty: pass force=true to remove "
+                     "it (its windows move to the adjacent workspace).",
+    "last_workspace": "The last workspace cannot be removed.",
+    "desktop_timeout": "The browser did not answer the desktop op in time.",
+    "desktop_op_failed": "The browser's desktop op raised an error.",
+    "bad_op": "Unknown desktop op.",
+    "bad_args": "The desktop op's arguments are invalid.",
 }
 
 
@@ -431,3 +451,20 @@ class BrowserlandClient:
         tool layer composes the body; the broker validates strictly (real
         booleans) and refuses credential/enabled keys."""
         return self._post("/mcp/knobs", body)
+
+    def get_desktop(self) -> Dict[str, Any]:
+        """``GET /mcp/desktop`` (#244): the lease-holding browser's desktop
+        snapshot — windows with their layout attributes, the viewport, and
+        the workspaces when the mod is on. Geometry is floating pixel
+        geometry AS THAT BROWSER SEES IT (per-browser state); ``home`` says
+        whether that browser's home is this broker (workspace ops answer
+        ``not_home`` otherwise)."""
+        return self._get("/mcp/desktop")
+
+    def desktop_op(self, op: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/desktop`` (#244): one op relayed to the lease-holding
+        browser. ``args`` is op-specific (broker-local integer window ids);
+        the broker re-checks visibility for every id the args name before
+        relaying, and maps the browser's answer to HTTP (409 no_active_browser
+        / lost_lease / needs_confirm, 504 desktop_timeout, ...)."""
+        return self._post("/mcp/desktop", {"op": op, "args": args})
