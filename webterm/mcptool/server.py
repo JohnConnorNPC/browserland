@@ -5,8 +5,12 @@ broker's dict/list verbatim — FastMCP turns the return value into structured
 tool output, and the type hints + docstrings drive the tool schema.
 
 The client is built **lazily** from config handed in by ``__main__`` via
-:func:`configure`, so importing this module has no side effects and stdio
-startup never blocks on a network probe. The first tool call surfaces a clean
+:func:`configure`, so importing this module has no side effects. The one
+deliberate exception to "never probe at startup" (#245, owner decision): the
+END of ``configure()`` probes every admin-token host's ``/mcp/info``
+concurrently under a single bounded deadline, because admin-only tools must be
+hidden unless a host confirms admin — that costs at most one timeout at stdio
+startup, then never blocks again. The first tool call surfaces a clean
 :class:`BrowserlandError` if the broker URL or token is wrong.
 """
 
@@ -15,6 +19,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -80,6 +85,17 @@ _HANDLES_MAX = 256
 # by configure()'s probe; empty until then and whenever no host qualified).
 # Admin-path tools check membership and refuse locally for every other host.
 _admin_hosts: set = set()
+# The admin tools are registered at most ONCE per process: FastMCP cannot
+# unregister, and configure() is once-per-process in production (__main__
+# calls it a single time). A later re-configure() re-probes and updates
+# _admin_hosts (the per-host gate), but an earlier registration stays listed
+# — documented as a limitation; the tests pin the refused-locally ladder.
+_admin_tools_registered = False
+
+# One overall deadline for the startup admin probe (#245): the browser's
+# client default timeout, so the worst-case stdio startup delay is one
+# timeout no matter how many admin hosts are configured.
+_ADMIN_PROBE_TIMEOUT_S = 10.0
 
 
 def _handle_remember(nid: str, handle: str) -> None:
@@ -110,7 +126,13 @@ def configure(hosts) -> None:
     every cross-config state: the launch-handle store and the admin-host set
     (host names are reusable; a stale ``host:id`` handle or admin grant must
     not survive a re-pointed host) — the per-client capability caches die
-    with the closed clients."""
+    with the closed clients.
+
+    After the rebuild, the one-shot admin probe (#245) runs: every host
+    carrying an admin token is probed concurrently (one overall deadline);
+    the hosts whose ``/mcp/info`` answers ``admin: true`` land in
+    ``_admin_hosts``, and the admin tools are registered once any host
+    qualifies."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -127,6 +149,41 @@ def configure(hosts) -> None:
             cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
             new_configs[cfg.name] = cfg
         _host_configs = new_configs
+    _probe_admin_hosts()
+
+
+def _probe_admin_hosts() -> None:
+    """#245: the one-shot startup admin probe. For every host carrying an
+    admin token, GET ``/mcp/info`` (the client sends the admin header); the
+    host is admin-capable iff the body is a dict with ``admin: true`` — a
+    pre-#245 broker answers without the key, and an unreachable host or a
+    wrong token raises: every failure reads as NOT admin (fail closed). The
+    probes run concurrently under one overall deadline
+    (``_ADMIN_PROBE_TIMEOUT_S``, the client default), so the worst-case
+    startup delay is one timeout, not timeout × hosts. When at least one
+    host qualifies, the admin tools are registered exactly once for the
+    process lifetime."""
+    global _admin_tools_registered
+    names = [name for name, cfg in _host_configs.items()
+             if _as_host_config(name, cfg).admin_token]
+    if not names:
+        return
+
+    def probe(name: str) -> bool:
+        try:
+            info = _get_client(name)._send(
+                "GET", "/mcp/info", timeout=_ADMIN_PROBE_TIMEOUT_S)
+        except Exception:
+            return False
+        return isinstance(info, dict) and info.get("admin") is True
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        qualified = list(pool.map(probe, names))
+    _admin_hosts.update(
+        name for name, ok in zip(names, qualified) if ok)
+    if _admin_hosts and not _admin_tools_registered:
+        mcp.tool(name="set_mcp_knobs")(set_mcp_knobs)
+        _admin_tools_registered = True
 
 
 def _get_client(name: str) -> BrowserlandClient:
@@ -849,3 +906,67 @@ def set_window(id: str, scope: str = "", mode: str = "",
             "set_window: nothing to change — pass scope/mode to set, or "
             "clear_scope/clear_mode to clear (an omitted field is kept).")
     return client.set_window(body)
+
+
+def set_mcp_knobs(host: str, default_mode: str = "",
+                  allow_launch: Optional[bool] = None,
+                  allow_desktop: Optional[bool] = None) -> Dict[str, Any]:
+    """Change a broker's broker-wide MCP knobs (#245 — ADMIN ONLY): the
+    default window mode (`default_mode`: off/read/readwrite), whether agents
+    may launch terminals (`allow_launch`), and whether the desktop relay is
+    on (`allow_desktop`). Pass a knob's value only to change it.
+
+    Requires a host whose admin credential this server confirmed at startup
+    (its --hosts entry carries "admin_token" and the startup probe saw
+    admin: true); every other host refuses locally and nothing is sent. The
+    MCP token, the admin token and the enabled switch stay Control-Panel
+    only — an admin agent cannot rotate credentials or disable the surface
+    it is using. A successful change re-reads the host's /mcp/info flags, so
+    a knob that turns a capability on (allow_desktop) is visible to the next
+    fail-closed tool call without restarting this server."""
+    if host not in _admin_hosts:
+        raise BrowserlandError(
+            0, "admin_required",
+            f"host {host!r} has no confirmed admin credential (its --hosts "
+            'entry needs "admin_token", and the startup probe must see '
+            "admin: true on /mcp/info); set_mcp_knobs refuses without "
+            "sending.")
+    for key, value in (("allow_launch", allow_launch),
+                       ("allow_desktop", allow_desktop)):
+        # Strict booleans, mirroring the broker's /mcp/knobs validation: a
+        # string "false" is truthy junk and must never reach the wire.
+        if value is not None and not isinstance(value, bool):
+            raise BrowserlandError(
+                0, "bad_args",
+                f"set_mcp_knobs: {key} must be a real boolean (true/false), "
+                f"got {value!r}.")
+    body: Dict[str, Any] = {}
+    if default_mode:
+        body["default_mode"] = default_mode
+    if allow_launch is not None:
+        body["allow_launch"] = allow_launch
+    if allow_desktop is not None:
+        body["allow_desktop"] = allow_desktop
+    if not body:
+        raise BrowserlandError(
+            0, "bad_args",
+            "set_mcp_knobs: nothing to change — pass default_mode, "
+            "allow_launch or allow_desktop.")
+    client = _named_client(host)
+    try:
+        result = client.set_knobs(body)
+    except BrowserlandError as exc:
+        # [c10]: a broker-side admin_required on a host the probe cleared
+        # means the credential rotated AFTER startup. Fail LOUD with the
+        # remedy, never silently retry without the header.
+        if exc.code == "admin_required":
+            raise BrowserlandError(
+                exc.status, exc.code,
+                f"host {host!r}: {exc} — the admin token may have been "
+                "rotated in the broker's Control Panel; refresh this "
+                "server's config and restart it.") from exc
+        raise
+    # [c23]: knobs can flip capabilities (allow_desktop gates the desktop
+    # tools); a successful change refreshes the host's cached flags.
+    client.capabilities(refresh=True)
+    return result

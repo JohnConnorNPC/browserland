@@ -424,3 +424,10 @@ class BrowserlandClient:
         leaves the field alone and an explicit null clears it, so composing
         keep|set|clear is the caller's job (the tool layer does it)."""
         return self._post("/mcp/window", body)
+
+    def set_knobs(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/knobs`` (#245, admin): change the broker-wide MCP
+        knobs — ``default_mode``, ``allow_launch``, ``allow_desktop``. The
+        tool layer composes the body; the broker validates strictly (real
+        booleans) and refuses credential/enabled keys."""
+        return self._post("/mcp/knobs", body)

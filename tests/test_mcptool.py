@@ -2499,3 +2499,182 @@ def test_configure_clears_handles_admin_and_caps():
     finally:
         server.configure([])
     assert ei.value.code == "no_handle"
+
+
+# ---- #245 D3: the startup admin probe + admin-only tools -------------------
+
+def _configure_with(monkeypatch, hosts, handler_for):
+    """configure() with every host's client built over a MockTransport
+    running ``handler_for(name)`` (the way _get_client builds them), so the
+    startup admin probe is exercised for real without any network."""
+    from webterm.mcptool import server
+
+    def factory(base, token, scope=None, admin_token=None, name=None,
+                **kw):
+        return BrowserlandClient(base=base, token=token, scope=scope,
+                                 admin_token=admin_token, name=name,
+                                 transport=httpx.MockTransport(
+                                     handler_for(name)))
+    monkeypatch.setattr(server, "BrowserlandClient", factory)
+    server.configure(hosts)
+
+
+@pytest.mark.asyncio
+async def test_admin_tools_absent_when_no_host_admin(monkeypatch):
+    """#245: with no admin-token host configured, the probe never runs and
+    the admin tools stay unregistered (hidden unless admin). MUST run
+    before any test that registers them: FastMCP cannot unregister, so a
+    registration is process-lifetime [c24]."""
+    from webterm.mcptool import server
+    broker = _ToolBroker()
+    _configure_with(monkeypatch, [("h", "http://h:4445", "t", None, None)],
+                    lambda name: broker)
+    try:
+        assert server._admin_hosts == set()
+        assert broker.requests == []               # nothing probed at all
+        names = [t.name for t in await server.mcp.list_tools()]
+        assert "set_mcp_knobs" not in names
+    finally:
+        _reset_server()
+
+
+@pytest.mark.asyncio
+async def test_admin_probe_registers_admin_tools_when_any_host_admin(
+        monkeypatch):
+    """#245: the startup probe GETs /mcp/info on every admin-token host (the
+    header riding), records exactly the hosts whose body says admin: true —
+    with the header present; a probe without it reads admin: false and
+    registers nothing — and registers the admin tools once ANY host
+    qualifies. A host without an admin token is never probed."""
+    from webterm.mcptool import server
+
+    def a_info(req):
+        # admin is confirmed ONLY when the admin header rode the probe
+        return httpx.Response(200, json={
+            "ok": True, "admin": req.headers.get(MCP_ADMIN_HEADER) == "adm-a"})
+
+    brokers = {"a": _ToolBroker(responses={"/mcp/info": a_info}),
+               "b": _ToolBroker(caps={"window_edit": True})}   # no admin key
+    seen = []
+
+    def handler_for(name):
+        def handler(req):
+            seen.append((name, req.url.path))
+            return brokers[name](req)
+        return handler
+
+    _configure_with(monkeypatch, [
+        ("a", "http://a:4445", "t", None, "adm-a"),
+        ("b", "http://b:4445", "t", None, "adm-b"),
+        ("c", "http://c:4445", "t", None)],            # no admin token
+        handler_for)
+    try:
+        assert server._admin_hosts == {"a"}
+        assert sorted(seen) == [("a", "/mcp/info"), ("b", "/mcp/info")]
+        assert server._admin_tools_registered is True
+        names = [t.name for t in await server.mcp.list_tools()]
+        assert "set_mcp_knobs" in names
+    finally:
+        _reset_server()
+
+
+def test_admin_probe_failure_fails_closed(monkeypatch):
+    """#245: an admin host that cannot be reached (or answers anything but
+    admin: true) is NOT admin-capable: the probe fails closed, the host is
+    absent from _admin_hosts, and its admin tool calls refuse locally."""
+    from webterm.mcptool import server
+    broker = _ToolBroker(faults={"/mcp/info": [httpx.ConnectError]})
+    _configure_with(monkeypatch, [("h", "http://h:4445", "t", None, "adm")],
+                    lambda name: broker)
+    try:
+        assert server._admin_hosts == set()
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert broker.count("/mcp/knobs") == 0
+
+
+def test_admin_probe_concurrent_deadline(monkeypatch):
+    """#245: the probes run concurrently under ONE deadline — three slow
+    admin hosts cost about one wait, not three (the owner's worst case for
+    stdio startup is one client timeout, not timeout × hosts)."""
+    import time
+    from webterm.mcptool import server
+
+    def handler(req):
+        time.sleep(0.6)
+        return httpx.Response(200, json={"ok": True, "admin": True})
+
+    started = time.monotonic()
+    try:
+        _configure_with(monkeypatch, [
+            (n, f"http://{n}:4445", "t", None, "adm") for n in "abc"],
+            lambda name: handler)
+        elapsed = time.monotonic() - started
+        assert server._admin_hosts == {"a", "b", "c"}
+    finally:
+        _reset_server()
+    assert elapsed < 1.5, f"probe looked serial: {elapsed:.2f}s for 3 hosts"
+
+
+def test_admin_tool_refuses_locally_for_non_admin_host_and_sends_nothing():
+    """#245: set_mcp_knobs on a host without a confirmed admin credential
+    refuses LOCALLY (admin_required naming the host) and the broker sees
+    nothing — not even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert "'h'" in str(ei.value)
+    assert broker.requests == []
+
+
+def test_knobs_success_refreshes_capability_cache():
+    """#245 [c23]: a successful knobs call re-reads the host's /mcp/info, so
+    a knob that flips a capability (allow_desktop) is visible to the next
+    fail-closed tool call without restarting this server."""
+    broker = _ToolBroker()
+
+    def info(req):
+        if broker.count("/mcp/knobs"):
+            return httpx.Response(200, json={"ok": True,
+                                             "allow_desktop": True})
+        return httpx.Response(200, json={"ok": True})
+
+    broker.responses["/mcp/info"] = info
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")     # what the startup probe would set
+    try:
+        client = server._get_client("h")
+        assert client.capabilities()["allow_desktop"] is False
+        out = server.set_mcp_knobs("h", allow_desktop=True)
+    finally:
+        _reset_server()
+    assert out == {"ok": True}
+    assert broker.bodies("/mcp/knobs") == [{"allow_desktop": True}]
+    assert client.capabilities()["allow_desktop"] is True
+    assert broker.count("/mcp/info") == 2
+
+
+def test_rotated_admin_token_error_names_rotation():
+    """#245 [c10]: a broker-side 403 admin_required on a host the probe once
+    cleared surfaces as a LOUD error naming the host and the rotation
+    remedy — never a silent retry without the header."""
+    broker = _ToolBroker(responses={
+        "/mcp/knobs": lambda req: httpx.Response(
+            403, json={"error": "admin_required"})})
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert "'h'" in str(ei.value) and "rotated" in str(ei.value)
