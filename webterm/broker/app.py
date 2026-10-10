@@ -91,7 +91,8 @@ from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
 # the per-window store that validates them (#228), and so are the scope
 # grammar and the header a client declares a scope on (#230).
-from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
+from .mcp_windows import (MCP_MODES, PRUNE_AGE_S, SCOPE_HEADER, SCOPE_RE,
+                          McpWindowStore)
 # #245: the MCP admin credential's header (see protocol.py). Re-exported
 # through mcp_windows' neighbours for symmetry with SCOPE_HEADER, which the
 # mcp_windows module re-exports from protocol.
@@ -7324,15 +7325,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         window for 7 days. Replacing it in place would hand a claimed row's
         id to a pre-spawn row, and a hello from that row's old producer
         landing during the write would then claim the NEW row (the hazard
-        McpWindowStore.reapply names). So that replacement never happens;
-        instead (#243), when the collided row is DEAD -- no live entry
-        passes same_producer against it -- ONE extra writer pass deletes
-        that row alone and the launch is retried ONCE, on a FRESH id. A row
-        that is still claimable (its producer is live on the id, or a hello
-        claimed it mid-write) keeps its refusal: prespawn_failed, nothing
-        spawned, the row as it was. (is_pending is deliberately not
-        consulted: the collided id is pending for THIS launch by the time
-        the hook runs, and no other launch can be pending on it.)
+        McpWindowStore.reapply names). So that replacement never happens; instead (#243, reshaped in
+        review round 1 A1) the launch is retried ONCE on a FRESH id
+        whatever the collided row is (the launcher allocates a new
+        random id; the collided one is simply not ours), and the row
+        itself is deleted -- by ONE extra writer pass that touches
+        nothing else -- ONLY when it cannot still be claimed usefully:
+        a pre-spawn ORPHAN (pid and host both null: nothing was ever
+        spawned on it) or a row PRUNE_AGE_S stale (prune's own age
+        would drop it anyway). A row with its producer identity set and
+        a fresh seen SURVIVES untouched even with no live entry: the
+        7-day lifetime exists precisely so a DISCONNECTED producer can
+        reconnect to its off/scope policy, and a random id collision
+        must not take it away.
 
         A client that disconnects during the shielded pre-spawn write can
         leave an unclaimed row on an id nothing was spawned for: it tags no
@@ -7372,38 +7377,41 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             await app.ctx.persist_mcp_windows(_write)
             tagged.append(wid)
 
-        def _row_is_dead(work, wid: int) -> bool:
-            # The collided row is claimable when a live entry on the id
-            # passes same_producer against it -- its producer is back, or a
-            # hello claimed the row during this very write. Read inside the
-            # writer (get() is sync), so the answer is linearized with the
-            # delete.
+        def _collided_row_droppable(work, wid: int) -> bool:
+            # Review round 1 A1: a collided row may be deleted ONLY when
+            # nothing can still claim it usefully -- a pre-spawn ORPHAN
+            # (pid and host both null) or a row older than PRUNE_AGE_S
+            # (prune's own rule would drop it anyway). A row whose
+            # producer identity is set and whose seen is fresh SURVIVES:
+            # the disconnected producer's reconnect must find its
+            # off/scope policy. Read inside the writer (get()/clock() are
+            # sync), so the answer is linearized with the delete.
             row = work.get(wid)
             if row is None:
                 return False
-            entry = app.ctx.registry.get(wid)
-            return not (entry is not None
-                        and same_producer(row, entry))
+            if row["pid"] is None and row["host"] is None:
+                return True
+            return work.clock() - row["seen"] > PRUNE_AGE_S
 
-        async def _drop_dead_row(wid: int) -> bool:
-            # ONE writer pass that deletes ONLY the dead collided row. Never
-            # an in-place replacement: the retry that follows launches on a
-            # fresh id.
+        async def _drop_collided_row(wid: int) -> None:
+            # ONE writer pass that deletes the collided row ONLY when it
+            # is droppable (an orphan or stale). Never an in-place
+            # replacement: the retry that follows launches on a fresh id
+            # whether or not this deleted anything.
             def _write(work):
                 row = work.get(wid)
-                if row is not None and _row_is_dead(work, wid):
+                if row is not None and _collided_row_droppable(work, wid):
                     work.set(wid, scope=None, mode=None, owner=None,
-                             pid=row["pid"], host=row["host"],
+                             admin_set=None, pid=row["pid"], host=row["host"],
                              now=work.clock())
                     return True
                 return False
             try:
-                return await app.ctx.persist_mcp_windows(_write)
+                await app.ctx.persist_mcp_windows(_write)
             except Exception:
-                LOGGER.exception("/mcp/launch: dropping window %d's dead "
-                                 "MCP row failed; the launch refuses as "
-                                 "before", wid)
-                return False
+                LOGGER.exception("/mcp/launch: dropping window %d's "
+                                 "collided MCP row failed; the launch "
+                                 "refuses as before", wid)
 
         async def _untag(wid: int) -> None:
             def _write(work):
@@ -7427,11 +7435,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             try:
                 return await app.ctx.launcher.launch(
                     params["profile"], pre_spawn=_tag, **launch_kwargs)
-            except LaunchError as exc:
-                # #243: a DEAD-row collision is retried exactly once, on a
-                # fresh id. Anything else -- a claimable row, a store-write
-                # failure, a spawn failure -- is the launcher's answer.
-                if collided and await _drop_dead_row(collided[0]):
+            except LaunchError:
+                # #243 round 1 A1: a COLLISION is retried exactly once, on
+                # a fresh id, whatever the row -- a random id collision
+                # must not fail the agent's launch, and the collided row
+                # is dropped only when it is an orphan or stale. Anything
+                # else (a store-write or spawn failure) is the launcher's
+                # own answer; and a second collision on the retry is too.
+                if collided:
+                    await _drop_collided_row(collided[0])
                     collided.clear()
                     return await app.ctx.launcher.launch(
                         params["profile"], pre_spawn=_tag, **launch_kwargs)

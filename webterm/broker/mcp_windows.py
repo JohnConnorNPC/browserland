@@ -150,18 +150,27 @@ def _canonical_id(key: Any) -> Optional[int]:
 
 def _parse_row(raw: Any) -> Optional[Dict[str, Any]]:
     """A validated row, or None. A row that carries none of scope, mode or
-    owner counts as malformed: set() never writes one (see there — #243
+    owner counts as malformed: set() never writes one (see there -- #243
     widened liveness so an owner keeps its row with both overrides
-    cleared)."""
+    cleared).
+
+    Review round 1 A4: ``owner``/``admin_set`` are METADATA -- a malformed
+    value self-heals to None instead of discarding the row, so a
+    hand-edited or corrupt sidecar never costs a window its {scope, mode}
+    policy (an ``off`` restriction must not fail open into default_mode).
+    The policy fields themselves still drop the row: a row whose scope or
+    mode cannot be trusted is no row at all."""
     if not isinstance(raw, dict):
         return None
     row = {field: raw.get(field) for field in _FIELDS}
     if not (_valid_scope(row["scope"]) and _valid_mode(row["mode"])
             and _valid_pid(row["pid"]) and _valid_host(row["host"])
-            and _valid_owner(row["owner"])
-            and _valid_admin_set(row["admin_set"])
             and _valid_seen(row["seen"])):
         return None
+    if not _valid_owner(row["owner"]):
+        row["owner"] = None
+    if not _valid_admin_set(row["admin_set"]):
+        row["admin_set"] = None
     if (row["scope"] is None and row["mode"] is None
             and row["owner"] is None):
         return None

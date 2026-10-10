@@ -43,13 +43,17 @@ def _row(scope=None, mode=None, pid=None, host=None, seen=T, owner=None,
 
 
 def test_owner_validated_64_hex_or_none(tmp_path):
-    """#243: owner is None or a 64-char lowercase hex sha256 digest — nothing
-    else loads from a sidecar and nothing else passes set() (the plaintext
-    handle must never be storable by accident)."""
+    """#243: owner is None or a 64-char lowercase hex sha256 digest — the
+    plaintext handle must never be storable by accident (set() refuses),
+    and a corrupt value LOADING from a sidecar self-heals to None (round 1
+    A4) instead of costing the row its policy."""
     bad = ["not-hex", "ABC" * 21, "f" * 63, "f" * 65, 7, True]
     raw = {str(i): _row(scope="a", owner=v) for i, v in enumerate(bad)}
     store = _loaded(tmp_path, raw)
-    assert len(store) == 0          # every malformed row dropped
+    # every row LOADS (scope survives); the malformed owner healed to None
+    assert len(store) == len(bad)
+    for i in range(len(bad)):
+        assert store.get(i)["owner"] is None
 
     store = _loaded(tmp_path, {"5": _row(scope="a", owner=_OWNER)})
     assert store.get(5)["owner"] == _OWNER
@@ -94,6 +98,23 @@ def test_parse_row_accepts_old_sidecars_without_owner(tmp_path):
               "seen": T}}}), encoding="utf-8")
     store = McpWindowStore.load(path, clock=lambda: T)
     assert store.get(5) == _row(scope="a", mode="read", pid=1, host="h")
+
+
+def test_parse_row_selfheals_malformed_owner_and_admin_set(tmp_path):
+    """#243 round 1 A4: owner/admin_set are metadata -- a corrupt value
+    self-heals to None, keeping the {scope, mode} POLICY. A window's `off`
+    restriction must never fail open into default_mode because a sidecar
+    was hand-edited."""
+    path = tmp_path / "webterm_mcp_windows.json"
+    path.write_text(json.dumps({"windows": {
+        "5": {"scope": "a", "mode": "off", "pid": 1, "host": "h",
+              "owner": "plaintext-junk", "admin_set": "yes", "seen": T},
+        # an owner that is the ONLY malformed field still heals the same way
+        "6": {"scope": None, "mode": "read", "pid": 2, "host": "h",
+              "owner": 0xdeadbeef, "seen": T}}}), encoding="utf-8")
+    store = McpWindowStore.load(path, clock=lambda: T)
+    assert store.get(5) == _row(scope="a", mode="off", pid=1, host="h")
+    assert store.get(6) == _row(mode="read", pid=2, host="h")
 
 
 def test_noop_compare_includes_owner(tmp_path):
@@ -150,6 +171,7 @@ from .auth_helpers import TEST_TOKEN, authed  # noqa: E402
 
 MCP_TOKEN = "scope-store-token"
 LAUNCHED = (1 << 52) | 77
+LAUNCHED2 = (1 << 52) | 78
 _app_seq = 0
 
 
@@ -202,33 +224,35 @@ def _hello(wid, pid, host="hostA"):
 class _FakeLauncher:
     """Awaits pre_spawn (the route's own hook), mimicking the real
     launcher's prespawn contract on a raising hook, then registers a hello
-    and answers 200. ``hook_first`` lets a cell claim the row inside the
-    hook (the mid-write race)."""
+    and answers 200. ``ids`` is an iterator of window ids -- one per launch
+    attempt, so a collision retry can land on a FRESH id like the real
+    allocator does (default: LAUNCHED forever)."""
 
-    def __init__(self, app, *, pid=4242, hook_claim=None):
+    def __init__(self, app, *, pid=4242, hook_claim=None, ids=None):
         self.app, self.pid = app, pid
         self.hook_claim = hook_claim
+        self._ids = ids if ids is not None else iter(lambda: LAUNCHED, None)
         self.calls = []
         self.row_at_spawn = None
 
     async def launch(self, profile, **kwargs):
         self.calls.append(dict(kwargs, profile=profile))
+        wid = next(self._ids)
         pre_spawn = kwargs.get("pre_spawn")
         if pre_spawn is not None:
             try:
-                await pre_spawn(LAUNCHED)
+                await pre_spawn(wid)
             except Exception:
                 if self.hook_claim is not None:
                     await self.hook_claim()
                 raise LaunchError(500, "prespawn_failed")
         path = self.app.ctx.mcp_windows_path
         if path.exists():
-            self.row_at_spawn = json.loads(
-                path.read_text(encoding="utf-8"))["windows"].get(
-                    str(LAUNCHED))
-        await self.app.ctx.registry.register(_WS(), _hello(LAUNCHED,
-                                                           self.pid))
-        return 200, {"ok": True, "id": LAUNCHED, "registered": True,
+            windows = json.loads(
+                path.read_text(encoding="utf-8"))["windows"]
+            self.row_at_spawn = windows.get(str(wid))
+        await self.app.ctx.registry.register(_WS(), _hello(wid, self.pid))
+        return 200, {"ok": True, "id": wid, "registered": True,
                      "agent_pid": self.pid}
 
 
@@ -379,29 +403,65 @@ def test_launch_dead_row_collision_deleted_and_retried_once(tmp_path,
     assert row["mode"] == "read"
 
 
-def test_launch_claimable_row_still_refuses_prespawn_failed(tmp_path,
-                                                             monkeypatch):
-    """#243: the collided row IS claimable — its producer is live on the id —
-    so the dead-row path declines: prespawn_failed, nothing spawned, the row
-    exactly as it was, and only ONE launch attempt."""
+def test_launch_claimable_row_survives_and_launch_retries_on_fresh_id(
+        tmp_path, monkeypatch):
+    """#243 round 1 A1: the collided row's producer is LIVE on the id -- the
+    row SURVIVES the collision untouched (a live producer's policy is never
+    deleted), and the launch itself is retried once on a FRESH id, so a
+    random id collision no longer fails the agent's launch."""
     stale = _row(scope="old", mode="read", pid=55, host="hostA",
-                 seen=T - 8 * 86400)
+                 seen=T - 60)
     _write_sidecar(_windows_path(tmp_path), {str(LAUNCHED): stale})
     app = _make_app(tmp_path, monkeypatch)
     _live(app, LAUNCHED, 55)          # the old producer is live on the id
-    fake = _launch(app)
+    fake = _launch(app, ids=iter([LAUNCHED, LAUNCHED2]))
     _, resp = _mcp(app, "/mcp/launch", {"mode": "read"})
-    assert (resp.status, resp.json) == (500, {"ok": False,
-                                              "error": "prespawn_failed"})
-    assert len(fake.calls) == 1
-    # seen is EXCLUDED: the stop-flush's refresh_seen legitimately re-stamps
-    # a live producer's row on every request lifecycle (#229). Everything
-    # that matters — the row still existing with its original facts — is
-    # pinned field by field.
+    assert (resp.status, resp.json["id"]) == (200, LAUNCHED2)
+    assert len(fake.calls) == 2
+    # the live producer's row is exactly as it was (seen may re-stamp via
+    # the stop-flush's refresh_seen -- #229 -- so compare the facts)
     after = dict(_disk_windows(tmp_path)[str(LAUNCHED)])
     seen = after.pop("seen")
     assert seen >= stale["seen"]
     assert after == {k: v for k, v in stale.items() if k != "seen"}
+    # the new launch's row is on the fresh id only
+    assert set(_disk_windows(tmp_path)) == {str(LAUNCHED), str(LAUNCHED2)}
+
+
+def test_collision_with_disconnected_producers_row_survives_and_retries(
+        tmp_path, monkeypatch):
+    """#243 round 1 A1: a DISCONNECTED producer's row (pid/host set, fresh
+    seen, no live entry) survives a collision untouched -- the 7-day
+    lifetime exists so its reconnect finds the off/scope policy -- while the
+    colliding launch still succeeds on a fresh id."""
+    keep = _row(scope="keep", mode="off", pid=55, host="hostA", seen=T)
+    _write_sidecar(_windows_path(tmp_path), {str(LAUNCHED): keep})
+    app = _make_app(tmp_path, monkeypatch)
+    fake = _launch(app, ids=iter([LAUNCHED, LAUNCHED2]))
+    _, resp = _mcp(app, "/mcp/launch", {"mode": "read"})
+    assert (resp.status, resp.json["id"]) == (200, LAUNCHED2)
+    assert len(fake.calls) == 2
+    after = dict(_disk_windows(tmp_path)[str(LAUNCHED)])
+    seen = after.pop("seen")
+    assert seen == keep["seen"]        # nothing touched it at all
+    assert after == {k: v for k, v in keep.items() if k != "seen"}
+
+
+def test_collision_orphan_row_deleted_and_retried(tmp_path, monkeypatch):
+    """#243 round 1 A1: a pre-spawn ORPHAN (pid and host both null -- a
+    client disconnect stranded it) is deleted by the collision pass, and
+    the retry succeeds. The delete is load-bearing here: the retry reuses
+    the same id, so without it the retry would collide again."""
+    orphan = _row(scope="stray", mode="read", owner=_OWNER, seen=T)
+    _write_sidecar(_windows_path(tmp_path), {str(LAUNCHED): orphan})
+    app = _make_app(tmp_path, monkeypatch)
+    fake = _launch(app)                # LAUNCHED on every attempt
+    _, resp = _mcp(app, "/mcp/launch", {"mode": "read"})
+    assert (resp.status, resp.json["id"]) == (200, LAUNCHED)
+    assert len(fake.calls) == 2
+    owner = hashlib.sha256(resp.json["handle"].encode()).hexdigest()
+    row = _disk_windows(tmp_path)[str(LAUNCHED)]
+    assert (row["scope"], row["mode"], row["owner"]) == (None, "read", owner)
 
 
 # ---- B3: POST /mcp/window -----------------------------------------------------
@@ -693,3 +753,63 @@ def test_info_advertises_window_edit(tmp_path, monkeypatch):
         "/mcp/info", headers=[("Authorization", f"Bearer {MCP_TOKEN}")])
     assert resp.status == 200
     assert resp.json["window_edit"] is True
+
+
+def test_a_different_entry_registering_mid_write_gets_the_new_row(
+        tmp_path, monkeypatch):
+    """#243 round 1 W2 (mirrors /session/mcp's mid-write family): the SAME
+    producer re-registers (a reconnect: a DIFFERENT entry object, same
+    pid/host) while the /mcp/window write is parked in the executor. Its
+    hello applied the PRE-write row through the inflight mirror, and the
+    route's post-write reapply() lands the NEW values on whatever entry
+    holds the id -- which is NOT the entry the route validated, so the
+    direct-set fallback cannot be what delivered them. (A different
+    PRODUCER on the id is left alone by the pid gate, as in the
+    /session/mcp family.)"""
+    import threading
+
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app, scope="teamA")
+
+    gate_entered = threading.Event()
+    gate_release = threading.Event()
+    store_path = app.ctx.mcp_windows_path
+    real = app_mod._write_state_atomic
+
+    def blocking(path, payload):
+        if Path(path) == store_path:
+            gate_entered.set()
+            assert gate_release.wait(10)
+        return real(path, payload)
+
+    app_mod._write_state_atomic = blocking
+
+    async def scenario():
+        post = asyncio.ensure_future(app.asgi_client.post(
+            "/mcp/window",
+            headers={"Authorization": f"Bearer {MCP_TOKEN}"},
+            json={"id": LAUNCHED, "handle": handle, "scope": "moved",
+                  "mode": "read"}))
+        try:
+            deadline = asyncio.get_event_loop().time() + 10
+            while not gate_entered.is_set():
+                assert asyncio.get_event_loop().time() < deadline, \
+                    "the store write never parked in the gate"
+                await asyncio.sleep(0.01)
+            # the producer reconnects while the write is parked: a NEW
+            # entry object, same pid/host
+            await app.ctx.registry.register(_WS(), _hello(LAUNCHED, 4242))
+        finally:
+            gate_release.set()
+        _, resp = await post
+        return resp
+
+    resp = asyncio.run(scenario())
+    assert (resp.status, resp.json["scope"], resp.json["mode"]) == (200,
+                                                                    "moved",
+                                                                    "read")
+    late = app.ctx.registry.get(LAUNCHED)
+    assert late is not None and late is not app.ctx.registry.get(424242)
+    assert (late.pid, late.mcp_scope, late.mcp_mode) == (4242, "moved",
+                                                         "read")
+    assert app.ctx.mcp_windows.get(LAUNCHED)["scope"] == "moved"
