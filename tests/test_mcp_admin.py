@@ -273,6 +273,22 @@ def test_info_echoes_admin_true_false(tmp_path, monkeypatch):
     assert resp.json["admin"] is True
 
 
+def test_a_repeated_admin_header_is_refused(tmp_path, monkeypatch):
+    """#245 (round 1 A5): a REPEATED X-Browserland-Mcp-Admin header is 403
+    admin_required whether or not one of the two values is right -- Sanic's
+    headers.get picks the first, and "right, junk" authenticating while
+    "junk, right" 403s would be a transport nobody should rely on. Mirrors
+    the repeated scope header's 400."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    for a, b in ((ADMIN_TOKEN, "junk"), ("junk", ADMIN_TOKEN),
+                 (ADMIN_TOKEN, ADMIN_TOKEN)):
+        _, resp = app.test_client.get(
+            "/mcp/info", headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                                  (MCP_ADMIN_HEADER, a),
+                                  (MCP_ADMIN_HEADER, b)])
+        assert (resp.status, resp.json["error"]) == (403, "admin_required")
+
+
 def test_mcp_route_ladder_inventory(tmp_path, monkeypatch):
     """#245: derived from the RUNNING router, not a hand list: every /mcp/*
     token route (the browser-realm /mcp/config and OPTIONS preflights

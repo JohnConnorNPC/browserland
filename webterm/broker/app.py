@@ -6867,6 +6867,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                "from %s (header-only transport)",
                                request.path, request.ip)
                 return sanic_json({"error": "admin_token_in_url"}, status=400)
+        # Round 1 A5: a REPEATED admin header is refused like _mcp_scope
+        # refuses a repeated scope header -- Sanic's headers.get would
+        # silently pick the first, and "right, junk" authenticating while
+        # "junk, right" 403s is a transport we never want to teach.
+        if len(request.headers.getall(MCP_ADMIN_HEADER, None) or []) > 1:
+            LOGGER.warning("rejected repeated %s header on %s from %s",
+                           MCP_ADMIN_HEADER, request.path, request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
         provided = request.headers.get(MCP_ADMIN_HEADER)
         if provided is not None and not auth.token_matches(provided, admin):
             LOGGER.warning("rejected non-admin /mcp call from %s", request.ip)
