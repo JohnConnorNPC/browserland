@@ -532,3 +532,151 @@ def test_knobs_write_serializes_with_config_post(tmp_path, monkeypatch):
     sidecar = json.loads(_sidecar(tmp_path).read_text(encoding="utf-8"))
     assert (sidecar["default_mode"], sidecar["allow_launch"],
             sidecar["enabled"]) == ("read", True, True)
+
+
+# ---- A5: the admin_set badge ------------------------------------------------
+
+LAUNCHED = (1 << 52) | 77
+
+
+class _WS:
+    """Producer WS double: register() only needs send/close."""
+
+    async def send(self, payload):
+        pass
+
+    async def close(self, *a, **k):
+        pass
+
+
+def _hello(wid, pid, host="hostA"):
+    return {"type": "hello", "window_id": wid, "pid": pid, "title": "t",
+            "cols": 80, "rows": 24, "host": host, "kind": "agent"}
+
+
+class _FakeLauncher:
+    """Stands in for app.ctx.launcher (the test_mcp_scope shape): awaits
+    pre_spawn, reads the sidecar where the real one would spawn, registers
+    the hello, answers 200."""
+
+    def __init__(self, app, *, pid=4242):
+        self.app, self.pid = app, pid
+        self.row_at_spawn = None
+
+    async def launch(self, profile, **kwargs):
+        pre_spawn = kwargs.get("pre_spawn")
+        if pre_spawn is not None:
+            await pre_spawn(LAUNCHED)
+        path = self.app.ctx.mcp_windows_path
+        if path.exists():
+            self.row_at_spawn = json.loads(
+                path.read_text(encoding="utf-8"))["windows"].get(
+                    str(LAUNCHED))
+        await self.app.ctx.registry.register(_WS(), _hello(LAUNCHED,
+                                                           self.pid))
+        return 200, {"ok": True, "id": LAUNCHED, "registered": True,
+                     "agent_pid": self.pid}
+
+
+def _launch(app):
+    fake = _FakeLauncher(app)
+    app.ctx.launcher = fake
+    return fake
+
+
+def _sessions(app):
+    _, resp = authed(app).get("/sessions")
+    assert resp.status == 200
+    return {row["id"]: row for row in resp.json}
+
+
+def _launch_call(app, *, admin=_ABSENT_ADMIN, scope=_ABSENT_ADMIN):
+    headers = [("Authorization", f"Bearer {MCP_TOKEN}")]
+    if admin is not _ABSENT_ADMIN:
+        headers.append((MCP_ADMIN_HEADER, admin))
+    if scope is not _ABSENT_ADMIN:
+        headers.append(("X-Browserland-Scope", scope))
+    return app.test_client.post("/mcp/launch", json={}, headers=headers)
+
+
+def test_admin_launch_marks_row_and_summary_scoped(tmp_path, monkeypatch):
+    """#245: an admin-authenticated scoped launch stamps the pre-spawn row
+    (admin_set True on disk before the spawn), reapply carries it onto the
+    live entry, and /sessions surfaces mcp_admin for the chip badge."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN,
+                    mcp_allow_launch=True)
+    fake = _launch(app)
+    _, resp = _launch_call(app, admin=ADMIN_TOKEN, scope="teamA")
+    assert resp.status == 200
+    assert fake.row_at_spawn["admin_set"] is True
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is True
+    assert _sessions(app)[LAUNCHED]["mcp_admin"] is True
+
+
+def test_non_admin_launch_unmarked(tmp_path, monkeypatch):
+    """#245: a plain scoped launch (no admin header) stores admin_set None
+    and the entry stays unbadged."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN,
+                    mcp_allow_launch=True)
+    fake = _launch(app)
+    _, resp = _launch_call(app, scope="teamA")
+    assert resp.status == 200
+    assert fake.row_at_spawn["admin_set"] is None
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is False
+    assert _sessions(app)[LAUNCHED]["mcp_admin"] is False
+
+
+def test_session_mcp_edit_clears_admin_set_including_row_deletion_fallback(
+        tmp_path, monkeypatch):
+    """#245: the browser edit means a human took the window back: the row's
+    admin_set is cleared, and when the edit deletes the row outright (both
+    fields null) the DIRECT-SET FALLBACK clears the live badge too, so it
+    never outlives its row."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN,
+                    mcp_allow_launch=True)
+    _launch(app)
+    _launch_call(app, admin=ADMIN_TOKEN, scope="teamA")
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is True
+
+    _, resp = authed(app).post("/session/mcp",
+                               json={"id": LAUNCHED, "mode": "read"})
+    assert resp.status == 200
+    assert app.ctx.mcp_windows.get(LAUNCHED)["admin_set"] is None
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is False
+
+    # stamp again (the durable write reapply mirrors onto the live entry),
+    # then clear BOTH fields: the row dies, the fallback runs.
+    import asyncio
+
+    def _stamp(work):
+        work.set(LAUNCHED, admin_set=True, pid=4242, host="hostA",
+                 now=work.clock())
+
+    asyncio.run(app.ctx.persist_mcp_windows(_stamp))
+    live = app.ctx.registry.get(LAUNCHED)
+    app.ctx.mcp_windows.reapply(live)
+    assert live.mcp_admin_launch is True
+
+    _, resp = authed(app).post(
+        "/session/mcp", json={"id": LAUNCHED, "mode": None, "scope": None})
+    assert resp.status == 200
+    assert app.ctx.mcp_windows.get(LAUNCHED) is None
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is False
+
+
+def test_admin_set_survives_restart_and_reconnect(tmp_path, monkeypatch):
+    """#245: the badge is durable — a fresh broker on the same sidecar
+    re-applies the row (same producer hello), badge included."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN,
+                    mcp_allow_launch=True)
+    _launch(app)
+    _, resp = _launch_call(app, admin=ADMIN_TOKEN, scope="teamA")
+    assert resp.status == 200
+
+    restarted = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    import asyncio
+    entry = asyncio.run(restarted.ctx.registry.register(
+        _WS(), _hello(LAUNCHED, 4242)))
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
+    assert entry.mcp_admin_launch is True
+    assert _sessions(restarted)[LAUNCHED]["mcp_admin"] is True

@@ -75,7 +75,12 @@ SEEN_REFRESH_S = 86400
 MAX_SIDECAR_BYTES = 8 * 2**20
 
 _UNSET = object()
-_FIELDS = ("scope", "mode", "pid", "host", "seen")
+# admin_set (#245) rides the row as the durable ADMIN badge: True exactly on
+# windows an admin agent launched (or, from #243's /mcp/window, set by an
+# admin write) and cleared by a /session/mcp edit (the human took the window
+# back). It never keeps a row alive on its own (a launch always writes a
+# mode); it is metadata on a row that exists for scope/mode reasons.
+_FIELDS = ("scope", "mode", "pid", "host", "admin_set", "seen")
 
 
 def _empty_payload() -> Dict[str, Any]:
@@ -99,6 +104,12 @@ def _valid_pid(value: Any) -> bool:
 
 def _valid_host(value: Any) -> bool:
     return value is None or isinstance(value, str)
+
+
+def _valid_admin_set(value: Any) -> bool:
+    # A REAL bool only (bool is not "truthy junk"): the badge is a fact an
+    # admin write stamped, never a coerced value.
+    return value is None or (isinstance(value, bool))
 
 
 def _valid_seen(value: Any) -> bool:
@@ -128,6 +139,7 @@ def _parse_row(raw: Any) -> Optional[Dict[str, Any]]:
     row = {field: raw.get(field) for field in _FIELDS}
     if not (_valid_scope(row["scope"]) and _valid_mode(row["mode"])
             and _valid_pid(row["pid"]) and _valid_host(row["host"])
+            and _valid_admin_set(row["admin_set"])
             and _valid_seen(row["seen"])):
         return None
     if row["scope"] is None and row["mode"] is None:
@@ -320,6 +332,10 @@ class McpWindowStore:
             return False
         entry.mcp_scope = row["scope"]
         entry.mcp_mode = row["mode"]
+        # #245: the durable admin badge rides the same row application, so a
+        # reconnecting admin-launched window keeps its badge (bool(None) is
+        # the ordinary False a non-admin row applies).
+        entry.mcp_admin_launch = bool(row["admin_set"])
         work = self.inflight
         if work is not None:
             work._touch(entry, now)
@@ -358,8 +374,8 @@ class McpWindowStore:
             and (old["host"] is None or old["host"] == host))
 
     def set(self, wid: int, *, scope: Any = _UNSET, mode: Any = _UNSET,
-            pid: Optional[int] = None, host: Optional[str] = None,
-            now: float) -> bool:
+            admin_set: Any = _UNSET, pid: Optional[int] = None,
+            host: Optional[str] = None, now: float) -> bool:
         """Write ``scope`` and/or the RAW ``mode`` for the producer
         ``(pid, host)`` on ``wid``, in memory. Returns whether the row
         changed. Call it only on the working copy inside create_app's shared
@@ -374,6 +390,9 @@ class McpWindowStore:
           hello from the right producer claims it).
         * ``mode=None`` stores null (inherit). A field not passed is left as
           it was, so a scope-only change never materialises the default mode.
+        * ``admin_set`` (#245) rides the same merge/replace rules: carried on
+          a merge, dropped to None by a replace that does not pass it, and
+          part of the no-op comparison (clearing the badge is a real change).
         * A row left with neither a scope nor a mode carries nothing and would
           only block apply()'s fallback carry-over, so it is DELETED whatever
           its pid/host. No reservation-only row is needed: the launch writer
@@ -391,6 +410,8 @@ class McpWindowStore:
             raise ValueError("bad scope")
         if mode is not _UNSET and not _valid_mode(mode):
             raise ValueError("bad mode")
+        if admin_set is not _UNSET and not _valid_admin_set(admin_set):
+            raise ValueError("bad admin_set")
         if not _valid_pid(pid) or not _valid_host(host):
             raise ValueError("bad producer identity")
         if not _valid_seen(now):
@@ -400,6 +421,8 @@ class McpWindowStore:
                 else {"scope": None, "mode": None})
         new = {"scope": base["scope"] if scope is _UNSET else scope,
                "mode": base["mode"] if mode is _UNSET else mode,
+               "admin_set": (base.get("admin_set") if admin_set is _UNSET
+                             else admin_set),
                "pid": pid, "host": host}
         if new["scope"] is None and new["mode"] is None:
             if old is None:
@@ -407,8 +430,8 @@ class McpWindowStore:
             del self._rows[wid]
             return True
         if old is not None and all(old[field] == new[field]
-                                   for field in ("scope", "mode", "pid",
-                                                 "host")):
+                                   for field in ("scope", "mode", "admin_set",
+                                                 "pid", "host")):
             return False
         new["seen"] = now
         self._rows[wid] = new

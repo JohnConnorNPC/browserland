@@ -6580,7 +6580,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # shows: a write that REPLACES the row (always, for pid 0) must
             # not drop the other field. That value is the RAW override, so a
             # scope-only change never materialises the default mode.
+            # #245: the write also clears the durable ADMIN badge — the
+            # browser edit means a HUMAN took the window back, so the admin
+            # badge (and, from #243, the launch handle's owner) must not
+            # survive it.
             want = dict(fields)
+            want["admin_set"] = None
             if not work.merges(wid, pid=pid, host=host):
                 want.setdefault("scope", entry.mcp_scope)
                 want.setdefault("mode", entry.mcp_mode)
@@ -6608,6 +6613,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not applied and live is entry:
             live.mcp_scope = scope
             live.mcp_mode = mode
+            # #245: the direct-set fallback (the row was deleted by this very
+            # write) clears the badge too — it must not outlive its row.
+            live.mcp_admin_launch = False
         return sanic_json({"ok": True, "id": wid, "mode": mode,
                            "scope": scope})
 
@@ -7217,7 +7225,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if work.get(wid) is not None:
                     raise RuntimeError(f"window {wid} already has a stored "
                                        "MCP row; not replacing it")
-                work.set(wid, scope=scope, mode=mode, now=work.clock())
+                # #245: an admin-authenticated launch stamps the row (True),
+                # so the badge survives a broker restart and a reconnect
+                # (reapply copies it onto the live entry). A non-admin launch
+                # leaves the key unset (None): the sidecar carries the badge
+                # only where it is true.
+                stamp = {"admin_set": True} if _mcp_is_admin(request) else {}
+                work.set(wid, scope=scope, mode=mode, now=work.clock(),
+                         **stamp)
             await app.ctx.persist_mcp_windows(_write)
             tagged.append(wid)
 
