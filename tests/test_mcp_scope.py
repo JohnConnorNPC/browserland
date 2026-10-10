@@ -1702,6 +1702,9 @@ MCP_TOKEN_ROUTES = {
     "/mcp/pace": ("POST", {"id": 5, "pace_ms": 40}),
     "/mcp/profiles": ("GET", None),
     "/mcp/launch": ("POST", {}),
+    # #245 (existing-test edit): the admin knob route joined the token
+    # realm; its bad_scope cells ride this table like every other route.
+    "/mcp/knobs": ("POST", {}),
 }
 BAD_SCOPES = ["a:b", "a b", "x" * 65, "-lead"]
 _ABSENT = object()

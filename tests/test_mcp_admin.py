@@ -169,6 +169,7 @@ MCP_TOKEN_ROUTES = {
     "/mcp/pace": ("POST", {"id": 5, "pace_ms": 5}),
     "/mcp/profiles": ("GET", None),
     "/mcp/launch": ("POST", {}),
+    "/mcp/knobs": ("POST", {}),
 }
 BAD_ADMIN = [("Authorization", f"Bearer {MCP_TOKEN}"),
              (MCP_ADMIN_HEADER, "wrong-admin-credential")]
@@ -431,3 +432,103 @@ def test_non_admin_sees_unchanged_listing_and_404_bytes(tmp_path,
                       extra_headers=[("X-Browserland-Scope", "zzz")])
     assert off.body == foreign.body
     assert (off.status, off.json["error"]) == (404, "unknown_or_off")
+
+
+# ---- A4: POST /mcp/knobs ----------------------------------------------------
+
+
+def test_knobs_admin_sets_default_mode_and_allow_launch(tmp_path, monkeypatch):
+    """#245: an admin flips default_mode and allow_launch over the MCP wire;
+    the change is live and durable (sidecar), and the answer carries the new
+    knob values."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/knobs", admin=ADMIN_TOKEN)
+    assert (resp.status, resp.json) == (200, {"ok": True,
+                                              "default_mode": "off",
+                                              "allow_launch": False})
+    body = MCP_TOKEN_ROUTES["/mcp/knobs"][1]
+    _, resp = app.test_client.post(
+        "/mcp/knobs", json={"default_mode": "read", "allow_launch": True},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert (resp.status, resp.json["default_mode"],
+            resp.json["allow_launch"]) == (200, "read", True)
+    assert app.ctx.mcp_cfg["default_mode"] == "read"
+    assert app.ctx.mcp_cfg["allow_launch"] is True
+    sidecar = json.loads(_sidecar(tmp_path).read_text(encoding="utf-8"))
+    assert (sidecar["default_mode"], sidecar["allow_launch"]) == ("read",
+                                                                  True)
+
+
+def test_knobs_rejects_token_admin_token_enabled_400_bad_key_no_write(
+        tmp_path, monkeypatch):
+    """#245: the admin may never change the MCP token, the admin token or
+    enabled — rotating a credential or disabling MCP could lock out every
+    agent, the admin included — so those keys are 400 bad_key before any
+    write."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    for keys in ({"token": "x"}, {"admin_token": None},
+                 {"admin_generate": True}, {"enabled": False},
+                 {"generate": True}):
+        _, resp = app.test_client.post(
+            "/mcp/knobs", json=keys,
+            headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                     (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+        assert (resp.status, resp.json["error"]) == (400, "bad_key"), keys
+    assert not _sidecar(tmp_path).exists()
+    assert app.ctx.mcp_cfg["enabled"] is True
+
+
+def test_knobs_rejects_non_bool_allow_launch_400(tmp_path, monkeypatch):
+    """#245: the admin API takes REAL booleans only — the string "false" is
+    truthy junk and enabling-when-meant-disabling is not a value to coerce."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = app.test_client.post(
+        "/mcp/knobs", json={"allow_launch": "false"},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert (resp.status, resp.json["error"]) == (400, "bad_value")
+    assert app.ctx.mcp_cfg["allow_launch"] is False
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_knobs_non_admin_403_admin_required(tmp_path, monkeypatch):
+    """#245: no admin header is 403 admin_required (an admin-only op), and a
+    wrong one is 403 from the ladder before it; nothing is written either
+    way."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = _mcp(app, "/mcp/knobs")
+    assert (resp.status, resp.json["error"]) == (403, "admin_required")
+    _, resp = _mcp(app, "/mcp/knobs", admin="wrong-admin-credential")
+    assert (resp.status, resp.json["error"]) == (403, "admin_required")
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_knobs_bad_mode_400(tmp_path, monkeypatch):
+    """#245: a default_mode outside MCP_MODES is 400 bad_mode before any
+    write, mirroring /mcp/config."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = app.test_client.post(
+        "/mcp/knobs", json={"default_mode": "sometimes"},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert (resp.status, resp.json["error"]) == (400, "bad_mode")
+    assert app.ctx.mcp_cfg["default_mode"] == "off"
+
+
+def test_knobs_write_serializes_with_config_post(tmp_path, monkeypatch):
+    """#245: both routes share the ONE locked writer and copy from the LIVE
+    cfg, so a knobs write cannot clobber a value the Control Panel just set
+    (and vice versa): each write carries the other's changes forward."""
+    app = _make_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _, resp = authed(app).post("/mcp/config",
+                               json={"default_mode": "read"})
+    assert resp.status == 200
+    _, resp = app.test_client.post(
+        "/mcp/knobs", json={"allow_launch": True},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert resp.status == 200
+    sidecar = json.loads(_sidecar(tmp_path).read_text(encoding="utf-8"))
+    assert (sidecar["default_mode"], sidecar["allow_launch"],
+            sidecar["enabled"]) == ("read", True, True)

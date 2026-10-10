@@ -7305,6 +7305,41 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return err
         return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg, request))
 
+    async def _mcp_cfg_locked_write(apply):
+        """The ONE locked sidecar writer shared by POST /mcp/config (browser
+        realm) and POST /mcp/knobs (#245, MCP admin realm): apply a caller's
+        already-validated changes to a COPY of the live cfg inside the
+        shielded mcp_lock region, persist the EXPLICIT to_persist schema
+        (never the whole dict, so a future internal field can't accidentally
+        land in the sidecar; a credential its env pins persists as None,
+        keeping the env secret off disk), then swap the live cfg. Returns the
+        error response on an OSError, else None — the caller answers its own
+        view of the new cfg. ``apply(cfg)`` is sync and mutates the copy in
+        place; the shielded write means an unshielded cancel in the executor
+        hop can never leave disk ahead of memory (see _shielded_region)."""
+        async def _locked_write():
+            cfg = dict(app.ctx.mcp_cfg)
+            apply(cfg)
+            to_persist = {
+                "token": None if _mcp_token_env_pinned() else cfg["token"],
+                "admin_token": (None if _mcp_admin_env_pinned()
+                                else cfg["admin_token"]),
+                "default_mode": cfg["default_mode"],
+                "allow_launch": bool(cfg["allow_launch"]),
+                "enabled": bool(cfg["enabled"]),
+            }
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.mcp_state_path,
+                    to_persist)
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
+            app.ctx.mcp_cfg = cfg
+            return None
+
+        return await _shielded_region(app.ctx.mcp_lock, _locked_write)
+
     async def _mcp_config_post(request: Request):
         err = _gated_auth_error(request, "/mcp/config")
         if err is not None:
@@ -7328,12 +7363,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         env_pinned = _mcp_token_env_pinned()
         admin_env_pinned = _mcp_admin_env_pinned()
-        # Shielded: the sidecar write awaits and the live ctx swap lands AFTER
-        # it, so an unshielded cancel in that hop leaves disk ahead of memory —
-        # the running broker keeps the old token/mode while a restart silently
-        # adopts the abandoned one. See _shielded_region.
-        async def _locked_write():
-            cfg = dict(app.ctx.mcp_cfg)
+
+        def _apply(cfg):
             # Token edits are honored only when env is NOT pinning it (else
             # the live token would diverge from the env value restart
             # restores).
@@ -7344,46 +7375,75 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 elif "token" in body:
                     tok = (body.get("token") or "").strip()
                     cfg["token"] = tok or None
-                # #245: the admin credential rides the same rules — mint/rotate
-                # with admin_generate, clear with null or "" — and the same env
-                # pin discipline (a pinned admin token ignores UI edits).
-                if not admin_env_pinned:
-                    if body.get("admin_generate"):
-                        cfg["admin_token"] = secrets.token_urlsafe(32)
-                    elif "admin_token" in body:
-                        atok = (body.get("admin_token") or "").strip()
-                        cfg["admin_token"] = atok or None
+            # #245: the admin credential rides the same rules — mint/rotate
+            # with admin_generate, clear with null or "" — and the same env
+            # pin discipline (a pinned admin token ignores UI edits). It is
+            # deliberately NOT nested under the token's pin: the two pins
+            # are independent.
+            if not admin_env_pinned:
+                if body.get("admin_generate"):
+                    cfg["admin_token"] = secrets.token_urlsafe(32)
+                elif "admin_token" in body:
+                    atok = (body.get("admin_token") or "").strip()
+                    cfg["admin_token"] = atok or None
             if "default_mode" in body:
                 cfg["default_mode"] = body["default_mode"]
             if "allow_launch" in body:
                 cfg["allow_launch"] = bool(body.get("allow_launch"))
             if "enabled" in body:
                 cfg["enabled"] = bool(body.get("enabled"))
-            # Persist an EXPLICIT schema (never the whole dict) so a future
-            # internal field can't accidentally land in the sidecar. When env
-            # pins a credential, write None for it: _load_mcp_cfg ignores the
-            # sidecar value under an env pin anyway, and this keeps the env
-            # secret off disk.
-            to_persist = {
-                "token": None if env_pinned else cfg["token"],
-                "admin_token": None if admin_env_pinned else cfg["admin_token"],
-                "default_mode": cfg["default_mode"],
-                "allow_launch": bool(cfg["allow_launch"]),
-                "enabled": bool(cfg["enabled"]),
-            }
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _write_state_atomic, app.ctx.mcp_state_path,
-                    to_persist)
-            except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)},
-                                  status=500)
-            app.ctx.mcp_cfg = cfg
-            # Built inside the mcp_lock region, which is safe:
-            # known_scopes() and registry.entries() are sync and lock-free,
-            # and the per-window store has a lock of its own this never
-            # touches.
-            return sanic_json(_mcp_cfg_public(cfg, request))
+
+        err = await _mcp_cfg_locked_write(_apply)
+        if err is not None:
+            return err
+        # Built inside the mcp_lock region, which is safe:
+        # known_scopes() and registry.entries() are sync and lock-free,
+        # and the per-window store has a lock of its own this never
+        # touches.
+        return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg, request))
+
+    async def _mcp_knobs(request: Request):
+        """POST /mcp/knobs (#245): the admin MCP agent's broker-wide knobs —
+        ``{default_mode?, allow_launch?, allow_desktop?}`` (allow_desktop
+        arrives with #244). Gated by the full /mcp ladder and then the admin
+        credential; an admin may flip the knobs but NEVER the secrets or
+        ``enabled`` (rotating a credential or disabling MCP could lock out
+        every agent, the admin included — the browser stays the root of
+        trust), so those keys are 400 bad_key before any write. Booleans must
+        be REAL JSON booleans: the browser realm's /mcp/config keeps its
+        historical ``bool(...)`` coercion as pinned wire, but this admin API
+        refuses ``"false"``-as-truthy junk outright."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not _mcp_is_admin(request):
+            LOGGER.warning("refused non-admin /mcp/knobs from %s", request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        allowed = ("default_mode", "allow_launch")
+        unknown = sorted(k for k in body if k not in allowed)
+        if unknown:
+            return sanic_json({"error": "bad_key"}, status=400)
+        if "default_mode" in body and body["default_mode"] not in MCP_MODES:
+            return sanic_json({"error": "bad_mode"}, status=400)
+        for knob in ("allow_launch",):
+            if knob in body and not isinstance(body[knob], bool):
+                return sanic_json({"error": "bad_value"}, status=400)
+
+        def _apply(cfg):
+            if "default_mode" in body:
+                cfg["default_mode"] = body["default_mode"]
+            if "allow_launch" in body:
+                cfg["allow_launch"] = body["allow_launch"]
+
+        err = await _mcp_cfg_locked_write(_apply)
+        if err is not None:
+            return err
+        cfg = app.ctx.mcp_cfg
+        return sanic_json({"ok": True, "default_mode": cfg["default_mode"],
+                           "allow_launch": bool(cfg["allow_launch"])})
 
         return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 
@@ -9934,6 +9994,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
     app.add_route(_mcp_config_post, "/mcp/config", methods=["POST"])
+    app.add_route(_mcp_knobs, "/mcp/knobs", methods=["POST"])
     # Launch-profile editor (browser realm; #70). Full objects, never the MCP
     # realm — /profiles + /mcp/profiles stay names-only.
     app.add_route(_profiles_config_get, "/profiles/config", methods=["GET"])
@@ -9997,6 +10058,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
                              ("/mcp/config", "preflight_mcp_config"),
+    ("/mcp/knobs", "preflight_mcp_knobs"),
                              ("/profiles/config", "preflight_profiles_config"),
                              ("/profiles/detect", "preflight_profiles_detect")):
         app.add_route(_preflight, path, methods=["OPTIONS"], name=route_name)
