@@ -58,6 +58,7 @@ import errno
 import functools
 import gzip
 import hashlib
+import itertools
 import inspect
 import json
 import logging
@@ -601,6 +602,13 @@ def _gate_view(enabled: bool, source: str) -> Dict[str, Any]:
 # reply before giving up with 504 (the agent does psutil/git work off its
 # event loop, so this is generous).
 RPC_TIMEOUT = 10.0
+
+# #244: ONE end-to-end deadline for a desktop relay call -- the send to
+# the lease holder's designated /control socket AND the reply wait --
+# so a backpressured or half-dead socket cannot stretch a call past the
+# advertised timeout. Injectable via app.ctx.desktop_rpc_timeout_s for
+# tests, like the store's flush interval.
+DESKTOP_RPC_TIMEOUT_S = 10.0
 
 # ---- AI-provider status proxy (#112) ---------------------------------------
 # The broker makes exactly two outbound HTTP requests via urllib: GET /status/fetch
@@ -4291,6 +4299,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.active_client_id = None
     app.ctx.control_clients = {}        # clientId -> set[ws]
     app.ctx.lease_lock = asyncio.Lock()
+    # #244: the desktop relay. lease_generation is read and written ONLY
+    # under lease_lock and bumps on every holder change, so a browser
+    # that lost the lease (even one that lost AND regained it -- a new
+    # generation) cannot resolve a call the broker made to the older
+    # generation. desktop_rpcs maps rid -> _DesktopCall; the rid counter
+    # is loop-confined like the rest of the relay state.
+    app.ctx.lease_generation = 0
+    app.ctx.desktop_rpcs = {}
+    app.ctx.desktop_rid = itertools.count(1)
+    app.ctx.desktop_rpc_timeout_s = DESKTOP_RPC_TIMEOUT_S
 
     async def _push_terminal_control(window_id, view):
         # #238: every /control socket hears every terminal's control change
@@ -4750,6 +4768,76 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return
         await relay.handle_browser_ws(request, ws, app.ctx.registry, app.ctx)
 
+    class _DesktopLeaseLost(Exception):
+        """#244: the lease holder a desktop_rpc was sent to lost the lease
+        (a new generation bumped) before answering. Never surfaced raw:
+        _desktop_relay maps it to 409 lost_lease."""
+
+    class _DesktopCall:
+        """One in-flight desktop relay call: the resolved-with envelope (or
+        _DesktopLeaseLost) future, the clientId it was sent to, and the lease
+        GENERATION it was sent under."""
+
+        __slots__ = ("future", "client_id", "generation")
+
+        def __init__(self, future, client_id, generation):
+            self.future = future
+            self.client_id = client_id
+            self.generation = generation
+
+    def _fail_superseded_desktop_rpcs(generation: int) -> None:
+        """Fail every pending desktop rpc not of ``generation``. Called ONLY
+        with lease_lock held (every generation bump), so a browser's answer
+        that races the bump finds no future to resolve. set_exception, never
+        cancel(): CancelledError is not an Exception subclass on every
+        supported Python and would surface as HTTP cancellation instead of
+        the promised 409."""
+        for rid in list(app.ctx.desktop_rpcs):
+            call = app.ctx.desktop_rpcs.get(rid)
+            if call is not None and call.generation != generation:
+                app.ctx.desktop_rpcs.pop(rid, None)
+                if not call.future.done():
+                    call.future.set_exception(_DesktopLeaseLost())
+
+    def _desktop_result(client_id: str, data: Dict[str, Any]) -> None:
+        """A browser's desktop_result frame (#244). STRICT: the rid a real
+        positive int (bool excluded -- in Python True aliases key 1), ok a
+        real bool, the success/error union exact, and the answer accepted
+        only from the client and lease GENERATION the broker sent it to
+        (re-checked live, so a bump that raced the read still loses).
+        Anything malformed is dropped silently: a buggy browser's answer
+        surfaces to the agent as the 504 timeout, never a resolved call."""
+        rid = data.get("rid")
+        if isinstance(rid, bool) or not isinstance(rid, int) or rid <= 0:
+            return
+        ok = data.get("ok")
+        if not isinstance(ok, bool):
+            return
+        call = app.ctx.desktop_rpcs.get(rid)
+        if (call is None or call.client_id != client_id
+                or call.generation != app.ctx.lease_generation
+                or call.future.done()):
+            return
+        if ok:
+            call.future.set_result({"ok": True, "value": data.get("value")})
+            return
+        code = data.get("error")
+        if not isinstance(code, str):
+            return
+        detail = data.get("detail")
+        if code == "needs_confirm":
+            count = detail.get("count") if isinstance(detail, dict) else None
+            if (isinstance(count, bool) or not isinstance(count, int)
+                    or count < 0):
+                return
+            detail = count
+        call.future.set_result({"ok": False, "error": code, "detail": detail})
+
+    # #244: the in-process desktop cells need the closure-defined validator
+    # (a real /control socket only exists in the subprocess harness); this
+    # is a TEST seam, never called by the broker itself.
+    app.ctx._desktop_result_for_tests = _desktop_result
+
     async def _control_ws(request: Request, ws: Websocket):
         # Per-browser control channel for the single-active-browser lease.
         # Same post-upgrade auth gate as /ws (4401, never a 1006-opaque upgrade
@@ -4790,18 +4878,33 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 ctx.control_clients.setdefault(client_id, set()).add(ws)
                 if ctx.active_client_id is None:
                     ctx.active_client_id = client_id  # lone browser just works
+                    # #244: a fresh holder is a new lease generation.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
             await _send(ws, client_id)
 
             async for message in ws:
                 if not isinstance(message, str):
                     continue
                 data = protocol.parse(message)
-                if data is None or data.get("type") != "become_active":
+                if data is None:
+                    continue
+                if data.get("type") == "desktop_result":
+                    # #244: the relay's reply path; validated and
+                    # generation-gated in _desktop_result.
+                    _desktop_result(client_id, data)
+                    continue
+                if data.get("type") != "become_active":
                     continue
                 # ---- become_active: flip the lease, then (OUTSIDE the lock)
                 # cut every other client loose and broadcast live status.
                 async with ctx.lease_lock:
                     ctx.active_client_id = client_id
+                    # #244: the holder changed -- a new generation; pending
+                    # calls to any older one fail INSIDE the lock, before the
+                    # broadcast awaits can interleave a late answer.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
                     losers = {cid: list(socks)
                               for cid, socks in ctx.control_clients.items()
                               if cid != client_id}
@@ -4829,6 +4932,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                             and client_id not in ctx.control_clients)
                 if released:
                     ctx.active_client_id = None
+                    # #244: the holder went away with calls still pending:
+                    # they are lost_lease, not timeouts.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
                     remaining = {cid: list(s)
                                  for cid, s in ctx.control_clients.items()}
                 else:
@@ -7458,6 +7565,262 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             live.mcp_admin_launch = stamped
         return sanic_json({"ok": True, "id": wid, "mode": mode_out,
                            "scope": scope_out})
+
+    # ---- desktop relay (#244) ---------------------------------------------
+    # GET/POST /mcp/desktop relay ops to the browser that holds THIS broker's
+    # /control lease over its /control socket, as desktop_rpc/desktop_result
+    # frames (protocol.py). The broker owns auth, the flag, the op allowlist
+    # and the visibility filter; the browser owns layout truth. Design refs:
+    # design/broker.md ## Wire contract.
+
+    #: Core window ops the browser handles natively; workspace ops forward to
+    #: the workspaces mod's ctx.commands (absent/inactive pass through as a
+    #: 200 {ok: false, reason} -- never a silent no-op).
+    _DESKTOP_WINDOW_OPS = frozenset((
+        "get", "focus", "move_column", "set_width", "tile", "float",
+        "set_geometry", "tab_into", "split"))
+    _DESKTOP_WORKSPACE_OPS = frozenset((
+        "workspaces:list", "workspaces:add", "workspaces:rename",
+        "workspaces:remove", "workspaces:switch", "workspaces:send-window"))
+    _DESKTOP_OPS = _DESKTOP_WINDOW_OPS | _DESKTOP_WORKSPACE_OPS
+    #: Which args keys name broker window ids, per op -- every one of them is
+    #: visibility-checked broker-side (tab_into/split name two: a scoped
+    #: caller must not probe or move a foreign window through the second id).
+    _DESKTOP_OP_IDS = {
+        "focus": ("id",), "move_column": ("id",), "set_width": ("id",),
+        "tile": ("id",), "float": ("id",), "set_geometry": ("id",),
+        "tab_into": ("id", "target"), "split": ("id", "target"),
+        "workspaces:send-window": ("win",),
+    }
+    #: The layout attributes the broker passes through from the browser's
+    #: snapshot row. Identity (id/title) NEVER comes from the browser -- the
+    #: registry is authoritative -- and unknown-to-the-broker extras pass
+    #: through verbatim only within this whitelist.
+    _DESKTOP_LAYOUT_KEYS = ("tiled", "column", "row", "width_preset",
+                            "geometry", "workspace", "kind", "minimized",
+                            "tabIndex", "tabbed", "split", "widthFrac")
+
+    def _desktop_visible_ids(request: Request):
+        """#244 [M1]: the ids THIS caller can see -- every live window whose
+        effective mode is not off and, when it declared a scope, whose tag
+        matches. Rides every relayed frame as args.visible (an admin's frame
+        carries null: no browser-side visibility check). The browser refuses
+        with unknown_window unless every window an op affects is in it --
+        move_column/set_width move a whole COLUMN and tab_into/split reshape
+        one, which can carry windows this caller cannot see, so the
+        per-named-id check alone is not enough."""
+        if _mcp_is_admin(request):
+            return None
+        scope = _mcp_scope(request)
+        out = []
+        for entry in app.ctx.registry.entries():
+            if _mcp_effective_mode(entry) == "off":
+                continue
+            if scope is not None and entry.mcp_scope != scope:
+                continue
+            out.append(entry.id)
+        return out
+
+    def _desktop_check_named_ids(request: Request, op: str, args):
+        """The belt: broker-side visibility pre-check of every id the op
+        names, answering the shared 404 (byte-identical to the chokepoint's)
+        before any relay round-trip. An admin names any window, off ones
+        included (#245)."""
+        if _mcp_is_admin(request):
+            return None
+        scope = _mcp_scope(request)
+        for key in _DESKTOP_OP_IDS.get(op, ()):
+            wid = args.get(key)
+            if isinstance(wid, bool) or not isinstance(wid, int):
+                return sanic_json({"error": "bad_args"}, status=400)
+            entry = app.ctx.registry.get(wid)
+            if (entry is None or _mcp_effective_mode(entry) == "off"
+                    or (scope is not None and entry.mcp_scope != scope)):
+                return _mcp_unknown_or_off()
+        return None
+
+    async def _desktop_relay(request: Request, op: str, args, visible):
+        """Send one desktop_rpc to the lease holder's DESIGNATED /control
+        socket (the first in insertion order -- the longest-lived -- falling
+        back to the next socket of the same client on a send failure; other
+        sockets never see the frame, so no cross-tab exactly-once dance) and
+        await its desktop_result under ONE end-to-end deadline. Refusals the
+        browser never sees: no holder 409 no_active_browser (owner ruling:
+        fail, never queue), every-send-failed 409 lost_lease, deadline
+        exceeded 504 desktop_timeout. Returns the outcome envelope (the
+        route maps it), never raises for protocol outcomes."""
+        ctxd = app.ctx
+        async with ctxd.lease_lock:
+            holder = ctxd.active_client_id
+            generation = ctxd.lease_generation
+            sockets = (list(ctxd.control_clients.get(holder, ()))
+                       if holder is not None else [])
+        if holder is None:
+            return {"http": sanic_json({"error": "no_active_browser"},
+                                       status=409)}
+        rid = next(ctxd.desktop_rid)
+        frame = protocol.desktop_rpc_frame(rid, op, dict(args,
+                                                         visible=visible))
+        future = asyncio.get_event_loop().create_future()
+        ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
+        try:
+            sent = False
+            timeout = ctxd.desktop_rpc_timeout_s
+            for sock in sockets:
+                try:
+                    await asyncio.wait_for(sock.send(frame), timeout)
+                    sent = True
+                    break
+                except Exception:
+                    continue       # a dead designated socket: try the next
+            if not sent:
+                return {"http": sanic_json({"error": "lost_lease"},
+                                           status=409)}
+            try:
+                return await asyncio.wait_for(future, timeout)
+            except _DesktopLeaseLost:
+                return {"http": sanic_json({"error": "lost_lease"},
+                                           status=409)}
+            except asyncio.TimeoutError:
+                return {"http": sanic_json({"error": "desktop_timeout"},
+                                           status=504)}
+        finally:
+            ctxd.desktop_rpcs.pop(rid, None)
+
+    def _desktop_outcome_response(outcome):
+        """Map a resolved desktop_result envelope to its HTTP answer. The
+        browser's unknown_window answers the byte-identical shared 404 (a
+        scoped caller must not learn which ids exist from the BROWSER
+        either); absent/inactive answer 200 {ok: false, reason} (the mod is
+        off/disabled -- the issue's "no silent no-op"); everything else is
+        the wire contract's table."""
+        if "http" in outcome:
+            return outcome["http"]
+        if outcome["ok"]:
+            return sanic_json({"ok": True, "value": outcome.get("value")})
+        code = outcome["error"]
+        if code == "unknown_window":
+            return _mcp_unknown_or_off()
+        if code == "bad_args":
+            return sanic_json({"error": "bad_args",
+                               "detail": outcome.get("detail")}, status=400)
+        if code == "not_home" or code == "lost_lease":
+            return sanic_json({"error": code}, status=409)
+        if code == "needs_confirm":
+            # The wire contract's detail is {count: int}; the HTTP answer is
+            # flat. Normalized HERE as well as in _desktop_result so the
+            # shape holds whichever path resolved the call.
+            count = outcome.get("detail")
+            if isinstance(count, dict):
+                count = count.get("count")
+            if isinstance(count, bool) or not isinstance(count, int):
+                count = 0
+            return sanic_json({"error": "needs_confirm", "count": count},
+                              status=409)
+        if code == "last_workspace":
+            return sanic_json({"error": "last_workspace"}, status=409)
+        if code in ("absent", "inactive"):
+            return sanic_json({"ok": False, "reason": code})
+        if code == "bad_op":
+            return sanic_json({"error": "bad_op"}, status=400)
+        return sanic_json({"error": "desktop_op_failed",
+                           "detail": outcome.get("detail")}, status=502)
+
+    async def _desktop_snapshot_answer(request: Request):
+        """op `get`: relay, then rebuild the snapshot broker-side. The
+        registry is AUTHORITATIVE for identity -- a browser row survives
+        only with an int id that is live in THIS registry and not already
+        taken (duplicates: first wins), the title comes from the registry,
+        and only the whitelisted layout attributes pass through -- so a
+        lying or buggy browser can misreport only its own desktop's layout,
+        never another window's title or existence. Then the caller's
+        visibility rule drops the rows it may not see."""
+        outcome = await _desktop_relay(request, "get", {},
+                                       _desktop_visible_ids(request))
+        if not outcome.get("ok"):
+            return _desktop_outcome_response(outcome)
+        snap = outcome.get("value")
+        snap = snap if isinstance(snap, dict) else {}
+        admin = _mcp_is_admin(request)
+        scope = None if admin else _mcp_scope(request)
+        seen = set()
+        windows = []
+        for brow in snap.get("windows") or []:
+            if not isinstance(brow, dict):
+                continue
+            wid = brow.get("id")
+            if isinstance(wid, bool) or not isinstance(wid, int):
+                continue
+            if wid in seen:
+                continue
+            entry = app.ctx.registry.get(wid)
+            if entry is None:
+                continue
+            seen.add(wid)
+            if not admin:
+                if _mcp_effective_mode(entry) == "off":
+                    continue
+                if scope is not None and entry.mcp_scope != scope:
+                    continue
+            row = {"id": wid, "title": entry.title}
+            for key in _DESKTOP_LAYOUT_KEYS:
+                if key in brow:
+                    row[key] = brow[key]
+            windows.append(row)
+        out = {"ok": True}
+        for key in ("viewport", "mode", "focused_column", "active_workspace",
+                    "workspaces", "home"):
+            if key in snap:
+                out[key] = snap[key]
+        out["windows"] = windows
+        return sanic_json(out)
+
+    async def _mcp_desktop_post(request: Request):
+        """POST /mcp/desktop {op, args} (#244). The ladder: the shared /mcp
+        gate, then allow_desktop (403 desktop_disabled), then the op
+        allowlist (400 bad_op), then -- for a workspace op -- the admin
+        credential (403 admin_required, owner ruling: workspace management
+        and any cross-scope action are admin-only, and the refusal fires
+        BEFORE any relay so the browser never sees a non-admin's workspace
+        op), then the per-named-id visibility belt, then the relay."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not app.ctx.mcp_cfg["allow_desktop"]:
+            return sanic_json({"error": "desktop_disabled"}, status=403)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        op = body.get("op")
+        args = body.get("args")
+        if args is None:
+            args = {}
+        if not isinstance(op, str) or op not in _DESKTOP_OPS:
+            return sanic_json({"error": "bad_op"}, status=400)
+        if not isinstance(args, dict):
+            return sanic_json({"error": "bad_args"}, status=400)
+        if not _mcp_is_admin(request) and op in _DESKTOP_WORKSPACE_OPS:
+            LOGGER.warning("refused non-admin desktop op %s from %s", op,
+                           request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
+        err = _desktop_check_named_ids(request, op, args)
+        if err is not None:
+            return err
+        if op == "get":
+            return await _desktop_snapshot_answer(request)
+        outcome = await _desktop_relay(request, op, args,
+                                       _desktop_visible_ids(request))
+        return _desktop_outcome_response(outcome)
+
+    async def _mcp_desktop_get(request: Request):
+        """GET /mcp/desktop (#244): the snapshot, through the same ladder
+        and the same relay as op `get`."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not app.ctx.mcp_cfg["allow_desktop"]:
+            return sanic_json({"error": "desktop_disabled"}, status=403)
+        return await _desktop_snapshot_answer(request)
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
@@ -10217,6 +10580,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_profiles, "/mcp/profiles", methods=["GET"])
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
     app.add_route(_mcp_window, "/mcp/window", methods=["POST"])
+    app.add_route(_mcp_desktop_get, "/mcp/desktop", methods=["GET"])
+    app.add_route(_mcp_desktop_post, "/mcp/desktop", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
     app.add_route(_mcp_config_post, "/mcp/config", methods=["POST"])
     app.add_route(_mcp_knobs, "/mcp/knobs", methods=["POST"])
@@ -10283,6 +10648,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
     ("/mcp/window", "preflight_mcp_window"),
+    ("/mcp/desktop", "preflight_mcp_desktop"),
                              ("/mcp/config", "preflight_mcp_config"),
     ("/mcp/knobs", "preflight_mcp_knobs"),
                              ("/profiles/config", "preflight_profiles_config"),

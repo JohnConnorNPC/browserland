@@ -171,6 +171,7 @@ MCP_TOKEN_ROUTES = {
     "/mcp/launch": ("POST", {}),
     "/mcp/knobs": ("POST", {}),
     "/mcp/window": ("POST", {"id": 5}),
+    "/mcp/desktop": ("POST", {"op": "get", "args": {}}),
 }
 BAD_ADMIN = [("Authorization", f"Bearer {MCP_TOKEN}"),
              (MCP_ADMIN_HEADER, "wrong-admin-credential")]
@@ -286,6 +287,10 @@ def test_mcp_route_ladder_inventory(tmp_path, monkeypatch):
     served = [entry for entry in served
               if entry not in (("/mcp/config", "GET"), ("/mcp/config",
                                                         "POST"))]
+    # #244: /mcp/desktop's GET variant rides the same ladder; fold it into
+    # the POST row (its own GET cells live in tests/test_mcp_desktop.py).
+    served = [entry for entry in served
+              if entry != ("/mcp/desktop", "GET")]
     assert set(served) == {(path, method) for path, (method, _body)
                            in MCP_TOKEN_ROUTES.items()}
     for path, method in served:

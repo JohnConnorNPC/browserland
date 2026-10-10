@@ -477,6 +477,19 @@ def control_status_frame(active: bool,
     })
 
 
+def desktop_rpc_frame(rid: int, op: str,
+                      args: Optional[Dict[str, Any]] = None) -> str:
+    """Broker -> lease-holding browser on /control (#244): one desktop op to
+    run against the layout. ``rid`` is unique per broker run; the browser
+    applies it exactly once and answers exactly one ``desktop_result`` with
+    the same rid (the frames' full contract lives in the broker's desktop
+    relay: design/broker.md ## Wire contract). ``args.visible`` carries the
+    caller's visible window ids (null for an admin) for the browser's own
+    visibility refusal."""
+    return json.dumps({"type": "desktop_rpc", "rid": int(rid),
+                       "op": str(op), "args": args or {}})
+
+
 # ---------------------------------------------------------------------------
 # Terminal control (#238) — one external controller per terminal
 #

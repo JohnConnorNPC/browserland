@@ -1718,6 +1718,10 @@ MCP_TOKEN_ROUTES = {
     "/mcp/knobs": ("POST", {}),
     # #243 (existing-test edit): the window-edit route is token-gated too.
     "/mcp/window": ("POST", {"id": 5}),
+    # #244 (existing-test edit): the desktop relay. Its GET variant rides
+    # the same ladder (the route-table test folds it into this row) and has
+    # its own cells in tests/test_mcp_desktop.py.
+    "/mcp/desktop": ("POST", {"op": "get", "args": {}}),
 }
 BAD_SCOPES = ["a:b", "a b", "x" * 65, "-lead"]
 _ABSENT = object()
@@ -1796,6 +1800,10 @@ def test_the_route_table_is_every_mcp_token_route(tmp_path, monkeypatch):
               for method in r.methods
               if r.path.startswith("mcp/") and method != "OPTIONS"}
     served -= {("/mcp/config", "GET"), ("/mcp/config", "POST")}
+    # #244 (existing-test edit): /mcp/desktop also serves GET; its ladder is
+    # the same gate chain, so the (path, GET) pair folds into the POST row
+    # here (its own GET cells live in tests/test_mcp_desktop.py).
+    served.discard(("/mcp/desktop", "GET"))
     assert served == {(path, method) for path, (method, _body)
                       in MCP_TOKEN_ROUTES.items()}
 
