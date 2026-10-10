@@ -190,6 +190,11 @@
             if (sess && sess.kind === 'agent') parts.push('agent');
             // #234: the window's MCP scope tag, when it has one.
             if (sess && sess.mcp_scope) parts.push('scope ' + sess.mcp_scope);
+            // #245: provenance, not live control -- an admin credential
+            // launched this window or last set its policy.
+            if (sess && sess.mcp_admin === true) {
+                parts.push('Set by an MCP admin agent');
+            }
             // #239: the device driving it (the broker-validated label).
             const ctl = sess && sess.key ? controlledViewFor(sess.key) : null;
             // FSI..PDI isolate the label so its direction cannot reorder the

@@ -74,3 +74,50 @@ def test_copy_mcp_json_admin_gate_and_payload():
     builder = src.split("function buildMcpJson")[1].split(
         "function mcpJsonHostName")[0]
     assert "if (o.adminToken) host.admin_token = o.adminToken;" in builder
+
+
+# ---- #245: the taskbar admin badge ---------------------------------------- #
+
+
+def _taskbar_src():
+    return (BROKER_DIR / "75_js_taskbar_hosts.js").read_text(encoding="utf-8")
+
+
+def test_admin_badge_merges_from_the_sessions_row():
+    # The merge copies /sessions fields BY NAME; the flag is a strict === true
+    # read so an absent (old broker) or garbage value never badges a chip.
+    src = _taskbar_src()
+    merge = src.split("merged.set(key, {")[1].split("});", 1)[0]
+    assert "mcp_admin: s.mcp_admin === true," in merge
+
+
+def test_admin_badge_lifecycle_matches_the_scope_badge():
+    src = _taskbar_src()
+    chip = src.split("function renderChipLabel")[1].split(
+        "function updateTaskbarLabel")[0]
+    # Created only while the flag is set, in place, ordered scope -> admin ->
+    # ws, and removed on clear.
+    assert "sess.mcp_admin === true" in chip
+    assert "admin.className = 'ti-admin';" in chip
+    assert "admin.textContent = 'admin';" in chip
+    assert "const before = admin || ws;" in chip
+    assert "if (ws) el.insertBefore(admin, ws);" in chip
+    assert "const tail = scope || admin || ws;" in chip
+
+
+def test_admin_badge_css_and_the_id_ellipsis_exception():
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    assert ".taskbar-item .ti-admin {" in css
+    assert "rgba(255,176,64,0.25)" in css
+    # A chip can carry admin WITHOUT scope; the id must ellipsize then too.
+    assert ".taskbar-item:has(> .ti-admin) .ti-id {" in css
+
+
+def test_tooltip_names_the_admin_provenance():
+    # The wording says what the datum IS (provenance), never "driving".
+    src = (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(
+        encoding="utf-8")
+    tip = src.split("function formatTooltip")[1].split(
+        "const windows = new Map()")[0]
+    assert "sess.mcp_admin === true" in tip
+    assert "'Set by an MCP admin agent'" in tip
