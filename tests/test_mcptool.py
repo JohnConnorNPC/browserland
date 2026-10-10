@@ -609,6 +609,28 @@ def test_ctrl_l_token_translation_unchanged():
     assert server._keys_to_text(["C-L"]) == "\x0c"   # case-insensitive, unchanged
 
 
+# ---- #243 review round 1: launch docstrings must state the unified wire ----
+
+def test_launch_docstrings_match_the_unified_mode_wire():
+    """Owner decision 2 on #243 (broker atom B2): EVERY /mcp/launch, scoped or
+    not, honors a valid `mode` and defaults to readwrite; the answer carries
+    `handle`. The shipped docstrings used to describe the pre-B2 wire ("a
+    valid mode is ignored" unscoped) while every test stayed green — exactly
+    the class of quiet wrongness the #131 docstring pins above exist for."""
+    from webterm.mcptool import server
+    doc = server.launch_terminal.__doc__ or ""
+    assert "ignored" not in doc, (
+        "launch_terminal still claims a valid mode can be ignored")
+    assert "default mode" not in doc, (
+        "launch_terminal still describes the unscoped default-mode inheritance")
+    assert "readwrite" in doc          # the new default is stated
+    assert "handle" in doc             # the launch handle is stated
+    cdoc = BrowserlandClient.launch_terminal.__doc__ or ""
+    assert "ignores a valid one" not in cdoc
+    assert "readwrite" in cdoc
+    assert "handle" in cdoc
+
+
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
 
 def _paced_capture(monkeypatch):
@@ -2810,6 +2832,26 @@ def test_workspaces_admin_gate_and_arg_building():
         {"op": "workspaces:switch", "args": {"index": 0}},
         {"op": "workspaces:send-window", "args": {"win": 5, "target": 2}},
     ]
+
+
+def test_workspaces_force_is_remove_only_and_refuses_locally():
+    """Review round 1 on #244: `force` means "bypass remove's needs_confirm".
+    On any other op it is a misunderstood call — silently ignoring it hides
+    the mistake — so the tool refuses locally (bad_args) and the broker sees
+    NOTHING, not even /mcp/info (the guard sits before the admin gate)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        for op, kwargs in (("list", {}), ("add", {"name": "w"}),
+                           ("switch", {"index": 0}),
+                           ("send-window", {"win": "h:5", "target": 1})):
+            with pytest.raises(BrowserlandError) as ei:
+                server.workspaces("h", op, force=True, **kwargs)
+            assert ei.value.code == "bad_args", (
+                f"force on {op!r} must refuse bad_args, got {ei.value.code!r}")
+    finally:
+        _reset_server()
+    assert broker.requests == []
 
 
 def test_desktop_error_codes_map_to_readable_messages():

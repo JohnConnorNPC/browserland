@@ -822,12 +822,16 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     broker; with a single host it's optional. The returned `id` is namespaced
     ("<host>:<int>") so it can be passed straight to the other tools.
 
-    When this server declares a scope for that host, the new window is tagged
-    with the scope before it starts (so you can see it at once) and comes up
-    in `mode` ('off', 'read' or 'readwrite'), or 'readwrite' when `mode` is
-    omitted; the result then carries `scope` and `mode`. Without a scope the
-    window gets the broker's default mode and a valid `mode` is ignored (an
-    invalid value is still refused: 400 bad_mode)."""
+    Every launch, scoped or not, comes up in `mode` ('off', 'read' or
+    'readwrite'), or 'readwrite' when `mode` is omitted — a worker its
+    launcher can't drive is useless (an invalid value is refused: 400
+    bad_mode). When this server declares a scope for that host, the new
+    window is also tagged with the scope before it starts, so you can see it
+    at once. The result carries `scope` and `mode`, plus `handle` — a launch
+    handle this server keeps in memory (keyed by the returned id) so
+    `set_window` can retag this window later; the handle is lost when this
+    process restarts (the admin credential or the browser can recover the
+    window)."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
         profile=profile, cols=cols, rows=rows, title=title, cwd=cwd,
@@ -1117,6 +1121,7 @@ def workspaces(host: str, op: str, name: str = "", index: int = -1,
       - `remove` `index` — a NON-EMPTY workspace answers needs_confirm
         unless `force=true` (its windows move to the adjacent workspace; no
         dialog is ever shown); the last workspace is always refused;
+        `force` is remove-only — every other op rejects it locally;
       - `switch` `index`;
       - `send-window` `win`=<namespaced window id on this host>
         `target`=<workspace index>.
@@ -1133,6 +1138,14 @@ def workspaces(host: str, op: str, name: str = "", index: int = -1,
             0, "bad_op",
             f"workspaces: unknown op {op!r}; use one of: "
             + ", ".join(_WORKSPACE_OPS) + ".")
+    # force means "bypass remove's needs_confirm"; on any other op it is a
+    # misunderstood call, and silently ignoring it hides the mistake. Refuse
+    # locally — the broker never sees a frame.
+    if force and op != "remove":
+        raise BrowserlandError(
+            0, "bad_args",
+            "workspaces: force applies only to remove (it bypasses "
+            "needs_confirm); refusing without sending.")
     if host not in _admin_hosts:
         raise BrowserlandError(
             0, "admin_required",

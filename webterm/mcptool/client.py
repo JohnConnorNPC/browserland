@@ -427,9 +427,10 @@ class BrowserlandClient:
                         mode: Optional[str] = None) -> Dict[str, Any]:
         """Spawn a new terminal from a profile. Requires ``allow_launch``.
         ``mode`` (off/read/readwrite, sent only when given) is the new
-        window's MCP mode: a scoped launch comes up in it, or readwrite
-        without it; an unscoped launch ignores a valid one (an invalid value
-        is still refused: 400 bad_mode)."""
+        window's MCP mode: every launch, scoped or not, comes up in it, or
+        in readwrite when it is omitted (an invalid value is still refused:
+        400 bad_mode). The answer carries the broker-minted ``handle`` for
+        this launch."""
         body: Dict[str, Any] = {"cols": cols, "rows": rows}
         for k, v in (("profile", profile), ("title", title), ("cwd", cwd),
                      ("mode", mode)):
