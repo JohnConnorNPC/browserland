@@ -586,11 +586,12 @@
         // ids it can see on this broker. An op may apply only when every
         // window it AFFECTS is in that set: the named window, plus the whole
         // column for move_column/set_width, plus both windows' columns for
-        // tab_into/split. Keys outside this broker's namespace (app windows,
-        // other brokers' windows sharing a column) have no id in visible and
-        // are not the caller's windows on this broker; they do not gate. The
-        // refusal is the same unknown_window as any unknown id, so the gate
-        // leaks nothing. Workspace ops are admin-only at the broker and
+        // tab_into/split. Keys outside this broker's namespace: a terminal
+        // of ANOTHER broker has no id in visible and is invisible to this
+        // caller by construction -- it gates (review round 2, R2-1) -- while
+        // app windows carry no MCP identity on any broker and never gate.
+        // The refusal is the same unknown_window as any unknown id, so the
+        // gate leaks nothing. Workspace ops are admin-only at the broker and
         // mutate the HOME broker's /state blob, so they answer not_home on
         // any other connection.
         const _DESKTOP_OPS = Object.create(null);
@@ -652,38 +653,48 @@
             if (!/^\d+$/.test(tail)) return null;
             return Number(tail);
         }
-        // The int ids of every window the op would reshape through `key`'s
+        // The winKeys of every window the op would reshape through `key`'s
         // membership: its whole column when tiled, just itself otherwise.
         // PER-OP RULE (review round 1, N4): focus arranges nothing, so ONLY
         // the named window gates for it (singleOnly in desktopVisibleGate);
         // move_column/set_width reshape the whole column, tab_into/split
         // both windows' columns, and tile/float/set_geometry reshape a tiled
         // window's column too (a floating one is alone in its blast radius).
-        // Keys outside this broker's namespace (app windows, other brokers'
-        // windows sharing a column) have no id in visible and do not gate.
-        function _desktopAffectedIds(hid, key) {
+        function _desktopAffectedKeys(hid, key) {
             const loc = findKeyInLayout(key);
-            if (!loc) {
-                const id = _desktopIntId(hid, key);
-                return id === null ? [] : [id];
-            }
-            const out = [];
-            for (const k of columnKeys(loc.col)) {
-                const id = _desktopIntId(hid, k);
-                if (id !== null) out.push(id);
-            }
-            return out;
+            if (!loc) return [key];
+            return columnKeys(loc.col);
+        }
+        // A key belonging to a TERMINAL of another broker (a host prefix
+        // that is not this connection's). Its id can never appear in this
+        // caller's visible set -- the broker lists only its own windows --
+        // so for a non-admin it is invisible BY CONSTRUCTION and gates the
+        // same way an invisible window of this broker does (review round 2,
+        // R2-1: "a non-admin agent may arrange only the windows it can
+        // see"). APP windows are the exception: they have no MCP identity
+        // on any broker, so they never gate. Admin (visible === null) never
+        // reaches this at all.
+        function _desktopForeignTerminal(hid, key) {
+            const ci = key.indexOf(':');
+            if (ci <= 0) return false;
+            const host = key.slice(0, ci);
+            if (host === hid) return false;          // this broker's namespace
+            if (host === 'app') return false;        // app: keys carry no identity
+            const win = windows.get(key);
+            if (win && win.type === 'app') return false;
+            return true;
         }
         function desktopVisibleGate(hid, visible, keys, singleOnly) {
             if (visible === null) return true;          // admin, unrestricted
             const seen = Object.create(null);
             for (let i = 0; i < visible.length; i++) seen[visible[i]] = true;
             for (const key of keys) {
-                const ids = singleOnly
-                    ? [_desktopIntId(hid, key)]
-                    : _desktopAffectedIds(hid, key);
-                for (const id of ids) {
-                    if (seen[id] !== true) return false;
+                const affected = singleOnly ? [key]
+                    : _desktopAffectedKeys(hid, key);
+                for (const k of affected) {
+                    if (_desktopForeignTerminal(hid, k)) return false;
+                    const id = _desktopIntId(hid, k);
+                    if (id !== null && seen[id] !== true) return false;
                 }
             }
             return true;

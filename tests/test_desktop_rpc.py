@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 46
+EXPECTED_ASSERTS = 49
 
 _HARNESS = r"""
 'use strict';
@@ -402,6 +402,36 @@ function countMut(name) {
         && countMut('detachToFloat') === 0,
         'V6b float keeps the column-wide gate (unknown_window)');
 
+    // V7 (review round 2, R2-1): a foreign broker's TERMINAL sharing the
+    // column is invisible to a non-admin by construction -- its id can never
+    // be in this broker's visible set -- so it gates exactly like an
+    // invisible window of this broker. App windows never gate.
+    resetWorld();
+    L.columns = [
+        { id: 'c1', widthPreset: '1/2', rows: [
+            { height: 0.5, keys: ['local:7'], mode: 'single' },
+            { height: 0.5, keys: ['remoteX:5'], mode: 'single' } ] },
+    ];
+    r = await drive('local', { rid: freshRid(), op: 'move_column',
+        args: { id: 7, to: 'right', visible: [7] } });
+    ok(r && r.ok === false && r.error === 'unknown_window'
+        && countMut('moveColumn') === 0,
+        'V7a a column sharing a foreign-host terminal refuses for a non-admin');
+    r = await drive('local', { rid: freshRid(), op: 'move_column',
+        args: { id: 7, to: 'right', visible: null } });
+    ok(r && r.ok === true,
+        'V7b an admin (visible null) moves the shared column');
+    resetWorld();
+    L.columns = [
+        { id: 'c1', widthPreset: '1/2', rows: [
+            { height: 0.5, keys: ['local:7'], mode: 'single' },
+            { height: 0.5, keys: ['app:note:1'], mode: 'single' } ] },
+    ];
+    r = await drive('local', { rid: freshRid(), op: 'move_column',
+        args: { id: 7, to: 'right', visible: [7] } });
+    ok(r && r.ok === true && countMut('moveColumn') === 1,
+        'V7c an app window in the column never gates');
+
     // ---- C: command-result mapping ----------------------------------------
     resetWorld();
     execNext = { ok: true,
@@ -661,6 +691,18 @@ def test_focus_gates_only_the_named_window(scenario_run):
     # set_geometry keep the column-wide affected set for a tiled window.
     _ok(scenario_run, "V6a focus applies even when the column holds an invisible sibling")
     _ok(scenario_run, "V6b float keeps the column-wide gate (unknown_window)")
+
+
+def test_a_foreign_terminal_gates_a_non_admin(scenario_run):
+    # Review round 2 (R2-1): a terminal of ANOTHER broker sharing the
+    # column is invisible to a non-admin caller by construction (its id can
+    # never appear in this broker's visible set), so reshaping the column
+    # refuses exactly like an invisible window of this broker. App windows
+    # carry no MCP identity on any broker and never gate; an admin is
+    # unrestricted.
+    _ok(scenario_run, "V7a a column sharing a foreign-host terminal refuses for a non-admin")
+    _ok(scenario_run, "V7b an admin (visible null) moves the shared column")
+    _ok(scenario_run, "V7c an app window in the column never gates")
 
 
 def test_an_absent_or_malformed_visible_fails_closed(scenario_run):
