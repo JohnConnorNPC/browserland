@@ -685,7 +685,13 @@ admin agent; it is separate from both the MCP token and the #191 browser
 **in addition to** the normal MCP token — never instead of it. A credential in
 the URL query string is refused outright (400 `admin_token_in_url`, both keys
 and values scanned in constant time, logged with the route and peer but never
-the value), even when the header is also correct, following the #191 rule.
+the value), even when the header is also correct, following the #191 rule —
+and because the HTTP server's access log records the full request line, a
+token sent in the query string would land in that log even though the request
+is refused: the header is the only channel that keeps the secret out of the
+logs. A **repeated** admin header is refused like a repeated scope header
+(**403 `admin_required`** — fail closed rather than silently picking one).
+<!-- VERIFY-ROUND1: repeated X-Browserland-Mcp-Admin header -> 403 (broker round 1, item A5) -->
 The refusal ladder on every token route is fixed order:
 `mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 403 `admin_required`
 (the header is present but wrong) → the route's own checks. A header sent
@@ -719,7 +725,6 @@ below are gated by the full `/mcp/*` ladder and then by the flag (**403
 `desktop_disabled`**), and they relay each op to the **browser holding the
 control lease** over its `/control` socket: one frame per op
 (`{"type":"desktop_rpc","rid":<int>,"op":…,"args":…}`), one answer per rid.
-<!-- VERIFY-BROKER: allow_desktop key/flag/route behaviour (atoms C1+C2, branch b243-broker at docs time) -->
 
 * **No lease holder** → **409 `no_active_browser`** (fail, never queue); a
   browser that does not answer within the 10 s end-to-end deadline → **504
@@ -757,7 +762,11 @@ that browser's home is this broker), and one row per live window: `key`,
 for a custom width), `tabbed`/`split`, `minimized`, `workspace`, and
 `geometry` (`{x,y,w,h}` when floating — **per-browser pixel geometry, as that
 browser sees it**; never stored on the broker) or `null` when tiled.
-<!-- VERIFY-BROKER: snapshot processing + row re-identification (atom C2) -->
+Every top-level field is rebuilt and type-checked broker-side — `viewport`
+ints, `mode` a short string, `focused_column`/`active_workspace` int or null,
+`home` a bool, `workspaces` a bounded list of small typed rows or null — so
+a lying or buggy browser cannot smuggle foreign ids or oversized strings
+past the relay. <!-- VERIFY-ROUND1: snapshot top-level type discipline (broker round 1, item A2) -->
 
 **`POST /mcp/desktop`** — body `{"op": …, "args": …}` with the op allowlist
 above (else **400 `bad_op`**); op-specific arg errors answer **400
@@ -776,7 +785,6 @@ above (else **400 `bad_op`**); op-specific arg errors answer **400
 
 `force: true` on `workspaces:remove` moves the windows to the **adjacent**
 workspace; **no dialog is ever shown in the browser for an MCP op**.
-<!-- VERIFY-BROKER: desktop_result validation + the whole HTTP mapping table (atom C2) -->
 
 ### Endpoints (MCP-token-gated)
 
@@ -812,7 +820,6 @@ closed (#230). `admin` (#245) is `true` only when this call carries a matching
 mcptool reads as "not admin" and fails closed on. `window_edit` (#243) and
 `allow_desktop` (#244) advertise `POST /mcp/window` and the desktop relay the
 same way; a flag absent from an older broker reads as false.
-<!-- VERIFY-BROKER: window_edit + allow_desktop on /mcp/info (atoms B3/C1) -->
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
 omitted, and so are windows outside the caller's declared scope. `agent` is the
@@ -973,12 +980,13 @@ response (`"handle": "…"`, alongside `"scope"` and `"mode"`; `"scope"` is
 survives on its `owner` (and mode) even with no scope. If the launch fails
 after the row was written, the row is removed again — unless the agent's
 `hello` already claimed it. A launch whose new window id already has a stored
-row is refused with **500 `prespawn_failed`** (a retry gets a new id); when
-the collided row is long dead — not claimable by any live producer and not
-pending — the broker deletes just that row and retries **once** on a fresh id
-(never an in-place replacement, which would re-open the wildcard-claim
-hazard). A row that is still claimable keeps the refusal. The browser's
+row retries **once** on a fresh id; the collided row is deleted only when it
+is a pre-spawn orphan (no pid and no host) or older than the 7-day prune age
+— never a row a reconnecting producer could still claim, whose off/scope
+policy stays untouched. A row that is still claimable keeps the refusal
+(**500 `prespawn_failed`**) and nothing is spawned. The browser's
 `/launch` is unchanged: it never reads `mode` and writes no row.
+<!-- VERIFY-ROUND1: collision retry deletes only a pre-spawn orphan or a >7-day row (broker round 1, item A1) -->
 
 **`POST /mcp/window`** — body `{"id": <int>, "handle"?: <str>, "scope"?:
 <str>|null, "mode"?: "off"|"read"|"readwrite"|null}` (#243). Sets the scope
@@ -1008,7 +1016,7 @@ than a write. The change persists across a broker restart and is re-applied on
 the same producer's reconnect; a `/session/mcp` edit clears the row's `owner`,
 after which the old handle gets the 404; a pre-spawn row (202 window before
 its first `hello`) is editable by its owner. `GET /mcp/info` answers
-`"window_edit": true` on a broker that has this route. <!-- VERIFY-BROKER: /mcp/window route, its identical-404 construction, in-mutate authorization, /mcp/info window_edit flag (atom B3, branch b243-broker at docs time) -->
+`"window_edit": true` on a broker that has this route.
 
 ### Error reference
 
@@ -1086,7 +1094,8 @@ shape. While the env pins the token, `token`/`generate` edits are **ignored**
 
 **`POST /mcp/knobs`** (#245, admin credential required) — body
 `{"default_mode"?: "off"|"read"|"readwrite", "allow_launch"?: bool,
-"allow_desktop"?: bool}` → `{"ok":true,"default_mode":…,"allow_launch":…}`.
+"allow_desktop"?: bool}` →
+`{"ok":true,"default_mode":…,"allow_launch":…,"allow_desktop":…}`.
 The admin agent's broker-wide
 knobs, validated before any write: an unknown key — in particular `token`,
 `admin_token` or `enabled`, which stay browser-only — is **400 `bad_key`**, and
@@ -1094,9 +1103,7 @@ the booleans must be real JSON booleans (a string `"false"` is truthy junk →
 **400 `bad_value`**, not coerced: the browser realm's `/mcp/config` keeps its
 historical coercion as pinned wire). A non-admin call is **403
 `admin_required`** before any validation. The write shares `/mcp/config`'s
-locked sidecar writer, so the two routes never interleave. `allow_desktop`
-becomes a valid knob with #244's relay.
-<!-- VERIFY-BROKER: allow_desktop joining /mcp/knobs (atom C1) -->
+locked sidecar writer, so the two routes never interleave.
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
 "scope": <str>|null}`, both keys optional →
