@@ -350,8 +350,7 @@
                     // App-level keepalive: an unknown-type JSON frame the broker
                     // ignores (protocol.parse -> not become_active) but that
                     // keeps the pipe warm through idle proxies.
-                    try { ws.send(JSON.stringify({ type: 'ping' })); }
-                    catch (_) {}
+                    try { desktopWsSend(ws, { type: 'ping' }); } catch (_) {}
                 }, CONTROL_PING_MS);
             };
             ws.onmessage = (ev) => {
@@ -363,6 +362,15 @@
                 // of a release it did not cause.
                 if (msg && msg.type === 'terminal_control') {
                     applyControlView(controlKey(hid, msg.id), msg, 'push');
+                    return;
+                }
+                // #244: an MCP desktop op relayed by this broker to us, the
+                // lease holder. Fire-and-forget: handleDesktopRpc owns its
+                // own errors and always answers (or errors into) exactly one
+                // desktop_result frame per rid.
+                if (msg && msg.type === 'desktop_rpc') {
+                    Promise.resolve(handleDesktopRpc(hid, rec, ws, msg))
+                        .catch(function () {});
                     return;
                 }
                 if (!msg || msg.type !== 'status') return;
@@ -547,3 +555,470 @@
             teardownView();
         }
 
+        // ---- desktop relay (#244) ------------------------------------------
+        // The browser half of the MCP desktop relay (design/broker.md ##
+        // Wire contract). The broker sends {type:'desktop_rpc', rid:int, op,
+        // args} to ONE designated /control socket of the lease holder; this
+        // handler answers exactly one {type:'desktop_result', rid, ...} per
+        // rid. args carry BROKER-LOCAL integer window ids, resolved against
+        // the host id of the connection that DELIVERED the frame -- never
+        // the home broker's namespace for a frame that arrived on a remote
+        // connection (the gh#161 trap: a null host silently hits the
+        // serving origin; this handler never fetches anything, it reads the
+        // merged sessions/windows maps).
+        //
+        // Every mutation rides the normal mutators (savePrefs + relayout, so
+        // peer browsers converge through the debounced /state push) plus one
+        // explicit pushState() flush BEFORE the reply, so an acknowledged op
+        // has already been offered to /state under our lease. It runs only
+        // while this browser holds its lease -- the _deactivated re-check
+        // after each await answers lost_lease rather than landing a
+        // half-applied op -- never waits on animation, and applies each rid
+        // exactly once via a small answered-rid cache.
+        //
+        // Scope rule (the owner's #244 words, enforced where the topology is
+        // known): a NON-admin caller's frame carries args.visible -- the int
+        // ids it can see on this broker. An op may apply only when every
+        // window it AFFECTS is in that set: the named window, plus the whole
+        // column for move_column/set_width, plus both windows' columns for
+        // tab_into/split. Keys outside this broker's namespace (app windows,
+        // other brokers' windows sharing a column) have no id in visible and
+        // are not the caller's windows on this broker; they do not gate. The
+        // refusal is the same unknown_window as any unknown id, so the gate
+        // leaks nothing. Workspace ops are admin-only at the broker and
+        // mutate the HOME broker's /state blob, so they answer not_home on
+        // any other connection.
+        const _DESKTOP_OPS = Object.create(null);
+        ['get', 'focus', 'move_column', 'set_width', 'tile', 'float',
+         'set_geometry', 'tab_into', 'split'].forEach(function (k) {
+            _DESKTOP_OPS[k] = true;
+        });
+        const _DESKTOP_WS_OPS = Object.create(null);
+        ['workspaces:list', 'workspaces:add', 'workspaces:rename',
+         'workspaces:remove', 'workspaces:switch',
+         'workspaces:send-window'].forEach(function (k) {
+            _DESKTOP_WS_OPS[k] = true;
+        });
+        // rid -> the desktop_result payload already sent. The broker sends
+        // each rpc to ONE designated socket, so a duplicate frame should be
+        // rare; this cache is the belt -- a replayed rid re-serves its answer
+        // without re-applying. Bounded; oldest evicted.
+        const _desktopAppliedRids = new Map();
+        const _DESKTOP_RID_CACHE_MAX = 128;
+        function _desktopRememberRid(rid, payload) {
+            _desktopAppliedRids.delete(rid);
+            _desktopAppliedRids.set(rid, payload);
+            while (_desktopAppliedRids.size > _DESKTOP_RID_CACHE_MAX) {
+                _desktopAppliedRids.delete(_desktopAppliedRids.keys().next().value);
+            }
+        }
+        // The ONE ws.send call site in this fragment (the terminal-funnel
+        // enumeration pins the count): both the control-ping keepalive and
+        // every desktop_result reply ride it.
+        function desktopWsSend(ws, payload) {
+            try { ws.send(JSON.stringify(payload)); } catch (_) {}
+        }
+        function desktopLeaseLost() {
+            try { return _deactivated === true; } catch (_) { return false; }
+        }
+        function desktopReply(rec, ws, rid, payload) {
+            // Socket identity: a reply must never ride a socket the rec has
+            // already replaced (openControlWs reuses recs across reconnects).
+            if (!rec || rec.ws !== ws) return;
+            desktopWsSend(ws, Object.assign(
+                { type: 'desktop_result', rid: rid }, payload));
+        }
+        // Broker-local int id (the DELIVERING connection's namespace) ->
+        // winKey, or null. The ONLY place desktop ids are resolved.
+        function resolveDesktopWinKey(hid, id) {
+            if (!Number.isInteger(id)) return null;
+            const key = hid + ':' + id;
+            if (sessions.has(key) || windows.has(key)
+                    || findKeyInLayout(key)) return key;
+            return null;
+        }
+        // A winKey's int id on THIS connection's broker, or null when the
+        // key belongs to another namespace (app windows, other brokers).
+        function _desktopIntId(hid, key) {
+            const ci = key.indexOf(':');
+            if (ci <= 0) return null;
+            if (key.slice(0, ci) !== hid) return null;
+            const tail = key.slice(ci + 1);
+            if (!/^\d+$/.test(tail)) return null;
+            return Number(tail);
+        }
+        // The int ids of every window the op would reshape through `key`'s
+        // membership: its whole column when tiled, just itself otherwise.
+        function _desktopAffectedIds(hid, key) {
+            const loc = findKeyInLayout(key);
+            if (!loc) {
+                const id = _desktopIntId(hid, key);
+                return id === null ? [] : [id];
+            }
+            const out = [];
+            for (const k of columnKeys(loc.col)) {
+                const id = _desktopIntId(hid, k);
+                if (id !== null) out.push(id);
+            }
+            return out;
+        }
+        function desktopVisibleGate(hid, visible, keys) {
+            if (visible === null) return true;          // admin, unrestricted
+            const seen = Object.create(null);
+            for (let i = 0; i < visible.length; i++) seen[visible[i]] = true;
+            for (const key of keys) {
+                for (const id of _desktopAffectedIds(hid, key)) {
+                    if (seen[id] !== true) return false;
+                }
+            }
+            return true;
+        }
+        // ctx.commands result -> desktop_result payload. execute() resolves a
+        // closed vocabulary that never rejects; command VALUES carry data or
+        // a {refusal} this maps onto the wire's error codes, so nothing but
+        // genuine success is ok:true on the wire.
+        function desktopCommandResult(r) {
+            if (r && r.ok === true) {
+                const v = r.value;
+                if (v && typeof v === 'object'
+                        && typeof v.refusal === 'string') {
+                    if (v.refusal === 'needs_confirm') {
+                        return { ok: false, error: 'needs_confirm',
+                                 detail: { count: v.windows || 0 } };
+                    }
+                    if (v.refusal === 'bad_args') {
+                        return { ok: false, error: 'bad_args', detail: 'args' };
+                    }
+                    if (v.refusal === 'last_workspace'
+                            || v.refusal === 'unknown_window') {
+                        return { ok: false, error: v.refusal };
+                    }
+                }
+                return { ok: true, value: v === undefined ? null : v };
+            }
+            return { ok: false,
+                     error: (r && typeof r.reason === 'string')
+                         ? r.reason : 'error' };
+        }
+        // `get`'s snapshot, as THIS browser sees the desktop. Rows: every
+        // live window (minimized and host-hidden included; app windows with
+        // id:null; dormant layout keys excluded -- no live window, nothing
+        // to arrange). A non-admin caller keeps only rows whose id is in its
+        // visible set (the broker re-filters as a belt). Geometry is the
+        // live floating box; the broker relabels identity from its registry.
+        function desktopSnapshot(hid, visible, wsResult) {
+            const L = getLayout();
+            let items = null, active = null, columnWs = null, floatWs = null;
+            const wsv = (wsResult && wsResult.ok
+                && wsResult.value && typeof wsResult.value === 'object')
+                ? wsResult.value : null;
+            if (wsv) {
+                items = Array.isArray(wsv.items) ? wsv.items : null;
+                active = (typeof wsv.active === 'number') ? wsv.active : null;
+                columnWs = (wsv.columnWs && typeof wsv.columnWs === 'object'
+                    && !Array.isArray(wsv.columnWs)) ? wsv.columnWs : null;
+                floatWs = (wsv.floatWs && typeof wsv.floatWs === 'object'
+                    && !Array.isArray(wsv.floatWs)) ? wsv.floatWs : null;
+            }
+            const wsIdx = Object.create(null);
+            let activeWsId = null;
+            if (items) for (const it of items) {
+                if (it && typeof it.id === 'string') wsIdx[it.id] = it.index;
+                if (it && active !== null && it.index === active
+                        && typeof it.id === 'string') activeWsId = it.id;
+            }
+            const wsField = function (wsId) {
+                if (typeof wsId !== 'string') return null;  // null = all-ws
+                const i = wsIdx[wsId];
+                return (typeof i === 'number') ? i : null;
+            };
+            const rows = [];
+            for (const ent of windows) {
+                const key = ent[0], win = ent[1];
+                if (!win || win.disposed) continue;
+                const id = _desktopIntId(hid, key);
+                if (visible !== null
+                        && (id === null || visible.indexOf(id) === -1)) continue;
+                const sess = sessions.get(key);
+                const loc = findKeyInLayout(key);
+                const vci = loc ? visibleColIndex(loc.col) : -1;
+                const row = {
+                    key: key,
+                    id: id,
+                    title: (sess && sess.title) || win.name || key,
+                    kind: (win.type === 'app') ? 'app' : 'terminal',
+                    tiled: !!win.tiled,
+                    minimized: !!win.minimized,
+                    column: (loc && vci !== -1) ? vci : null,
+                    row: loc ? loc.rowIndex : null,
+                    tabIndex: loc ? loc.tabIndex : null,
+                    width_preset: loc ? (loc.col.widthPreset || null) : null,
+                };
+                if (loc && loc.row) {
+                    row.tabbed = loc.row.mode === 'tabbed';
+                    row.split = loc.row.mode === 'split';
+                    if (typeof loc.col.widthFrac === 'number') {
+                        row.widthFrac = loc.col.widthFrac;
+                    }
+                }
+                if (win.tiled) {
+                    row.geometry = null;
+                    const cid = loc && loc.col ? loc.col.id : null;
+                    const wsId = (cid !== null && columnWs)
+                        ? (columnWs[cid] !== undefined ? columnWs[cid]
+                                                      : activeWsId)
+                        : activeWsId;
+                    row.workspace = wsField(wsId);
+                } else {
+                    const g = currentFloatGeom(win);
+                    row.geometry = { x: g.left, y: g.top,
+                                     w: g.width, h: g.height };
+                    let wsId;
+                    if (!floatWs || floatWs[key] === undefined) wsId = activeWsId;
+                    else wsId = floatWs[key];
+                    row.workspace = wsField(wsId);
+                }
+                rows.push(row);
+            }
+            return {
+                viewport: { w: window.innerWidth, h: window.innerHeight },
+                mode: L.mode,
+                focused_column: L.focusedCol,
+                workspaces: items,
+                active_workspace: active,
+                home: hid === homeHostId(),
+                windows: rows,
+            };
+        }
+        // One core (non-workspaces) op. Pure dispatcher over the EXISTING
+        // mutators: validates and gates BEFORE the first mutator call, and
+        // the whole op is synchronous, so no /state adopt can interleave
+        // between validation and application.
+        function desktopCoreOp(hid, op, args, visible) {
+            const badArgs = function (detail) {
+                return { ok: false, error: 'bad_args', detail: detail };
+            };
+            const refuseGate = function (keys) {
+                if (!desktopVisibleGate(hid, visible, keys)) {
+                    return { ok: false, error: 'unknown_window' };
+                }
+                return null;
+            };
+            const key = resolveDesktopWinKey(hid, args.id);
+            if (key === null) return { ok: false, error: 'unknown_window' };
+            const win = windows.get(key);
+            const live = (win && !win.disposed) ? win : null;
+            if (op === 'focus') {
+                if (!live) return { ok: false, error: 'unknown_window' };
+                const g = refuseGate([key]);
+                if (g) return g;
+                revealAndFocusWindow(key);
+                return { ok: true, value: {
+                    focused_column: getLayout().focusedCol,
+                    controlled: !!live.controlled,
+                } };
+            }
+            if (op === 'move_column') {
+                const loc = findKeyInLayout(key);
+                if (!loc) return badArgs('not_tiled');
+                const g = refuseGate([key]);
+                if (g) return g;
+                if (args.to === 'left' || args.to === 'right') {
+                    moveColumn(visibleColIndex(loc.col),
+                               args.to === 'left' ? -1 : 1);
+                } else if (Number.isInteger(args.to)) {
+                    dragDropNewColumn(key, args.to);
+                } else return badArgs('to');
+                const loc2 = findKeyInLayout(key);
+                return { ok: true, value: {
+                    column: loc2 ? visibleColIndex(loc2.col) : null,
+                } };
+            }
+            if (op === 'set_width') {
+                if (WIDTH_PRESETS.indexOf(args.preset) === -1) {
+                    return badArgs('preset');
+                }
+                if (!live || !findKeyInLayout(key)) return badArgs('not_tiled');
+                const g = refuseGate([key]);
+                if (g) return g;
+                setColumnPreset(live, args.preset);
+                return { ok: true, value: { preset: args.preset } };
+            }
+            if (op === 'tile') {
+                if (!live) return { ok: false, error: 'unknown_window' };
+                const g = refuseGate([key]);
+                if (g) return g;
+                attachToStrip(live);
+                return { ok: true, value: { tiled: true } };
+            }
+            if (op === 'float') {
+                if (!live) return { ok: false, error: 'unknown_window' };
+                const g = refuseGate([key]);
+                if (g) return g;
+                detachToFloat(live);
+                return { ok: true, value: { tiled: false } };
+            }
+            if (op === 'set_geometry') {
+                if (!live) return { ok: false, error: 'unknown_window' };
+                if (live.tiled) return badArgs('not_floating');
+                const num = function (v) {
+                    return typeof v === 'number' && isFinite(v);
+                };
+                if (!num(args.x) || !num(args.y) || !num(args.w) || !num(args.h)) {
+                    return badArgs('geometry');
+                }
+                const g = refuseGate([key]);
+                if (g) return g;
+                applyGeomToWindow(live, clampGeom({
+                    left: args.x, top: args.y, width: args.w, height: args.h,
+                }));
+                // Persist the box AS APPLIED: a size-locked window keeps its
+                // locked w/h, and prefs/value must not claim otherwise.
+                const gm = currentFloatGeom(live);
+                live.geom = { left: gm.left, top: gm.top,
+                              width: gm.width, height: gm.height };
+                getPref(key).geom = Object.assign({}, live.geom);
+                savePrefs();
+                refitSoon(live);
+                return { ok: true, value: { geometry: {
+                    x: gm.left, y: gm.top, w: gm.width, h: gm.height,
+                } } };
+            }
+            if (op === 'tab_into' || op === 'split') {
+                if (args.id === args.target) return badArgs('target');
+                const tkey = resolveDesktopWinKey(hid, args.target);
+                if (tkey === null) return { ok: false, error: 'unknown_window' };
+                const twin = windows.get(tkey);
+                if (!live || !twin || twin.disposed) {
+                    return { ok: false, error: 'unknown_window' };
+                }
+                if (op === 'split' && args.axis !== 'row'
+                        && args.axis !== 'column') return badArgs('axis');
+                // Gate on the PRE-op topology: both windows plus every
+                // window of the columns this op leaves or reshapes.
+                const g = refuseGate([key, tkey]);
+                if (g) return g;
+                if (op === 'tab_into') {
+                    tabWindowInto(live, twin);
+                } else {
+                    // The split mutators need the drag key IN the layout;
+                    // floats attach first (the same handoff the UI drag
+                    // makes). Validation above already ran, and attach +
+                    // split are one sync block -- nothing can interleave.
+                    if (!findKeyInLayout(key)) attachToStrip(live);
+                    if (!findKeyInLayout(tkey)) attachToStrip(twin);
+                    splitAtWindow(key, tkey,
+                                  args.axis === 'row' ? 'bottom' : 'right');
+                }
+                const loc2 = findKeyInLayout(key);
+                return { ok: true, value: {
+                    column: loc2 ? visibleColIndex(loc2.col) : null,
+                    row: loc2 ? loc2.rowIndex : null,
+                } };
+            }
+            return { ok: false, error: 'bad_op' };
+        }
+        async function handleDesktopRpc(hid, rec, ws, msg) {
+            let out = null;
+            let rid = msg ? msg.rid : undefined;
+            try {
+                if (!Number.isInteger(rid)
+                        || !msg || typeof msg.op !== 'string') {
+                    desktopReply(rec, ws,
+                        Number.isInteger(rid) ? rid : null,
+                        { ok: false, error: 'bad_args', detail: 'rid' });
+                    return;
+                }
+                const cached = _desktopAppliedRids.get(rid);
+                if (cached !== undefined) {
+                    desktopReply(rec, ws, rid, cached);
+                    return;
+                }
+                const argsOf = function () {
+                    return (msg.args && typeof msg.args === 'object'
+                        && !Array.isArray(msg.args)) ? msg.args : {};
+                };
+                const visibleOf = function (args) {
+                    // args.visible: int[] for a non-admin caller, null for an
+                    // admin. Absent or malformed fails CLOSED (empty set).
+                    if (args.visible === null) return null;
+                    if (Array.isArray(args.visible)) {
+                        return args.visible.filter(function (v) {
+                            return Number.isInteger(v);
+                        });
+                    }
+                    return [];
+                };
+                if (desktopLeaseLost()) {
+                    out = { ok: false, error: 'lost_lease' };
+                } else if (_DESKTOP_OPS[msg.op] === true) {
+                    const args = argsOf();
+                    const visible = visibleOf(args);
+                    if (msg.op === 'get') {
+                        // The one await: the workspaces store is read BEFORE
+                        // the snapshot so decoration and layout agree on the
+                        // post-await world (a read command; it writes
+                        // nothing, so not_home does not apply).
+                        let wsr = null;
+                        if (typeof _execModCommand === 'function') {
+                            wsr = await _execModCommand('workspaces:list');
+                        }
+                        if (desktopLeaseLost()) {
+                            out = { ok: false, error: 'lost_lease' };
+                        } else {
+                            out = { ok: true,
+                                    value: desktopSnapshot(hid, visible, wsr) };
+                        }
+                    } else {
+                        out = desktopCoreOp(hid, msg.op, args, visible);
+                        if (out.ok) {
+                            // Flush before ack: success means the /state
+                            // write was attempted under our lease.
+                            if (!desktopLeaseLost()) {
+                                try { await pushState(); } catch (_) {}
+                            }
+                            if (desktopLeaseLost()) {
+                                out = { ok: false, error: 'lost_lease' };
+                            }
+                        }
+                    }
+                } else if (_DESKTOP_WS_OPS[msg.op] === true) {
+                    // Workspace data lives in the HOME broker's /state blob;
+                    // mutating it from any other broker's relay would edit
+                    // the wrong desktop.
+                    if (hid !== homeHostId()) {
+                        out = { ok: false, error: 'not_home' };
+                    } else {
+                        const args = argsOf();
+                        if (msg.op === 'workspaces:send-window') {
+                            // The wire's `win` int resolves in THIS
+                            // connection's namespace before dispatch.
+                            const k = resolveDesktopWinKey(hid, args.win);
+                            if (k === null) {
+                                out = { ok: false, error: 'unknown_window' };
+                            } else {
+                                args.key = k;
+                                const r = await _execModCommand(msg.op, args);
+                                out = desktopLeaseLost()
+                                    ? { ok: false, error: 'lost_lease' }
+                                    : desktopCommandResult(r);
+                            }
+                        } else {
+                            const r = await _execModCommand(msg.op, args);
+                            out = desktopLeaseLost()
+                                ? { ok: false, error: 'lost_lease' }
+                                : desktopCommandResult(r);
+                        }
+                    }
+                } else {
+                    out = { ok: false, error: 'bad_op' };
+                }
+            } catch (e) {
+                out = { ok: false, error: 'error',
+                        detail: String((e && e.message) || e) };
+            }
+            if (out !== null) {
+                _desktopRememberRid(rid, out);
+                desktopReply(rec, ws, rid, out);
+            }
+        }
