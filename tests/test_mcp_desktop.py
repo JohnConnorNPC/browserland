@@ -516,6 +516,111 @@ def test_relay_sends_to_one_designated_holder_socket(tmp_path, monkeypatch):
     assert counts == [0, 1]
 
 
+# ---- round 1: A2 / A3 / A6 ----------------------------------------------------
+
+
+def test_desktop_get_rebuilds_top_level_fields(tmp_path, monkeypatch):
+    """#244 round 1 A2: EVERY top-level snapshot field is rebuilt with a
+    type discipline, never passed through -- a lying browser that stuffs
+    foreign ids/titles into workspaces, oversized strings anywhere, or
+    wrong-typed values gets them stripped or nulled, so the visibility
+    promise cannot be bypassed through a field the filter never checks."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    _live(app, 5, scope="a", mcp_mode="readwrite")
+    snap = {
+        "viewport": {"w": 1920, "h": "huge", "junk": 1},   # bad h -> dropped
+        "mode": "t" * 33,                                    # too long
+        "focused_column": True,                              # bool -> dropped
+        "active_workspace": None,                            # null kept
+        "home": "yes",                                       # not a bool
+        "workspaces": [
+            # extra keys (a foreign window list!) stripped, entry kept
+            {"index": 0, "id": "L4", "name": "1",
+             "windows": [{"id": 9, "title": "leak"}]},
+            {"index": 1, "id": "L5", "name": "n" * 65},      # oversized name
+            {"index": True, "id": "L6", "name": "ok"},       # bool index
+            "junk",                                          # not a dict
+        ],
+        "windows": [
+            {"id": 5, "title": "t", "tiled": "yes", "width_preset": "x" * 200,
+             "geometry": {"x": 1.5, "y": 2, "w": 3, "h": 4},
+             "widthFrac": 0.5, "kind": "terminal", "tabIndex": 0},
+        ],
+    }
+    _holder(app, _reply_ok(snap))
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    assert resp.status == 200
+    body = resp.json
+    assert "viewport" not in body
+    assert "mode" not in body
+    assert "focused_column" not in body
+    assert body["active_workspace"] is None
+    assert "home" not in body
+    # the foreign window list never reached the caller
+    assert body["workspaces"] == [{"index": 0, "id": "L4", "name": "1"}]
+    row = body["windows"][0]
+    assert "tiled" not in row and "width_preset" not in row
+    assert "geometry" not in row              # float x killed the whole geom
+    assert row["widthFrac"] == 0.5 and row["kind"] == "terminal"
+    assert row["tabIndex"] == 0
+
+
+def test_stalled_sockets_cannot_stretch_the_deadline(tmp_path, monkeypatch):
+    """#244 round 1 A3: ONE end-to-end deadline shared by the send loop and
+    the reply wait -- N stalled sockets cost at most ONE timeout, never
+    (N+1) x it."""
+    class _StalledWS:
+        def __init__(self):
+            self.frames = []
+
+        async def send(self, frame):
+            self.frames.append(json.loads(frame))
+            await asyncio.sleep(10)
+
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 0.3
+    sockets = {_StalledWS() for _ in range(4)}
+    app.ctx.control_clients["stalled"] = sockets
+    app.ctx.active_client_id = "stalled"
+    t0 = time.monotonic()
+    _, resp = _mcp(app, "/mcp/desktop", {"op": "get"})
+    elapsed = time.monotonic() - t0
+    assert (resp.status, resp.json["error"]) == (504, "desktop_timeout")
+    assert elapsed < 0.9, elapsed
+
+
+def test_desktop_result_union_enforced(tmp_path, monkeypatch):
+    """#244 round 1 A6: the success/error union is ENFORCED, not just
+    documented -- ok:true carries a value and no error key; ok:false one of
+    the closed error codes. Anything else is dropped (the agent sees the
+    timeout)."""
+    app = _desktop_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+
+    class _SimpleCall:
+        def __init__(self, future, client_id, generation):
+            self.future = future
+            self.client_id = client_id
+            self.generation = generation
+
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.create_future()
+        app.ctx.desktop_rpcs[1] = _SimpleCall(
+            future, "b1", app.ctx.lease_generation)
+        validate = app.ctx._desktop_result_for_tests
+        for junk in ({"rid": 1, "ok": True, "error": "x", "value": 1},
+                     {"rid": 1, "ok": True},
+                     {"rid": 1, "ok": False, "error": "surprise"},
+                     {"rid": 1, "ok": False, "error": ""}):
+            validate("b1", junk)
+            assert not future.done(), junk
+        validate("b1", {"rid": 1, "ok": False, "error": "absent"})
+        assert future.result() == {"ok": False, "error": "absent",
+                                   "detail": None}
+    finally:
+        loop.close()
+
+
 # ---- C2, real broker subprocess + websockets (M5 harness) --------------------
 #
 # _until/_lease are reused VERBATIM from tests/test_terminal_control.py (same

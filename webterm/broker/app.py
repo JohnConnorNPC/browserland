@@ -4814,16 +4814,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         ok = data.get("ok")
         if not isinstance(ok, bool):
             return
+        # The lease_generation read below is deliberately lock-free
+        # (round 1 A7): every writer -- the bump under lease_lock -- runs on
+        # this same single-threaded event loop, so the read can race only
+        # code that cannot interleave it; taking the lock here would put an
+        # await inside the /control receive loop for no gain.
         call = app.ctx.desktop_rpcs.get(rid)
         if (call is None or call.client_id != client_id
                 or call.generation != app.ctx.lease_generation
                 or call.future.done()):
             return
+        # Round 1 A6: the union is ENFORCED, not just documented -- ok:true
+        # carries a value and NO error key; ok:false carries one of the
+        # closed error codes below. Anything else is a malformed answer and
+        # is dropped (the agent sees the timeout).
         if ok:
+            if "error" in data or "value" not in data:
+                return
             call.future.set_result({"ok": True, "value": data.get("value")})
             return
         code = data.get("error")
-        if not isinstance(code, str):
+        if code not in ("unknown_window", "bad_args", "not_home",
+                        "lost_lease", "needs_confirm", "last_workspace",
+                        "absent", "inactive", "bad_op", "error"):
             return
         detail = data.get("detail")
         if code == "needs_confirm":
@@ -7624,6 +7637,97 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                             "geometry", "workspace", "kind", "minimized",
                             "tabIndex", "tabbed", "split", "widthFrac")
 
+    def _snap_int(value):
+        # A REAL int (bool excluded -- True aliases 1), or None.
+        return (value if not isinstance(value, bool)
+                and isinstance(value, int) else None)
+
+    def _snap_str(value, cap):
+        return value if isinstance(value, str) and len(value) <= cap \
+            else None
+
+    #: Per-key type discipline for the per-window layout extras (round 1
+    #: A2): bools/ints/short strs (plus finite numbers for widthFrac and an
+    #: all-int dict for geometry). A value of the wrong type drops the KEY,
+    #: never the row: a lying browser can misreport only its own layout.
+    _DESKTOP_LAYOUT_TYPES = {
+        "tiled": "bool", "minimized": "bool", "tabbed": "bool",
+        "column": "int", "row": "int", "tabIndex": "int", "workspace": "int",
+        "width_preset": "str32", "kind": "str32", "split": "str32",
+        "widthFrac": "num", "geometry": "geom",
+    }
+    _LAYOUT_SKIP = object()
+
+    def _snap_layout_value(key, value):
+        kind = _DESKTOP_LAYOUT_TYPES[key]
+        if kind == "bool":
+            return value if isinstance(value, bool) else _LAYOUT_SKIP
+        if kind == "int":
+            value = _snap_int(value)
+            return _LAYOUT_SKIP if value is None else value
+        if kind == "str32":
+            value = _snap_str(value, 32)
+            return _LAYOUT_SKIP if value is None else value
+        if kind == "num":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return _LAYOUT_SKIP
+            return value if math.isfinite(value) else _LAYOUT_SKIP
+        # geom: an all-int {x, y, w, h} dict
+        if not isinstance(value, dict):
+            return _LAYOUT_SKIP
+        out = {}
+        for part in ("x", "y", "w", "h"):
+            part_v = _snap_int(value.get(part))
+            if part_v is None:
+                return _LAYOUT_SKIP
+            out[part] = part_v
+        return out
+
+    def _snap_rebuild_top(snap):
+        """Round 1 A2: EVERY top-level snapshot field is REBUILT with a
+        type discipline, never passed through -- a compromised browser must
+        not be able to reach the MCP caller (or exhaust it) through a field
+        the visibility filter never checks. Wrong-typed fields are dropped
+        or nulled; workspaces entries are reduced to {index, id, name} with
+        an int index and bounded strings, at most 64 of them."""
+        out = {"ok": True}
+        viewport = snap.get("viewport")
+        if isinstance(viewport, dict):
+            vw = _snap_int(viewport.get("w"))
+            vh = _snap_int(viewport.get("h"))
+            if vw is not None and vh is not None:
+                out["viewport"] = {"w": vw, "h": vh}
+        mode = _snap_str(snap.get("mode"), 32)
+        if mode is not None:
+            out["mode"] = mode
+        for key in ("focused_column", "active_workspace"):
+            value = snap.get(key)
+            if value is None:
+                out[key] = None
+            else:
+                value = _snap_int(value)
+                if value is not None:
+                    out[key] = value
+        home = snap.get("home")
+        if isinstance(home, bool):
+            out["home"] = home
+        workspaces = snap.get("workspaces")
+        if workspaces is None:
+            out["workspaces"] = None
+        elif isinstance(workspaces, list):
+            items = []
+            for entry in workspaces[:64]:
+                if not isinstance(entry, dict):
+                    continue
+                index = _snap_int(entry.get("index"))
+                ident = _snap_str(entry.get("id"), 64)
+                name = _snap_str(entry.get("name"), 64)
+                if index is None or ident is None or name is None:
+                    continue
+                items.append({"index": index, "id": ident, "name": name})
+            out["workspaces"] = items
+        return out
+
     def _desktop_visible_ids(request: Request):
         """#244 [M1]: the ids THIS caller can see -- every live window whose
         effective mode is not off and, when it declared a scope, whose tag
@@ -7664,10 +7768,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return None
 
     async def _desktop_relay(request: Request, op: str, args, visible):
-        """Send one desktop_rpc to the lease holder's DESIGNATED /control
-        socket (the first in insertion order -- the longest-lived -- falling
-        back to the next socket of the same client on a send failure; other
-        sockets never see the frame, so no cross-tab exactly-once dance) and
+        """Send one desktop_rpc to exactly ONE /control socket of the lease
+        holder -- the pick among the client's sockets is arbitrary (a set
+        has no insertion order) but SINGLE, with failover to a sibling
+        socket when the chosen send raises; the client's other sockets never
+        see the frame, so nothing can apply it twice -- and
         await its desktop_result under ONE end-to-end deadline. Refusals the
         browser never sees: no holder 409 no_active_browser (owner ruling:
         fail, never queue), every-send-failed 409 lost_lease, deadline
@@ -7683,25 +7788,47 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return {"http": sanic_json({"error": "no_active_browser"},
                                        status=409)}
         rid = next(ctxd.desktop_rid)
+        # Round 1 A3: ONE end-to-end deadline shared by the send loop and
+        # the reply wait, so N stalled sockets cost at most ONE timeout --
+        # not (N+1) x it.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + ctxd.desktop_rpc_timeout_s
+        # INVARIANT (round 1 A7): there is NO await between the lease
+        # snapshot above and the registration below -- an await here opens a
+        # window where a deposed holder is sent the call.
         frame = protocol.desktop_rpc_frame(rid, op, dict(args,
                                                          visible=visible))
-        future = asyncio.get_event_loop().create_future()
+        future = loop.create_future()
         ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
         try:
             sent = False
-            timeout = ctxd.desktop_rpc_timeout_s
+            stalled = False
             for sock in sockets:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    stalled = True
+                    break
                 try:
-                    await asyncio.wait_for(sock.send(frame), timeout)
+                    await asyncio.wait_for(sock.send(frame), remaining)
                     sent = True
                     break
+                except asyncio.TimeoutError:
+                    stalled = True   # this socket stalled: try the next
+                    continue
                 except Exception:
-                    continue       # a dead designated socket: try the next
+                    continue       # a dead socket: try the next
             if not sent:
+                # A STALLED send (or an exhausted deadline) is the timeout;
+                # only sockets that failed instantly mean the holder is
+                # gone.
+                if stalled:
+                    return {"http": sanic_json(
+                        {"error": "desktop_timeout"}, status=504)}
                 return {"http": sanic_json({"error": "lost_lease"},
                                            status=409)}
             try:
-                return await asyncio.wait_for(future, timeout)
+                return await asyncio.wait_for(
+                    future, max(0.0, deadline - loop.time()))
             except _DesktopLeaseLost:
                 return {"http": sanic_json({"error": "lost_lease"},
                                            status=409)}
@@ -7788,14 +7915,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     continue
             row = {"id": wid, "title": entry.title}
             for key in _DESKTOP_LAYOUT_KEYS:
-                if key in brow:
-                    row[key] = brow[key]
+                if key not in brow:
+                    continue
+                value = _snap_layout_value(key, brow[key])
+                if value is not _LAYOUT_SKIP:
+                    row[key] = value
             windows.append(row)
-        out = {"ok": True}
-        for key in ("viewport", "mode", "focused_column", "active_workspace",
-                    "workspaces", "home"):
-            if key in snap:
-                out[key] = snap[key]
+        out = _snap_rebuild_top(snap)
         out["windows"] = windows
         return sanic_json(out)
 
