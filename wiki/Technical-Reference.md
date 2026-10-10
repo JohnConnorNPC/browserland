@@ -564,7 +564,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": true|false` #245, `"window_edit": true` #243, `"allow_desktop": true|false` #244) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -572,9 +572,9 @@ up the contract:
 | POST | `/mcp/flush` | discard a terminal's unread queued input (`readwrite` only) |
 | POST | `/mcp/pace` | set a terminal's default send_keys pacing (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
-| POST | `/mcp/launch` | spawn a new terminal from a profile |
-| POST | `/mcp/window` | set a window's scope/mode via launch handle or admin (#243) |
-| POST | `/mcp/knobs` | set broker-wide knobs (admin credential, #245) |
+| POST | `/mcp/launch` | spawn a new terminal from a profile (every launch mints an ownership `handle`, #243) |
+| POST | `/mcp/window` | set a window's `scope`/`mode` with its launch `handle`, or any window with the admin credential #245 (#243) |
+| POST | `/mcp/knobs` | admin-only: set broker-wide knobs (`default_mode`/`allow_launch`/`allow_desktop`) #245 |
 | GET | `/mcp/desktop` | read the lease-holding browser's desktop snapshot (#244) |
 | POST | `/mcp/desktop` | relay one desktop op to the lease-holding browser (#244) |
 
@@ -1056,9 +1056,9 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 `?token=`.
 
 **`GET /mcp/config`** →
-`{"ok":true,"enabled":false,"token":"","admin_token":"","default_mode":"off",
-"allow_launch":false,"token_env_pinned":false,"admin_token_env_pinned":false,
-"known_scopes":[],"python":"/usr/bin/python3",
+`{"ok":true,"enabled":false,"token":"","admin_token":"","admin_token_env_pinned":false,
+"default_mode":"off","allow_launch":false,"allow_desktop":false,
+"token_env_pinned":false,"known_scopes":[],"python":"/usr/bin/python3",
 "pythonpath":"/opt/browserland","local_url":"http://127.0.0.1:4445"}` (`token`
 and `admin_token` are the live secrets, `""` when unset). `admin_token` (#245)
 is the MCP admin credential, shown to the browser-token holder like `token`
