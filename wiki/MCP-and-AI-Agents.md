@@ -12,6 +12,8 @@ The agent can only see and touch the terminals you allow. There are three layers
 2. **Per-window access** — `off`, `read`, or `readwrite` — set on each terminal.
 3. A separate gate for whether the agent may **launch new terminals**.
 
+On top of those sits an optional **admin credential** (a fourth, separate secret): an agent that holds it can manage every window and the broker-wide knobs on your behalf. See **The admin credential** below.
+
 ## Per-window access (the robot button)
 
 Every terminal window has a **robot button** that sets that window's MCP access for agents:
@@ -24,7 +26,7 @@ Every terminal window has a **robot button** that sets that window's MCP access 
 
 When an agent reads the screen or types into a terminal, that window's **robot icon briefly flashes**, so you can see at a glance when a harness is touching a session.
 
-You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below), except a window a scoped MCP client launches: that one starts in **Read-write** unless the launch asks for another mode. A mode set on a window is stored by the broker and kept across broker restarts (see **Scopes** below).
+You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below) — except a window an MCP client launches, scoped or not: that one starts in **Read-write** unless the launch asks for another mode (a worker its launcher can't drive is useless). A mode set on a window is stored by the broker and kept across broker restarts (see **Scopes** below).
 
 On a broker that supports scopes, the robot button also holds the window's **scope**: see **Scopes** below.
 
@@ -35,7 +37,7 @@ The robot button is specific to **terminals**. For the full list of window types
 MCP is configured per host in **Control Panel → Access → MCP access**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
-- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window a scoped MCP client launches starts in `readwrite` instead, unless the launch passes a `mode`, and a mode set on a window is kept across broker restarts (see **Scopes**).
+- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window an MCP client launches starts in `readwrite` instead — scoped or not, unless the launch passes a `mode` — and a mode set on a window is kept across broker restarts (see **Scopes**).
 - **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones).
 - **token** — a secret that authenticates the agent (set it yourself or hit **generate**). This is a **bearer secret distinct from the browser/UI password** you use to log in; granting MCP access does not hand out your login.
 
@@ -48,11 +50,25 @@ The in-app guide also shows a live **MCP status (this host)** entry — whether 
 Access is layered and **off by default** — you opt in at every level:
 
 - **Master enable is OFF by default.** While it is off, every MCP call returns `403 mcp_disabled`.
-- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows (a scoped MCP launch starts in `readwrite` unless it passes a `mode`, and a mode set on a window survives broker restarts). `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
+- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows (an MCP-launched window — scoped or not — starts in `readwrite` unless the launch passes a `mode`, and a mode set on a window survives broker restarts). `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
 - **`allow_launch`** is a separate gate — turning MCP on does not, by itself, let agents spawn terminals.
 - **The MCP token** is a separate bearer secret from your browser auth/UI password.
 
 The agents are just producers; the broker stays the sole authority and gates every call by these rules.
+
+## The admin credential
+
+Sometimes you want one designated agent to manage the whole desktop on your behalf: see every window whatever its scope, retag and re-mode any of them, arrange the desktop, and adjust the broker-wide knobs. That agent holds the **admin credential** — a second secret, minted by the broker, entirely separate from the MCP token. It is **off by default**: with no admin token configured there is no MCP admin at all, and a client that sends the admin header anyway is simply a non-admin.
+
+- **Minting it.** Control Panel → Access → MCP access has an **admin token** field with **generate** and **clear** buttons. **generate** mints a fresh `token_urlsafe(32)` secret — pressing it over an existing token *is* the rotate (the old value stops working immediately). **clear** removes the credential (the field sends an explicit `admin_token: null`). The field shows the live value, so you can copy it into an agent's config.
+- **Pinning it.** The env var **`WEB_TERMINAL_MCP_ADMIN_TOKEN`** pins the admin token the way `WEB_TERMINAL_MCP_TOKEN` pins the token: it wins over the sidecar, is never written to disk, and the Control Panel's field, generate and clear are disabled with a `set by WEB_TERMINAL_MCP_ADMIN_TOKEN (env)` placeholder.
+- **The wire.** The agent sends it as the **`X-Browserland-Mcp-Admin`** header — **in addition to** the normal MCP token, never instead of it (the MCP token still authenticates every call). A credential passed in the URL query string is refused outright, even when the header is also correct, following the same rule as the browser admin token.
+- **The refusal ladder.** Every `/mcp/*` request is checked in a fixed order: `mcp_disabled` (403), the MCP token (401 `auth_required`), the scope grammar (400 `bad_scope`), and only then the admin header: present but wrong → **403 `admin_required`** (the route and the caller's address are logged, never the header value); absent → a plain non-admin call. An admin-only operation called without admin also answers `403 admin_required`. So a caller without the MCP token cannot even probe whether admin exists.
+- **What an admin can do.** List every window — including `off` windows and windows in other scopes — with each window's raw scope and mode (reads and typing still require the window's own mode, so an admin drives an `off` window by first setting it to `read`/`readwrite`; that change is deliberate and visible in the UI). Set any window's scope and MCP mode (`POST /mcp/window`, no launch handle needed). Arrange windows and manage workspaces when the desktop relay is on (see **Arranging the desktop**). Change the broker-wide knobs `default_mode`, `allow_launch` and `allow_desktop` over MCP (`POST /mcp/knobs`). An admin that also declares a scope keeps all of this: the scope is ignored for visibility and reach, and only tags the windows the admin itself launches.
+- **What an admin can never do.** Change the MCP token, the admin token, or the `enabled` switch — rotating a credential or disabling MCP could lock out every agent, the admin included, so those stay in the browser (the root of trust). An MCP admin also gets none of the browser admin routes (mod install/update/restart): that is a different credential for a different surface.
+- **The badge.** A window an admin agent launched, or whose scope/mode an admin last set over MCP, shows a small amber **admin** badge beside the scope badge on its taskbar chip, and its tooltip says *Set by an MCP admin agent*. It is provenance, not live control, and any edit you make in the browser (the window's MCP menu) clears it.
+- **In `.mcp.json`.** The MCP server takes a per-host `"admin_token"` (or `--admin-token` / `BROWSERLAND_MCP_ADMIN_TOKEN`), and **Copy .mcp.json** has an **Include the admin token in .mcp.json** checkbox that adds it to the copied file — the checkbox stays off while no admin token exists. At startup the server probes each admin host's `/mcp/info`: the admin-only tools are hidden unless the broker answers `admin: true`, and per host they refuse locally rather than send a doomed request. If you rotate the token in the Control Panel, a running server's calls fail loudly with the remedy (refresh its config and restart it) — never silently.
+- **Known limit.** An agent running as the same OS user as the admin agent can read the admin agent's `.mcp.json`, and with it the admin token. The admin token separates *well-behaved* agents; it is not a sandbox.
 
 ## Scopes
 
@@ -84,7 +100,7 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | Tool | What it does |
 |---|---|
 | `mcp_info(host?)` | Reports feature flags (`allow_launch`, `default_mode`) |
-| `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode, scope); a scoped server lists only its scope's windows |
+| `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode, scope); a scoped server lists only its scope's windows, and each row it can still manage with `set_window` is marked `owned: true` |
 | `list_profiles(host?)` | Lists launchable profile names and the default |
 | `read_screen(id, …)` | Returns the terminal's screen. Far more than a bounded grid: `view="scrollback"` and `lines` widen what is returned, `since` returns only what is new, `attrs` adds styling runs, and it can **wait** rather than poll — `wait_for_change`, `wait_for_text`, `wait_for_regex`, `wait_absent`, `wait_for_idle` |
 | `send_input(id, data)` | Types text into a window (window must be `readwrite`; newlines are sent as Enter) |
@@ -92,11 +108,37 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `set_pace(id, pace_ms)` | Sets a per-terminal default inter-key pacing for `send_keys` (window must be `readwrite`; ephemeral, `0` disables, capped at 1000 ms) |
 | `reset_terminal(id)` | Wipes Browserland's screen buffer for the window so the next `read_screen` starts clean (window must be `readwrite`; does not touch the running app) |
 | `flush_input(id)` | Discards keystrokes queued to the app but not yet consumed (window must be `readwrite`; a no-op on a Windows/ConPTY agent) |
-| `launch_terminal(profile?, cols, rows, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled). A scoped server's launch is tagged with its scope and starts in `readwrite`, or in `mode` when given |
+| `launch_terminal(profile?, cols, rows, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled). Every launch comes up in `readwrite`, or in `mode` when given — scoped or not; a scoped launch is tagged with its scope; the answer includes a launch `handle` (see **Launch handles**) |
+| `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | Changes the scope and/or MCP mode of a window this server launched (`owned: true`), or — on a host with an admin credential — of any window. Keep / set / clear per field: a value sets it, a `clear_*` flag resets it, an omitted field is left alone |
+| `get_desktop(host?)` | Reads a browser desktop: every window's layout, the viewport, the workspaces when the mod is on. Needs `allow_desktop`; without `host`, one snapshot (or error entry) per configured host |
+| `arrange_window(id, op, …)` | Focus, move column, set width, tile/float, set floating geometry, tab into, split — on the lease-holding browser. Needs `allow_desktop`; a non-admin may arrange only windows it can see |
+| `workspaces(host, op, …)` | **Admin only.** List/add/rename/remove/switch/send-window over the desktop's workspaces. Needs `allow_desktop` too |
 
 ### Window ids
 
 Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`. The host part matches the name of the host the terminal belongs to, so one MCP server can front several brokers at once. See [[Hosts-and-Multi-Browser]] for how hosts are named.
+
+## Launch handles
+
+An agent that launches terminals gets a say in how they are exposed afterwards — including an **unscoped** agent, which previously could only watch its windows inherit the default mode. The rule is "the terminals *it* launched":
+
+- **Every launch mints a handle.** Each `launch_terminal` answer carries a `handle` — an opaque secret minted for that launch. The broker stores only its SHA-256 hash (in `webterm_mcp_windows.json`, as the row's `owner`); the handle itself lives only in the answer.
+- **What the owner can do.** `set_window(id, …)` presents the handle and sets the window's scope and/or MCP mode — it can set its own window to `off` and back, or to a foreign scope and back (the handle deliberately bypasses the off/out-of-scope filter, or an owner could never undo a change). Fields follow keep / set / clear semantics: a value sets it, a `clear_scope`/`clear_mode` flag resets it to untagged / the broker default, and a field you leave out is left alone.
+- **The browser wins.** Any edit you make in the browser (the window's MCP menu, `POST /session/mcp`) clears the row's owner — once you have set a window by hand, the agent that launched it cannot change it back. A relaunch that reuses a window id starts clean too: ownership never carries over to a different process.
+- **Seeing which are yours.** `list_terminals` marks the windows the MCP server holds handles for as `owned: true` — exactly the ones `set_window` can still manage.
+- **Restart loses handles.** The MCP server keeps handles in memory only (a bounded set; the oldest are forgotten). If it restarts — a Claude session ends and a new one begins — the new process holds no handles for the old windows. Recovery is by design: the **admin credential** can set any window's scope/mode without a handle, and you can always set it in the browser.
+
+## Arranging the desktop
+
+An agent that can see your terminals can also, if you allow it, arrange the desktop they sit on: read where every window is, move and resize them, and manage workspaces — so an agent that launches several workers can lay them out itself instead of leaving you to do it by hand. This is off by default and gated by its own switch:
+
+- **Allow MCP to arrange the desktop** (Control Panel → Access → MCP access, or `allow_desktop`) is the **master switch** for the whole relay — window arranging *and* workspace management, for every agent including admin ones. An admin can flip it through `set_mcp_knobs`; nobody can arrange while it is off.
+- The ops go to the **browser that holds the control lease**: the desktop you are looking at. No browser active → the op fails at once (`no_active_browser`); ops are never queued. A browser that loses the lease mid-op answers `lost_lease` with nothing half-applied, and a browser that does not answer in time is a `desktop_timeout`.
+- **Reading.** `get_desktop` returns a snapshot of that desktop: every window with its column/row or floating box, the viewport, the focused column, and the workspaces when the workspaces mod is on. Floating geometry is **as that browser sees it** — pixel geometry is per-browser state, never stored on the broker. Without a `host`, `get_desktop` asks every configured host and returns one snapshot per host (a host whose relay is off, or with no active browser, contributes an error entry instead of sinking the call); with `host`, it returns that one snapshot or raises.
+- **Arranging.** `arrange_window(id, op, …)` focuses a window, moves its column (`to` = left/right, or an absolute column index — an index move **expels a shared window into its own column first**, exactly like dragging it), sets the column width preset, tiles/floats it, sets a floating window's geometry (clamped to the viewport; the answer reports the box **as applied**, honouring size locks), tabs it into another window's tile, or splits below/beside a target.
+- **Only what it can see.** A non-admin agent may arrange **only the windows it can see** — and an op is refused with the same not-found answer as a missing id when it would reshape a window that is invisible to the caller (an `off` window, or another scope's window sharing the column being moved or resized). Nothing is probeable: the refusal is byte-identical either way. An admin is unrestricted.
+- **Workspaces are admin-only.** Listing, adding, renaming, removing, switching and send-window-to-workspace (`workspaces(host, op, …)`) span the whole desktop — every window, whatever its scope — so they need the admin credential as well as the switch. With the workspaces mod off the ops answer `absent`/`inactive` instead of silently doing nothing; removing a non-empty workspace answers `needs_confirm` with the window count unless `force: true` is passed, which moves its windows to the adjacent workspace — **no dialog is ever shown in the browser for an MCP op** — and the last workspace is always refused. See [[Workspaces]].
+- **Whose desktop.** Window placement is per-browser render, so any lease-holding browser can arrange. Workspace data belongs to a browser's **home** broker: a workspace op arriving through any other broker's relay answers `not_home` (the snapshot's `home` flag tells the agent which screen it is arranging).
 
 <!-- help:ignore-start -->
 <!-- External-link cross-nav (README / TECHNICAL / mcptool) — not useful inside
