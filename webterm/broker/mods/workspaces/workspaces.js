@@ -337,6 +337,21 @@
             function workspaceIndexById(id) {
                 return wsList().findIndex(function (w) { return w.id === id; });
             }
+            // #244: LIVE windows on a workspace -- the count a needs_confirm
+            // answer carries and an MCP remove reports as moved. Dormant
+            // layout keys still re-stamp with their column, but a key with
+            // no live window is not a window the user would be confirming
+            // about.
+            function wsLiveWindowCount(wsId) {
+                let n = floatingOnWs(wsId).length;
+                for (const col of workspaceColumns(wsId)) {
+                    for (const k of columnKeys(col)) {
+                        const w = windows.get(k);
+                        if (w && !w.disposed) n += 1;
+                    }
+                }
+                return n;
+            }
 
             // ---- workspace labels + the pager dots ----------------------------
             function wsLabel(ws, i) {
@@ -426,6 +441,72 @@
                 renderWorkspaces();
                 applyTaskbarWorkspace();
             }
+            // ---- prompt-free primitives (#244) ------------------------------
+            // The UI closures (prompt/confirm first) and the MCP commands
+            // (args first) call the SAME primitives, so the two paths cannot
+            // drift. Each primitive re-acquires the store and re-locates its
+            // workspace BY ID at run time -- a poll adopt can replace
+            // prefs._layout wholesale between one path's await and the call.
+            // renameWorkspaceById: name is the RAW value (blank clears);
+            // returns false when the id is gone.
+            function renameWorkspaceById(id, name) {
+                const ws2 = wsList().find(w => w.id === id);
+                if (!ws2) return false;
+                const t = String(name).trim();
+                if (t) {
+                    ws2.name = t.slice(0, 40);
+                    setWsLabelModeValue('name');          // naming implies showing names
+                } else {
+                    delete ws2.name;
+                }
+                savePrefs();
+                renderWorkspaces();
+                applyTaskbarWorkspace();
+                return true;
+            }
+            // addWorkspaceNamed: push (optionally named), persist, render and
+            // SWITCH -- addWorkspace's whole behaviour, minus the prompt
+            // neither path here has. Name must already be valid (or null).
+            function addWorkspaceNamed(name) {
+                const st = wsStore();
+                const entry = { id: mintLayoutId(), focusedCol: 0 };
+                if (typeof name === 'string' && name.trim()) {
+                    entry.name = name.trim().slice(0, 40);
+                }
+                st.list.push(entry);
+                savePrefs();
+                renderWorkspaces();               // new dot shows even before switch
+                switchWorkspace(st.list.length - 1);
+                return entry;
+            }
+            // removeWorkspaceById: the post-confirmation body verbatim --
+            // re-stamp the victim's columns onto the neighbour (the columns
+            // themselves never move, so no window can be lost), re-home its
+            // floats, splice, heal activeId. {refused:'last'} | null (gone) |
+            // {removed:true}.
+            function removeWorkspaceById(id) {
+                const st = wsStore();
+                if (st.list.length <= 1) return { refused: 'last' };
+                const vi = workspaceIndexById(id);
+                if (vi < 0) return null;
+                const neighbor = st.list[(vi > 0) ? vi - 1 : 1];
+                if (!neighbor) return null;
+                for (const col of workspaceColumns(id)) col.wsId = neighbor.id;
+                reassignFloatingWs(id, neighbor.id);
+                const wasActive = (st.activeId === id);
+                st.list.splice(vi, 1);
+                if (wasActive) {
+                    st.activeId = neighbor.id;
+                    applyWorkspaceView();
+                }
+                savePrefs();
+                renderWorkspaces();
+                relayoutStrip();
+                applyWorkspaceVisibility();
+                applyTaskbarWorkspace();
+                updateTaskbarActive();
+                return { removed: true };
+            }
             async function renameWorkspace(i) {
                 const ws = wsList()[i];
                 if (!ws) return;
@@ -439,18 +520,7 @@
                 if (name === null) return;          // cancelled
                 // A state-sync poll-adopt during the await can swap prefs._layout
                 // wholesale, so re-find the live workspace by id before mutating it.
-                const ws2 = wsList().find(w => w.id === ws.id);
-                if (!ws2) return;
-                const t = name.trim();
-                if (t) {
-                    ws2.name = t.slice(0, 40);
-                    setWsLabelModeValue('name');          // naming implies showing names
-                } else {
-                    delete ws2.name;
-                }
-                savePrefs();
-                renderWorkspaces();
-                applyTaskbarWorkspace();
+                renameWorkspaceById(ws.id, name);
             }
             async function removeWorkspace(i) {
                 if (wsList().length <= 1) {
@@ -472,30 +542,9 @@
                     if (!ok) return;
                 }
                 // A state-sync poll-adopt during the await can replace prefs._layout
-                // wholesale, so the captured list / index go stale. Re-acquire and
-                // re-locate the victim by id before mutating.
-                const st = wsStore();
-                if (st.list.length <= 1) return;
-                const vi = workspaceIndexById(victim.id);
-                if (vi < 0) return;
-                const neighbor = st.list[(vi > 0) ? vi - 1 : 1];
-                if (!neighbor) return;
-                // Re-stamp the victim's columns onto the neighbour — the columns
-                // themselves never move, so no window can be lost here.
-                for (const col of workspaceColumns(victim.id)) col.wsId = neighbor.id;
-                reassignFloatingWs(victim.id, neighbor.id);
-                const wasActive = (st.activeId === victim.id);
-                st.list.splice(vi, 1);
-                if (wasActive) {
-                    st.activeId = neighbor.id;
-                    applyWorkspaceView();
-                }
-                savePrefs();
-                renderWorkspaces();
-                relayoutStrip();
-                applyWorkspaceVisibility();
-                applyTaskbarWorkspace();
-                updateTaskbarActive();
+                // wholesale, so the captured list / index go stale. The primitive
+                // re-acquires and re-locates the victim by id.
+                removeWorkspaceById(victim.id);
             }
             // ---- workspace preview popover (task 19) --------------------------
             let _wsPreviewEl = null;
@@ -938,11 +987,7 @@
                 }
             }
             function addWorkspace() {
-                const st = wsStore();
-                st.list.push({ id: mintLayoutId(), focusedCol: 0 });
-                savePrefs();
-                renderWorkspaces();               // new dot shows even before switch
-                switchWorkspace(st.list.length - 1);
+                return addWorkspaceNamed(null);
             }
             // Move a tiled window to another workspace. Its column is RE-STAMPED
             // (and moved beside that workspace's other columns so the strip and the
@@ -1191,6 +1236,116 @@
                     { id: 'workspace-5',     label: 'Go to workspace 5',
                       run: () => switchWorkspace(4) },
                 ]);
+
+                // ---- MCP desktop commands (#244) --------------------------
+                // Thin wrappers over the primitives above, dispatched by the
+                // /control desktop relay through ctx.commands.execute (86h).
+                // Command VALUES carry data or a {refusal}; the relay maps
+                // refusals onto the wire's error codes (needs_confirm keeps
+                // its window count, last_workspace refuses, bad_args is a
+                // validation failure) -- execute()'s own four-word vocabulary
+                // stays clean. Workspace ops are admin-only at the BROKER;
+                // nothing here knows credentials. remove NEVER opens a
+                // dialog (owner decision: force moves the windows to the
+                // adjacent workspace, exactly as the UI dialog says).
+                if (ctx.commands && typeof ctx.commands.register === 'function') {
+                    ctx.commands.register('list', { run: function () {
+                        const st = wsStore();
+                        const items = wsList().map(function (w, i) {
+                            return { index: i, id: w.id,
+                                     name: (typeof w.name === 'string')
+                                         ? w.name : null };
+                        });
+                        // colId -> wsId (healed: unstamped/dangling read as
+                        // the active workspace, the same rule the filter
+                        // applies) and the browser-local float map, both for
+                        // the relay's get-snapshot decoration. Additive: a
+                        // consumer that ignores them is unaffected.
+                        const columnWs = {};
+                        for (const col of getLayout().columns) {
+                            columnWs[col.id] = columnWsId(col, st);
+                        }
+                        return { active: activeWorkspaceIndex(), items: items,
+                                 columnWs: columnWs, floatWs: floatWsMap() };
+                    } });
+                    ctx.commands.register('add', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (a.name !== undefined && a.name !== null) {
+                            if (typeof a.name !== 'string' || !a.name.trim()
+                                    || a.name.trim().length > 40) {
+                                return { refusal: 'bad_args' };
+                            }
+                        }
+                        const entry = addWorkspaceNamed(
+                            (typeof a.name === 'string') ? a.name : null);
+                        return { index: wsList().length - 1, id: entry.id };
+                    } });
+                    ctx.commands.register('rename', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (!Number.isInteger(a.index) || a.index < 0
+                                || a.index >= wsList().length
+                                || typeof a.name !== 'string') {
+                            return { refusal: 'bad_args' };
+                        }
+                        const victim = wsList()[a.index];
+                        if (!victim) return { refusal: 'unknown_window' };
+                        return renameWorkspaceById(victim.id, a.name)
+                            ? { renamed: true }
+                            : { refusal: 'unknown_window' };
+                    } });
+                    ctx.commands.register('remove', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (!Number.isInteger(a.index) || a.index < 0
+                                || a.index >= wsList().length) {
+                            return { refusal: 'bad_args' };
+                        }
+                        if (wsList().length <= 1) {
+                            return { refusal: 'last_workspace' };
+                        }
+                        const victim = wsList()[a.index];
+                        const count = wsLiveWindowCount(victim.id);
+                        if (count > 0 && a.force !== true) {
+                            return { refusal: 'needs_confirm', windows: count };
+                        }
+                        const r = removeWorkspaceById(victim.id);
+                        if (!r) return { refusal: 'unknown_window' };
+                        if (r.refused === 'last') {
+                            return { refusal: 'last_workspace' };
+                        }
+                        return { removed: true, moved: count };
+                    } });
+                    ctx.commands.register('switch', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (!Number.isInteger(a.index) || a.index < 0
+                                || a.index >= wsList().length) {
+                            return { refusal: 'bad_args' };
+                        }
+                        switchWorkspace(a.index);
+                        return { active: a.index };
+                    } });
+                    ctx.commands.register('send-window', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        const win = windows.get(a.key);
+                        if (!win || win.disposed) {
+                            return { refusal: 'unknown_window' };
+                        }
+                        if (!Number.isInteger(a.target) || a.target < 0
+                                || a.target >= wsList().length) {
+                            return { refusal: 'bad_args' };
+                        }
+                        sendWindowToWorkspace(win, a.target);
+                        return { moved: true };
+                    } });
+                } else {
+                    // Same-bundle ctx.commands is a guarantee (86h registers
+                    // it unconditionally); reaching here means a broken
+                    // build, and silence would read as "MCP workspaces are
+                    // just absent" -- say so once, loudly.
+                    try {
+                        console.warn('[workspaces] ctx.commands missing -- '
+                            + 'MCP desktop surface unavailable');
+                    } catch (_) {}
+                }
 
                 // ---- teardown ---------------------------------------------
                 // Dropping the filter is what un-hides everything (ctx's

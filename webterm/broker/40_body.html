@@ -288,6 +288,30 @@
                         </select></div>
                     <label class="set-check"><input type="checkbox" id="set-mcp-allow-launch" />
                         Allow MCP to launch terminals</label>
+                    <!-- #244: the master switch for the desktop relay (window
+                         arranging + workspaces over MCP). -->
+                    <label class="set-check"><input type="checkbox" id="set-mcp-allow-desktop" />
+                        Allow MCP to arrange the desktop</label>
+                    <div class="set-hint">One master switch for the desktop relay;
+                        managing workspaces also needs the admin token.</div>
+                    <!-- #245: a separate server-minted admin credential. It
+                         rides IN ADDITION to the token, never instead; it is
+                         NOT the #191 broker admin token (mod install/update
+                         stay browser-only). -->
+                    <div class="set-row"><label>admin token</label>
+                        <input type="text" id="set-mcp-admin-token" class="masked-secret"
+                               placeholder="(none — no MCP admin)" autocomplete="off"
+                               spellcheck="false" />
+                        <button type="button" id="set-mcp-admin-generate">generate</button>
+                        <button type="button" id="set-mcp-admin-clear">clear</button></div>
+                    <div class="set-hint">an MCP admin agent sees and arranges
+                        every window, manages workspaces, and sets
+                        <code>default_mode</code> / launch / desktop flags
+                        through MCP — but can never change the tokens or
+                        disable MCP: the browser stays the root of trust.
+                        Known limit: an agent running as the same OS user can
+                        read this token from a copied file; it separates
+                        well-behaved agents, it is not a sandbox.</div>
                     <div class="set-hint">lets an external MCP server read (and,
                         per-window, type into) your terminals. Requires a token AND
                         the enable box; new windows start in "default mode" (one a
@@ -296,7 +320,11 @@
                         window's mode is overridable from its title-bar menu. Connect
                         URL: <code id="set-mcp-url">&mdash;</code></div>
                     <!-- #235: a ready-to-save .mcp.json for one MCP client
-                         folder, optionally limited to one scope. -->
+                         folder, optionally limited to one scope. #245: the
+                         Admin checkbox adds this host's admin token to the
+                         file. -->
+                    <label class="set-check"><input type="checkbox" id="set-mcp-copy-admin" />
+                        Include the admin token in .mcp.json</label>
                     <div class="set-row"><label>scope</label>
                         <input type="text" id="set-mcp-scope" class="mcp-scope-input" maxlength="64"
                                placeholder="(none: sees everything)"
@@ -308,7 +336,8 @@
                         folder; with a scope, the MCP client started from that folder
                         sees only the windows tagged with it. The file contains the
                         MCP token, a bearer secret: keep <code>.mcp.json</code> out of
-                        git. Its <code>command</code>, <code>PYTHONPATH</code> and
+                        git — with Admin checked it contains the admin token too.
+                        Its <code>command</code>, <code>PYTHONPATH</code> and
                         <code>url</code> are this broker's own; edit them for a client
                         on another machine.</div>
                 </div>
