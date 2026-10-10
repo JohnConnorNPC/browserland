@@ -46,8 +46,10 @@ story behind anything named below.
   server's new `set_window` tool uses keep/set/clear field semantics, keeps
   handles in memory (lost on its restart — the admin credential or the browser
   recovers the window), and fails closed on brokers without `window_edit`.
-  A launch colliding with a long-dead stored row now deletes just that row and
-  retries once on a fresh id.
+  A launch whose id collides with a stored row retries once on a fresh id,
+  deleting the collided row only when it is a pre-spawn orphan or older than
+  the 7-day prune age — a row a reconnecting producer could still claim is
+  never touched.
   **Behaviour change:** an unscoped `/mcp/launch` with no `mode` now comes up
   in `readwrite` instead of inheriting `default_mode` — every MCP launch does,
   scoped or not (a launched worker its launcher cannot drive is useless).
