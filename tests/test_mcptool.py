@@ -56,6 +56,10 @@ def _reset_server():
         c.close()
     server._host_configs = {}
     server._clients = {}
+    # Cross-config state the _install() injections bypass configure() for:
+    # cleared here the way a real configure() would clear them.
+    server._handles.clear()
+    server._admin_hosts.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -1853,7 +1857,8 @@ async def test_tools_registered():
     names = sorted(t.name for t in tools)
     assert names == ["flush_input", "launch_terminal", "list_profiles",
                      "list_terminals", "mcp_info", "read_screen",
-                     "reset_terminal", "send_input", "send_keys", "set_pace"]
+                     "reset_terminal", "send_input", "send_keys", "set_pace",
+                     "set_window"]
 
 
 def test_tools_round_trip_through_http():
@@ -2252,3 +2257,245 @@ def test_get_client_carries_the_hosts_admin_token():
     finally:
         server._host_configs.pop("legacy", None)
         server.configure([])
+
+
+# ---- #243/#244/#245: a mock broker for the capability-gated tool cells ----
+
+class _ToolBroker:
+    """MockTransport broker for the #243/#245/#244 tool cells. /mcp/info
+    answers the ``caps`` dict (default: every capability on); /mcp/launch
+    answers ``launch`` (default: an id + handle); /mcp/terminals answers
+    ``terminals``; everything else answers ``{"ok": True}``. ``responses``
+    maps a path to a ``request -> httpx.Response`` callable for bespoke
+    cells; ``faults`` works like _ScopeBroker's (a queue consumed one entry
+    per request to that path: None = answer normally, an httpx exception
+    class = raise, an httpx.Response = return). Every request is recorded."""
+
+    ALL_CAPS = {"admin": True, "window_edit": True, "allow_desktop": True}
+
+    def __init__(self, caps=None, launch=None, terminals=(), responses=None,
+                 faults=None):
+        self.caps = dict(self.ALL_CAPS) if caps is None else dict(caps)
+        self.launch = launch if launch is not None else {
+            "ok": True, "id": 7, "handle": "hh"}
+        self.terminals = list(terminals)
+        self.responses = responses or {}
+        self.faults = faults or {}
+        self.requests = []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        path = request.url.path
+        queue = self.faults.get(path)
+        fault = queue.pop(0) if queue else None
+        if isinstance(fault, httpx.Response):
+            return fault
+        if fault is not None:
+            raise fault("injected", request=request)
+        custom = self.responses.get(path)
+        if custom is not None:
+            return custom(request)
+        if path == "/mcp/info":
+            return httpx.Response(200, json=dict({"ok": True}, **self.caps))
+        if path == "/mcp/launch":
+            return httpx.Response(200, json=self.launch)
+        if path == "/mcp/terminals":
+            return httpx.Response(200, json=self.terminals)
+        return httpx.Response(200, json={"ok": True})
+
+    def count(self, path):
+        return sum(1 for r in self.requests if r.url.path == path)
+
+    def bodies(self, path):
+        return [json.loads(r.content) for r in self.requests
+                if r.url.path == path]
+
+
+# ---- #243 D2: launch handles, owned: true, set_window ----------------------
+
+def test_launch_stores_handle_and_list_marks_owned():
+    """#243: launch_terminal keeps the broker's handle keyed by the
+    namespaced id, and list_terminals marks exactly those rows ``owned:
+    true`` (a key only the handle-holders get, so a caller can tell which
+    windows set_window can still manage)."""
+    def handler(req):
+        if req.url.path == "/mcp/terminals":
+            return httpx.Response(200, json=[{"id": 7, "mode": "readwrite"},
+                                             {"id": 8, "mode": "read"}])
+        if req.url.path == "/mcp/launch":
+            return httpx.Response(200, json={"ok": True, "id": 7,
+                                             "handle": "h-7"})
+        return httpx.Response(200, json={"ok": True})
+
+    server = _install({"h": handler})
+    try:
+        out = server.launch_terminal()
+        listing = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["id"] == "h:7" and out["handle"] == "h-7"
+    owned = {t["id"]: t.get("owned") for t in listing["terminals"]}
+    assert owned == {"h:7": True, "h:8": None}
+
+
+def test_set_window_sends_handle_with_set_and_clear_semantics():
+    """#243: the tool composes the wire body from keep|set|clear semantics —
+    a non-empty string SETS the field, a clear_* flag sends an explicit
+    null, a key left empty+unflagged is absent from the body (the broker
+    keeps the field) — and the stored handle rides every call. A call with
+    nothing to change is a LOCAL refusal (no request)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()                     # mints + stores "hh"
+        server.set_window("h:7", scope="teamA")
+        server.set_window("h:7", clear_mode=True)
+        server.set_window("h:7", mode="read", clear_scope=True)
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7")
+    finally:
+        _reset_server()
+    assert broker.bodies("/mcp/window") == [
+        {"id": 7, "handle": "hh", "scope": "teamA"},
+        {"id": 7, "handle": "hh", "mode": None},
+        {"id": 7, "handle": "hh", "scope": None, "mode": "read"},
+    ]
+    assert ei.value.code == "bad_args"
+
+
+def test_set_window_without_handle_refuses_locally_and_sends_nothing():
+    """#243: no stored handle and no confirmed admin credential for the host
+    — the tool refuses locally (no_handle) and the broker sees NOTHING, not
+    even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:999", scope="x")
+    finally:
+        _reset_server()
+    assert ei.value.code == "no_handle"
+    assert broker.requests == []
+
+
+def test_set_window_fails_closed_without_window_edit_flag():
+    """#243: a broker whose /mcp/info does not advertise window_edit (an
+    older build) never sees a /mcp/window request: the owner path fails
+    closed after exactly one capability fetch."""
+    broker = _ToolBroker(caps={"admin": False, "window_edit": False,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()                     # handle stored
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "window_edit_unsupported"
+    assert broker.count("/mcp/info") == 1
+    assert broker.count("/mcp/window") == 0
+
+
+def test_set_window_admin_path_without_admin_flag_refuses():
+    """#245: on a host marked admin-capable at startup, the no-handle path
+    still fails closed when the broker's /mcp/info no longer answers
+    admin: true (a rotated credential): local refusal, nothing sent."""
+    broker = _ToolBroker(caps={"admin": False, "window_edit": True,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")       # what D3's startup probe would set
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_unsupported"
+    assert broker.count("/mcp/window") == 0
+
+
+def test_handles_lru_bounded_not_pruned_by_listing():
+    """#243: the handle store is an LRU bounded at 256 — a listing that HIDES
+    a window (off windows never arrive in /mcp/terminals) must not prune its
+    handle (it is the recovery path), while 256 newer handles evict the
+    OLDEST, whose set_window then refuses locally."""
+    state = {"next": 0}
+    broker = _ToolBroker(terminals=[{"id": 999, "mode": "read"}])
+
+    def launch(req):
+        state["next"] += 1
+        return httpx.Response(200, json={"ok": True, "id": state["next"],
+                                         "handle": f"h{state['next']}"})
+
+    broker.responses["/mcp/launch"] = launch
+    server = _install({"h": broker})
+    try:
+        first = server.launch_terminal()             # h:1, the eviction victim
+        for _ in range(server._HANDLES_MAX):         # 256 newer handles
+            server.launch_terminal()
+        assert first["id"] == "h:1"
+        server.list_terminals()                      # shows only 999
+        # h:2's handle survived a listing that hides it
+        server.set_window("h:2", mode="read")
+        assert broker.bodies("/mcp/window")[-1] == {
+            "id": 2, "handle": "h2", "mode": "read"}
+        # the OLDEST handle was evicted by the 256 newer ones
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:1", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "no_handle"
+
+
+def test_caps_are_forgotten_when_the_broker_goes_away():
+    """#243: the capability cache follows the scope cache's rule — a failure
+    that can mean 'the broker behind this URL went away' (connection_error)
+    forgets it, so the next call re-probes /mcp/info instead of trusting
+    flags from the previous build."""
+    phase = {"info": 0}
+
+    def info(req):
+        phase["info"] += 1
+        if phase["info"] == 1:
+            return httpx.Response(200, json={"ok": True,
+                                             "window_edit": True})
+        return httpx.Response(200, json={"ok": True})   # no window_edit
+
+    broker = _ToolBroker(responses={"/mcp/info": info},
+                         faults={"/mcp/input": [httpx.ConnectError]})
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()
+        server.set_window("h:7", mode="read")         # caches caps (v1)
+        assert broker.count("/mcp/info") == 1
+        with pytest.raises(BrowserlandError) as gone:
+            server.send_input("h:7", "x")
+        assert gone.value.code == "connection_error"
+        assert broker.count("/mcp/info") == 1         # not yet re-probed
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")     # re-probes: caps v2
+    finally:
+        _reset_server()
+    assert ei.value.code == "window_edit_unsupported"
+    assert broker.count("/mcp/info") == 2
+    assert broker.count("/mcp/window") == 1           # only the v1 send
+
+
+def test_configure_clears_handles_admin_and_caps():
+    """#243/#245: configure() clears the handle store and the admin-host set
+    atomically with the rebuild (host names are reusable; a stale
+    'host:id' handle must not survive a re-pointed host), and the
+    capability caches die with the closed clients."""
+    from webterm.mcptool import server
+    server.configure([("h", "http://h:4445", "t", None)])
+    try:
+        old_client = server._get_client("h")
+        server._handle_remember("h:7", "stale")
+        server._admin_hosts.add("h")
+        server.configure([("h", "http://elsewhere:4445", "t", None)])
+        assert list(server._handles) == [] and server._admin_hosts == set()
+        assert server._get_client("h") is not old_client
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        server.configure([])
+    assert ei.value.code == "no_handle"

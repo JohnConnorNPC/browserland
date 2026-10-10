@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -64,13 +65,52 @@ _clients: Dict[str, BrowserlandClient] = {}       # name -> client (lazy)
 # (and leak) an httpx.Client.
 _clients_lock = threading.Lock()
 
+# #243: launch handles this process holds, keyed by the namespaced window id.
+# Bounded as an LRU (_HANDLES_MAX, oldest evicted): a long-lived server forgets
+# the OLDEST handle, never the newest. NEVER pruned by visibility-filtered
+# listings — a listing that hides an off/out-of-scope window hides exactly the
+# window whose handle is the recovery path. Cleared wholesale by configure()
+# (host names are reusable; a stale "host:id" handle must not survive a
+# re-pointed host).
+_handles: OrderedDict = OrderedDict()             # namespaced id -> handle
+_handles_lock = threading.Lock()
+_HANDLES_MAX = 256
+
+# #245: the hosts whose admin credential the startup probe confirmed (filled
+# by configure()'s probe; empty until then and whenever no host qualified).
+# Admin-path tools check membership and refuse locally for every other host.
+_admin_hosts: set = set()
+
+
+def _handle_remember(nid: str, handle: str) -> None:
+    """Store a launch handle under its namespaced window id, LRU-bounded."""
+    with _handles_lock:
+        _handles[nid] = handle
+        _handles.move_to_end(nid)
+        while len(_handles) > _HANDLES_MAX:
+            _handles.popitem(last=False)
+
+
+def _handle_for(nid: str) -> Optional[str]:
+    """The handle this process holds for ``nid``, or None. A hit counts as
+    use (recently-used handles survive eviction)."""
+    with _handles_lock:
+        handle = _handles.get(nid)
+        if handle is not None:
+            _handles.move_to_end(nid)
+        return handle
+
 
 def configure(hosts) -> None:
     """Install the host map from an ordered iterable of descriptors —
     :class:`HostConfig` or a positional ``(name, base, token[, scope[,
     admin_token]])`` tuple (scope/admin_token None = unset). Closes any
     previously-built clients so their sockets aren't leaked; the new clients
-    are built lazily on first use."""
+    are built lazily on first use. Also clears, atomically with the rebuild,
+    every cross-config state: the launch-handle store and the admin-host set
+    (host names are reusable; a stale ``host:id`` handle or admin grant must
+    not survive a re-pointed host) — the per-client capability caches die
+    with the closed clients."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -79,6 +119,9 @@ def configure(hosts) -> None:
             except Exception:  # a flaky close must not abort reconfiguration
                 pass
         _clients = {}
+        with _handles_lock:
+            _handles.clear()
+        _admin_hosts.clear()
         new_configs: Dict[str, HostConfig] = {}
         for h in hosts:
             cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
@@ -384,6 +427,11 @@ def list_terminals() -> Dict[str, Any]:
                 t["host"] = name
                 if "id" in t:
                     t["id"] = f"{name}:{t['id']}"
+                    # #243: mark the windows this process holds launch
+                    # handles for — the ones set_window can still manage
+                    # (an owner that restarted this server lost them).
+                    if _handle_for(t["id"]) is not None:
+                        t["owned"] = True
                 host_terms.append(t)
             terminals.extend(host_terms)
         except Exception as exc:
@@ -729,4 +777,75 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     if isinstance(result, dict) and "id" in result:
         result = dict(result)
         result["id"] = f"{name}:{result['id']}"
+        # #243: keep the launch handle the broker minted, keyed by the
+        # namespaced id set_window takes. Lost on this process's restart —
+        # the admin credential or the browser can recover the window.
+        handle = result.get("handle")
+        if isinstance(handle, str) and handle:
+            _handle_remember(result["id"], handle)
     return result
+
+
+@mcp.tool()
+def set_window(id: str, scope: str = "", mode: str = "",
+               clear_scope: bool = False,
+               clear_mode: bool = False) -> Dict[str, Any]:
+    """Set — or clear — the scope and/or MCP access mode of a window this
+    server launched (#243). Pass the namespaced window id ("<host>:<int>")
+    the launch answered.
+
+    Semantics are keep|set|clear per field: a non-empty `scope`/`mode` SETS
+    it, a `clear_scope`/`clear_mode` flag sends an explicit null (back to
+    untagged / the broker default), and a field left empty with its flag
+    false is left untouched (an explicit `clear_*` wins over a value).
+
+    Two paths, picked locally: for a window this server holds a launch
+    handle for, the handle rides the request (the owner may retag its own
+    window, including to `off` or a foreign scope, and back); otherwise, on
+    a host whose admin credential this server confirmed at startup, the
+    admin path edits any window there. Anything else refuses locally and
+    sends nothing. Both paths fail closed when the host's /mcp/info does not
+    advertise `window_edit` (handle path) or `admin` (admin path): an older
+    broker never sees the request."""
+    client, int_id = _route(id)
+    host = id.partition(":")[0]
+    handle = _handle_for(id)
+    if handle is not None:
+        if not client.capabilities()["window_edit"]:
+            raise BrowserlandError(
+                0, "window_edit_unsupported",
+                f"host {host!r} does not advertise window_edit on /mcp/info "
+                "(an older broker); set_window is refused without sending.")
+        body: Dict[str, Any] = {"id": int_id, "handle": handle}
+    elif host in _admin_hosts:
+        if not client.capabilities()["admin"]:
+            raise BrowserlandError(
+                0, "admin_unsupported",
+                f"host {host!r} no longer confirms this server's admin "
+                "credential on /mcp/info (rotated in the Control Panel?); "
+                "set_window is refused without sending.")
+        body = {"id": int_id}
+    else:
+        raise BrowserlandError(
+            0, "no_handle",
+            f"no launch handle for {id!r} (this server restarted, or the "
+            "window was launched elsewhere) and its host has no confirmed "
+            "admin credential: set_window refuses without sending.")
+    # keep|set|clear: a non-empty value sets, a clear flag nulls, a key left
+    # empty+unflagged stays out of the body entirely (the broker keeps the
+    # field). Nothing in the body but id+handle is a local refusal, not a
+    # round-trip the broker would reject.
+    if clear_scope:
+        body["scope"] = None
+    elif scope:
+        body["scope"] = scope
+    if clear_mode:
+        body["mode"] = None
+    elif mode:
+        body["mode"] = mode
+    if "scope" not in body and "mode" not in body:
+        raise BrowserlandError(
+            0, "bad_args",
+            "set_window: nothing to change — pass scope/mode to set, or "
+            "clear_scope/clear_mode to clear (an omitted field is kept).")
+    return client.set_window(body)

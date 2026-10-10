@@ -121,6 +121,9 @@ class BrowserlandClient:
             headers[MCP_ADMIN_HEADER] = self.admin_token
         # Set once /mcp/info has echoed our scope; see _check_scope.
         self._scope_confirmed = False
+        # Cached /mcp/info capability flags (#243/#244/#245), or None before
+        # the first fetch; see capabilities().
+        self._caps: Optional[Dict[str, bool]] = None
         # `transport` is an injection seam for tests (httpx.MockTransport); in
         # production it stays None and httpx uses its default network transport.
         self._client = httpx.Client(
@@ -163,6 +166,13 @@ class BrowserlandClient:
             self._check_scope()
         return self._send(method, path, json_body=json_body, timeout=timeout)
 
+    def _forget_broker(self) -> None:
+        """Drop every cached fact about this host: whatever answers next may
+        be a different build (the same rule the scope confirmation follows
+        in :meth:`_send`)."""
+        self._scope_confirmed = False
+        self._caps = None
+
     def _send(self, method: str, path: str, *, json_body: Any = None,
               timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
         # A connection refused / DNS / TLS / timeout error never produces an
@@ -170,16 +180,17 @@ class BrowserlandClient:
         # into a BrowserlandError too, so callers only ever see BrowserlandError.
         #
         # Either kind of failure that can mean "the broker behind this URL
-        # went away" forgets a confirmed scope, because whatever answers next
-        # may be a different build: connection_error, and a non-2xx carrying
-        # no broker error code (code is None: what a proxy answers while the
-        # broker behind it restarts). An answer with a code came from a broker
-        # that is still there, and keeps it.
+        # went away" forgets a confirmed scope AND the cached capability
+        # flags, because whatever answers next may be a different build:
+        # connection_error, and a non-2xx carrying no broker error code
+        # (code is None: what a proxy answers while the broker behind it
+        # restarts). An answer with a code came from a broker that is still
+        # there, and keeps them.
         try:
             r = self._client.request(method, self.base + path,
                                      json=json_body, timeout=timeout)
         except httpx.RequestError as exc:
-            self._scope_confirmed = False
+            self._forget_broker()
             raise BrowserlandError(
                 0, "connection_error",
                 f"Cannot reach the Browserland broker at {self.base}: {exc}",
@@ -188,7 +199,7 @@ class BrowserlandClient:
             self._raise_for_status(r)
         except BrowserlandError as exc:
             if exc.code is None:
-                self._scope_confirmed = False
+                self._forget_broker()
             raise
         return r.json()
 
@@ -238,6 +249,27 @@ class BrowserlandClient:
     def _post(self, path: str, body: Dict[str, Any],
               timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
         return self._request("POST", path, json_body=body, timeout=timeout)
+
+    def capabilities(self, refresh: bool = False) -> Dict[str, bool]:
+        """This host's MCP capability flags, cached from one lazy
+        ``/mcp/info`` fetch: ``admin`` (this client's credential is an admin
+        credential there), ``window_edit`` (``POST /mcp/window`` exists,
+        #243) and ``allow_desktop`` (the desktop relay is on, #244). An
+        absent flag reads False — a broker without the key predates the
+        feature, and every consumer FAILS CLOSED on a missing capability.
+        The cache is forgotten by the same rules as the scope confirmation
+        (see :meth:`_send`); pass ``refresh=True`` to re-read it after
+        anything that can change the broker's knobs."""
+        if refresh or self._caps is None:
+            info = self._request("GET", "/mcp/info")
+            caps = {"admin": False, "window_edit": False,
+                    "allow_desktop": False}
+            if isinstance(info, dict):
+                caps["admin"] = info.get("admin") is True
+                caps["window_edit"] = info.get("window_edit") is True
+                caps["allow_desktop"] = info.get("allow_desktop") is True
+            self._caps = caps
+        return dict(self._caps)
 
     # --- one method per endpoint; each maps 1:1 to an MCP tool ------------
     def info(self) -> Dict[str, Any]:
@@ -384,3 +416,11 @@ class BrowserlandClient:
             if v is not None:
                 body[k] = v
         return self._post("/mcp/launch", body)
+
+    def set_window(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/window`` (#243): set — or, with explicit nulls, clear —
+        the scope and/or MCP mode of one window. ``body`` is the
+        caller-composed ``{id, handle?, scope?, mode?}``: a key left out
+        leaves the field alone and an explicit null clears it, so composing
+        keep|set|clear is the caller's job (the tool layer does it)."""
+        return self._post("/mcp/window", body)
