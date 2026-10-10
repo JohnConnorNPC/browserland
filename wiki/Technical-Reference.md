@@ -564,7 +564,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": true|false` #245, `"window_edit": true` #243) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": true|false` #245, `"window_edit": true` #243, `"allow_desktop": true|false` #244) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -888,12 +888,13 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 
 **`GET /mcp/config`** →
 `{"ok":true,"enabled":false,"token":"","admin_token":"","admin_token_env_pinned":false,
-"default_mode":"off","allow_launch":false,
+"default_mode":"off","allow_launch":false,"allow_desktop":false,
 "token_env_pinned":false,"known_scopes":[],"python":"/usr/bin/python3",
 "pythonpath":"/opt/browserland","local_url":"http://127.0.0.1:4445"}` (`token`
 is the live secret, `""` when unset; `admin_token` the MCP admin credential
 #245, likewise `""` when unset, and `admin_token_env_pinned` whether
-`WEB_TERMINAL_MCP_ADMIN_TOKEN` pins it). `known_scopes` lists the scopes on live
+`WEB_TERMINAL_MCP_ADMIN_TOKEN` pins it; `allow_desktop` #244 is the desktop
+relay's master switch). `known_scopes` lists the scopes on live
 windows (any mode) and on stored per-window rows, sorted; a name a caller only
 declared on the header never appears. `python` is the interpreter running this
 broker (`sys.executable`), `pythonpath` the directory holding the `webterm`

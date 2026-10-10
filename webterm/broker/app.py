@@ -849,6 +849,10 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         "default_mode": _norm_mcp_mode(config.get("mcp_default_mode"), "off"),
         "allow_launch": bool(config.get("mcp_allow_launch", False)),
         "enabled": bool(config.get("mcp_enabled", False)),
+        # #244: the desktop relay master switch (GET/POST /mcp/desktop),
+        # off out of the box; the Control Panel checkbox and the admin knob
+        # route both write it.
+        "allow_desktop": bool(config.get("mcp_allow_desktop", False)),
     }
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -869,6 +873,8 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
             cfg["allow_launch"] = bool(data.get("allow_launch"))
         if "enabled" in data:
             cfg["enabled"] = bool(data.get("enabled"))
+        if "allow_desktop" in data:
+            cfg["allow_desktop"] = bool(data.get("allow_desktop"))
     return cfg
 
 
@@ -6839,7 +6845,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            # #243: the window-edit route exists. A broker
                            # without the flag does not accept handles; a
                            # client fails closed on absence.
-                           "window_edit": True})
+                           "window_edit": True,
+                           # #244: the desktop relay master switch. A broker
+                           # without the flag does not relay; a client fails
+                           # closed on absence.
+                           "allow_desktop": bool(cfg["allow_desktop"])})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
@@ -7497,6 +7507,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "admin_token_env_pinned": _mcp_admin_env_pinned(),
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
+                # #244: the desktop relay master switch, its own Control
+                # Panel checkbox beside allow_launch.
+                "allow_desktop": bool(cfg["allow_desktop"]),
                 "token_env_pinned": _mcp_token_env_pinned(),
                 "known_scopes": app.ctx.mcp_windows.known_scopes(
                     app.ctx.registry.entries()),
@@ -7532,6 +7545,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
                 "enabled": bool(cfg["enabled"]),
+                "allow_desktop": bool(cfg["allow_desktop"]),
             }
             try:
                 await asyncio.get_running_loop().run_in_executor(
@@ -7597,6 +7611,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 cfg["allow_launch"] = bool(body.get("allow_launch"))
             if "enabled" in body:
                 cfg["enabled"] = bool(body.get("enabled"))
+            if "allow_desktop" in body:
+                cfg["allow_desktop"] = bool(body.get("allow_desktop"))
 
         err = await _mcp_cfg_locked_write(_apply)
         if err is not None:
@@ -7627,13 +7643,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"error": "bad_json"}, status=400)
-        allowed = ("default_mode", "allow_launch")
+        allowed = ("default_mode", "allow_launch", "allow_desktop")
         unknown = sorted(k for k in body if k not in allowed)
         if unknown:
             return sanic_json({"error": "bad_key"}, status=400)
         if "default_mode" in body and body["default_mode"] not in MCP_MODES:
             return sanic_json({"error": "bad_mode"}, status=400)
-        for knob in ("allow_launch",):
+        for knob in ("allow_launch", "allow_desktop"):
             if knob in body and not isinstance(body[knob], bool):
                 return sanic_json({"error": "bad_value"}, status=400)
 
@@ -7642,13 +7658,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 cfg["default_mode"] = body["default_mode"]
             if "allow_launch" in body:
                 cfg["allow_launch"] = body["allow_launch"]
+            if "allow_desktop" in body:
+                cfg["allow_desktop"] = body["allow_desktop"]
 
         err = await _mcp_cfg_locked_write(_apply)
         if err is not None:
             return err
         cfg = app.ctx.mcp_cfg
         return sanic_json({"ok": True, "default_mode": cfg["default_mode"],
-                           "allow_launch": bool(cfg["allow_launch"])})
+                           "allow_launch": bool(cfg["allow_launch"]),
+                           "allow_desktop": bool(cfg["allow_desktop"])})
 
         return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 

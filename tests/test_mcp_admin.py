@@ -446,7 +446,8 @@ def test_knobs_admin_sets_default_mode_and_allow_launch(tmp_path, monkeypatch):
     _, resp = _mcp(app, "/mcp/knobs", admin=ADMIN_TOKEN)
     assert (resp.status, resp.json) == (200, {"ok": True,
                                               "default_mode": "off",
-                                              "allow_launch": False})
+                                              "allow_launch": False,
+                                              "allow_desktop": False})
     body = MCP_TOKEN_ROUTES["/mcp/knobs"][1]
     _, resp = app.test_client.post(
         "/mcp/knobs", json={"default_mode": "read", "allow_launch": True},
