@@ -645,7 +645,10 @@ def test_session_mcp_edit_clears_admin_set_including_row_deletion_fallback(
     assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is False
 
     # stamp again (the durable write reapply mirrors onto the live entry),
-    # then clear BOTH fields: the row dies, the fallback runs.
+    # then clear BOTH fields: the row dies, the fallback runs. The launch
+    # minted an owner (#243) which now keeps rows alive, so drop it first —
+    # from #243's B3 on, the /session/mcp edit itself clears the owner and
+    # this manual step disappears.
     import asyncio
 
     def _stamp(work):
@@ -656,6 +659,12 @@ def test_session_mcp_edit_clears_admin_set_including_row_deletion_fallback(
     live = app.ctx.registry.get(LAUNCHED)
     app.ctx.mcp_windows.reapply(live)
     assert live.mcp_admin_launch is True
+
+    def _drop_owner(work):
+        work.set(LAUNCHED, owner=None, pid=4242, host="hostA",
+                 now=work.clock())
+
+    asyncio.run(app.ctx.persist_mcp_windows(_drop_owner))
 
     _, resp = authed(app).post(
         "/session/mcp", json={"id": LAUNCHED, "mode": None, "scope": None})

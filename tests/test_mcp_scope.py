@@ -60,6 +60,7 @@ restart claim, the failed tag write and the existing-row refusal.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -2786,14 +2787,20 @@ def test_a_scoped_launch_comes_up_tagged_and_readwrite(tmp_path, monkeypatch):
     """#231: the row {scope, readwrite, pid null, host null} is ON DISK before
     the spawn step, the agent's first hello claims it, so the window
     registers already scoped and drivable: a scoped listing shows it at once
-    (default_mode is off here). The answer adds scope and mode."""
+    (default_mode is off here). The answer adds scope and mode.
+
+    #243 (existing-test edit): every launch now also mints a HANDLE — the
+    answer carries it and the row carries only its sha256."""
     app = _launch_app(tmp_path, monkeypatch)
     fake = _fake_launcher(app)
     _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={"title": "w"})
+    handle = resp.json.pop("handle")
     assert (resp.status, resp.json) == (200, {
         "ok": True, "id": LAUNCHED, "registered": True, "agent_pid": 4242,
         "scope": "teamA", "mode": "readwrite"})
-    assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite", seen=T)
+    owner = hashlib.sha256(handle.encode()).hexdigest()
+    assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite",
+                                     owner=owner, seen=T)
     entry = app.ctx.registry.get(LAUNCHED)
     assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
     _, listing = _mcp(app, "/mcp/terminals", scope="teamA")
@@ -2836,14 +2843,22 @@ def test_an_invalid_launch_mode_is_400_and_spawns_nothing(tmp_path,
     LaunchError(500, "agent_exited_early", returncode=3)],
     ids=["spawn-failed", "exited-early"])
 def test_a_failed_scoped_launch_takes_its_row_back(tmp_path, monkeypatch,
-                                                   error):
+                                                    error):
     """#231: the row was durable before the spawn; a LaunchError after that
-    deletes it again, and the answer is the launcher's own error."""
+    deletes it again, and the answer is the launcher's own error.
+
+    #243 (existing-test edit): the row now also carries the minted handle's
+    sha256 (checked shape-only here: the error answer carries no handle)."""
     app = _launch_app(tmp_path, monkeypatch)
     fake = _fake_launcher(app, error=error)
     _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
     assert (resp.status, resp.json) == (error.status, error.payload)
-    assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite", seen=T)
+    row = dict(fake.row_at_spawn)
+    owner = row.pop("owner")
+    assert re.fullmatch(r"[0-9a-f]{64}", owner)
+    expected = _row(scope="teamA", mode="readwrite", seen=T)
+    expected.pop("owner")
+    assert row == expected
     assert str(LAUNCHED) not in _disk(_sidecar(tmp_path))
     assert app.ctx.mcp_windows.get(LAUNCHED) is None
 
@@ -2861,8 +2876,15 @@ def test_a_launch_failing_after_the_hello_keeps_the_claimed_row(tmp_path,
                    claim_first=True)
     _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
     assert (resp.status, resp.json["error"]) == (500, "agent_exited_early")
-    assert _disk(_sidecar(tmp_path))[str(LAUNCHED)] == _row(
+    # #243 (existing-test edit): owner joins the row; its hash is checked by
+    # shape (the handle is not recoverable from this path).
+    claimed = dict(_disk(_sidecar(tmp_path))[str(LAUNCHED)])
+    owner = claimed.pop("owner")
+    assert re.fullmatch(r"[0-9a-f]{64}", owner)
+    expected = _row(
         scope="teamA", mode="readwrite", pid=4242, host="hostA", seen=T)
+    expected.pop("owner")
+    assert claimed == expected
     entry = app.ctx.registry.get(LAUNCHED)
     assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
 
@@ -2911,22 +2933,30 @@ def test_a_failed_pre_spawn_write_is_prespawn_failed(tmp_path, monkeypatch):
     assert calls == []
     assert not _sidecar(tmp_path).exists()
 
-
 def test_a_scoped_launch_refuses_an_id_that_has_a_row(tmp_path, monkeypatch):
     """#231: the allocated id already has a row, here a STALE one (8 days
     unseen, broker past the grace). Prune would not drop it in the tag's own
-    write because a pending id counts as live, so the refusal is the only
-    thing that keeps a pre-spawn row from replacing it: prespawn_failed,
-    nothing spawned, the row as it was. (The stop flush is stubbed out: it
-    would prune the row once the id is no longer pending.)"""
+    write because a pending id counts as live.
+
+    #243 (existing-test edit, owner decision): a DEAD stale row no longer
+    refuses the launch — ONE extra writer pass deletes it and the launch is
+    retried ONCE on a FRESH id (never in place: replacing a claimed row's id
+    with a pre-spawn row is the wildcard-claim hazard the route docstring
+    names). With the allocator forced to the collided id and then a fresh
+    one, the answer is the retry's 202, the dead row is gone, and the new
+    row lands on the new id only. (The stop flush is stubbed out: it would
+    prune the row once the id is no longer pending.)"""
     wid = (1 << 52) | 77
+    fresh = (1 << 52) | 78
     stale = _row(scope="old", mode="read", pid=55, host="hostA",
                  seen=T - 8 * DAY)
     _write_sidecar(_sidecar(tmp_path), {str(wid): stale})
     calls = _patch_spawn(monkeypatch)
     monkeypatch.setattr(launcher_mod, "REGISTER_TIMEOUT", 0.05)
+    seq = iter([77, 78])       # first allocation collides, retry is fresh
     monkeypatch.setattr(launcher_mod, "secrets",
-                        types.SimpleNamespace(randbits=lambda n: 77))
+                        types.SimpleNamespace(
+                            randbits=lambda n: next(seq)))
     app = _launch_app(tmp_path, monkeypatch, uptime=601.0)
 
     async def no_flush():
@@ -2934,10 +2964,15 @@ def test_a_scoped_launch_refuses_an_id_that_has_a_row(tmp_path, monkeypatch):
 
     app.ctx.flush_mcp_windows = no_flush
     _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
-    assert (resp.status, resp.json) == (500, {"ok": False,
-                                              "error": "prespawn_failed"})
-    assert calls == []
-    assert _disk(_sidecar(tmp_path)) == {str(wid): stale}
+    handle = resp.json.pop("handle")
+    assert (resp.status, resp.json) == (202, {
+        "ok": True, "id": fresh, "registered": False,
+        "agent_pid": _FakeProc.pid, "scope": "teamA", "mode": "readwrite"})
+    assert isinstance(handle, str)
+    assert _argv_id(calls[0]) == fresh      # nothing was spawned for wid
+    owner = hashlib.sha256(handle.encode()).hexdigest()
+    assert _disk(_sidecar(tmp_path)) == {str(fresh): _row(
+        scope="teamA", mode="readwrite", owner=owner, seen=T)}
 
 
 def test_a_202_launch_is_claimed_by_a_late_hello_after_a_restart(
@@ -2951,12 +2986,16 @@ def test_a_202_launch_is_claimed_by_a_late_hello_after_a_restart(
     app = _launch_app(tmp_path, monkeypatch)
     _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
     wid = resp.json["id"]
+    handle = resp.json["handle"]      # #243: the minted handle rides along
+    assert isinstance(handle, str) and handle
     assert (resp.status, resp.json) == (202, {
         "ok": True, "id": wid, "registered": False,
-        "agent_pid": _FakeProc.pid, "scope": "teamA", "mode": "readwrite"})
+        "agent_pid": _FakeProc.pid, "scope": "teamA", "mode": "readwrite",
+        "handle": handle})
     assert _argv_id(calls[0]) == wid
+    owner = hashlib.sha256(handle.encode()).hexdigest()
     assert _disk(_sidecar(tmp_path))[str(wid)] == _row(
-        scope="teamA", mode="readwrite", seen=T)
+        scope="teamA", mode="readwrite", owner=owner, seen=T)
     again = _launch_app(tmp_path, monkeypatch)
     _register(again, wid, 9999, host="hostB")
     entry = again.ctx.registry.get(wid)
@@ -2965,21 +3004,35 @@ def test_a_202_launch_is_claimed_by_a_late_hello_after_a_restart(
     assert [t["id"] for t in listing.json] == [wid]
 
 
-@pytest.mark.parametrize("body", [{}, {"mode": "read"}],
-                         ids=["no-mode", "mode-ignored"])
-def test_an_unscoped_launch_writes_no_row(tmp_path, monkeypatch, writes,
-                                          body):
-    """#231: an unscoped /mcp/launch is the launcher's answer as is: no hook,
-    no store write, the window inherits default_mode, even when the body
-    names a (valid) mode."""
+@pytest.mark.parametrize("body,expected", [
+    ({}, "readwrite"), ({"mode": "read"}, "read")],
+    ids=["no-mode-defaults-readwrite", "mode-honored"])
+def test_an_unscoped_launch_tags_a_row_and_mints_a_handle(tmp_path,
+                                                           monkeypatch,
+                                                           writes, body,
+                                                           expected):
+    """#243 (existing-test edit, owner decision): an unscoped /mcp/launch is
+    NO LONGER the plain launcher answer — every launch tags a pre-spawn row
+    through the hook and mints an ownership handle. A body mode is honored;
+    with none the window comes up readwrite (the #231 scoped default, now
+    the unscoped default too — the old wire inherited default_mode, a
+    changelog line)."""
     app = _launch_app(tmp_path, monkeypatch)
     fake = _fake_launcher(app)
     _, resp = _mcp(app, "/mcp/launch", body=body)
+    handle = resp.json.pop("handle")
     assert (resp.status, resp.json) == (200, {
-        "ok": True, "id": LAUNCHED, "registered": True, "agent_pid": 4242})
-    assert "pre_spawn" not in fake.calls[0]
-    assert _store_writes(writes, app) == []
-    assert app.ctx.registry.get(LAUNCHED).mcp_mode is None
+        "ok": True, "id": LAUNCHED, "registered": True, "agent_pid": 4242,
+        "scope": None, "mode": expected})
+    assert isinstance(handle, str) and handle
+    assert "pre_spawn" in fake.calls[0]
+    owner = hashlib.sha256(handle.encode()).hexdigest()
+    # pid/host: the fake's hello CLAIMED the row before the stop-flush wrote
+    # it (the #231 claim rule).
+    assert _disk(_sidecar(tmp_path))[str(LAUNCHED)] == _row(
+        mode=expected, pid=4242, host="hostA", owner=owner, seen=T)
+    entry = app.ctx.registry.get(LAUNCHED)
+    assert (entry.mcp_scope, entry.mcp_mode) == (None, expected)
 
 
 def test_the_browser_launch_ignores_mode_and_passes_no_hook(tmp_path,

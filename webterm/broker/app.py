@@ -96,7 +96,7 @@ from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
 # mcp_windows module re-exports from protocol.
 from ..protocol import MCP_ADMIN_HEADER
 from .registry import (CONTROL_SEND_TIMEOUT, BrokerRegistry,
-                       run_producer_session)
+                       run_producer_session, same_producer)
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
 # desktop page or parse the wiki. These are the only production importers, so the
@@ -7170,35 +7170,44 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         })
 
     async def _mcp_launch(request: Request):
-        """POST /mcp/launch. An UNSCOPED launch is the launcher's answer as
-        is: no per-window row, and the window inherits default_mode (a
-        valid body ``mode`` is ignored; an invalid one is still 400).
-
-        A SCOPED launch (#231) tags the window before it exists: the
-        launcher's pre_spawn hook writes the row {scope, mode, pid null,
-        host null} through the shared writer before anything is spawned, and
-        the agent's first hello claims it (McpWindowStore.apply), so the
-        window registers already scoped, including after a 202 whose hello
-        lands on a restarted broker. ``mode`` defaults to readwrite, not
-        default_mode: a worker its launcher cannot drive is useless, and
-        allow_launch is already its own opt-in. A LaunchError after the row
-        landed deletes it again while it is still unclaimed; a failing
-        rollback is logged and the launcher's error is still the answer.
-        Success adds ``scope`` and ``mode`` to the launcher's payload.
+        """POST /mcp/launch. EVERY launch, scoped or not (#243), tags the
+        window before it exists and mints an ownership HANDLE: the
+        launcher's pre_spawn hook writes the row {scope (null when
+        unscoped), mode, owner: sha256(handle), pid null, host null} through
+        the shared writer before anything is spawned, and the agent's first
+        hello claims it (McpWindowStore.apply), so the window registers
+        already tagged, including after a 202 whose hello lands on a
+        restarted broker. ``mode`` defaults to readwrite, not default_mode,
+        for scoped AND unscoped launches alike (owner decision on #243: a
+        worker its launcher cannot drive is useless, and allow_launch is
+        already its own opt-in; this CHANGED the unscoped wire, which used
+        to inherit default_mode and ignore a valid body mode). Only the
+        sha256 hexdigest is stored; the plaintext handle lives in the launch
+        response alone. A LaunchError after the row landed deletes it again
+        while it is still unclaimed; a failing rollback is logged and the
+        launcher's error is still the answer. Success adds ``scope``,
+        ``mode`` and ``handle`` to the launcher's payload.
 
         The pre-spawn write REFUSES an id that already has a row (the hook
-        raises, so prespawn_failed; the client's retry rolls a new id). The
+        raises, so prespawn_failed; the collision is recorded first). The
         id is fresh (never live or pending), but a row can outlive its
-        window for 7 days, and prune cannot drop it here because a pending
-        id counts as live. Replacing it would hand a claimed row's id to a
-        pre-spawn row, and a hello from that row's old producer landing
-        during the write would then claim the NEW row (the hazard
-        McpWindowStore.reapply names). So that replacement never happens.
+        window for 7 days. Replacing it in place would hand a claimed row's
+        id to a pre-spawn row, and a hello from that row's old producer
+        landing during the write would then claim the NEW row (the hazard
+        McpWindowStore.reapply names). So that replacement never happens;
+        instead (#243), when the collided row is DEAD -- no live entry
+        passes same_producer against it -- ONE extra writer pass deletes
+        that row alone and the launch is retried ONCE, on a FRESH id. A row
+        that is still claimable (its producer is live on the id, or a hello
+        claimed it mid-write) keeps its refusal: prespawn_failed, nothing
+        spawned, the row as it was. (is_pending is deliberately not
+        consulted: the collided id is pending for THIS launch by the time
+        the hook runs, and no other launch can be pending on it.)
 
         A client that disconnects during the shielded pre-spawn write can
         leave an unclaimed row on an id nothing was spawned for: it tags no
         window, it is pruned after 7 days, and a launch that rolls its id
-        meanwhile is refused as above."""
+        meanwhile takes the dead-row path above."""
         err = _mcp_auth_error(request)
         if err is not None:
             return err
@@ -7210,19 +7219,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         launch_kwargs = {"cols": params["cols"], "rows": params["rows"],
                          "title": params["title"], "cwd": params["cwd"]}
         scope = _mcp_scope(request)
-        if scope is None:
-            try:
-                status, payload = await app.ctx.launcher.launch(
-                    params["profile"], **launch_kwargs)
-            except LaunchError as exc:
-                return sanic_json(exc.payload, status=exc.status)
-            return sanic_json(payload, status=status)
         mode = params["mode"] or "readwrite"
+        handle = secrets.token_urlsafe(32)
+        owner = hashlib.sha256(handle.encode()).hexdigest()
         tagged: List[int] = []
+        collided: List[int] = []
 
         async def _tag(wid: int) -> None:
             def _write(work):
                 if work.get(wid) is not None:
+                    collided.append(wid)
                     raise RuntimeError(f"window {wid} already has a stored "
                                        "MCP row; not replacing it")
                 # #245: an admin-authenticated launch stamps the row (True),
@@ -7231,17 +7237,51 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # leaves the key unset (None): the sidecar carries the badge
                 # only where it is true.
                 stamp = {"admin_set": True} if _mcp_is_admin(request) else {}
-                work.set(wid, scope=scope, mode=mode, now=work.clock(),
-                         **stamp)
+                work.set(wid, scope=scope, mode=mode, owner=owner,
+                         now=work.clock(), **stamp)
             await app.ctx.persist_mcp_windows(_write)
             tagged.append(wid)
+
+        def _row_is_dead(work, wid: int) -> bool:
+            # The collided row is claimable when a live entry on the id
+            # passes same_producer against it -- its producer is back, or a
+            # hello claimed the row during this very write. Read inside the
+            # writer (get() is sync), so the answer is linearized with the
+            # delete.
+            row = work.get(wid)
+            if row is None:
+                return False
+            entry = app.ctx.registry.get(wid)
+            return not (entry is not None
+                        and same_producer(row, entry))
+
+        async def _drop_dead_row(wid: int) -> bool:
+            # ONE writer pass that deletes ONLY the dead collided row. Never
+            # an in-place replacement: the retry that follows launches on a
+            # fresh id.
+            def _write(work):
+                row = work.get(wid)
+                if row is not None and _row_is_dead(work, wid):
+                    work.set(wid, scope=None, mode=None, owner=None,
+                             pid=row["pid"], host=row["host"],
+                             now=work.clock())
+                    return True
+                return False
+            try:
+                return await app.ctx.persist_mcp_windows(_write)
+            except Exception:
+                LOGGER.exception("/mcp/launch: dropping window %d's dead "
+                                 "MCP row failed; the launch refuses as "
+                                 "before", wid)
+                return False
 
         async def _untag(wid: int) -> None:
             def _write(work):
                 row = work.get(wid)
                 if (row is not None and row["pid"] is None
                         and row["host"] is None):
-                    work.set(wid, scope=None, mode=None, now=work.clock())
+                    work.set(wid, scope=None, mode=None, owner=None,
+                             now=work.clock())
             try:
                 await app.ctx.persist_mcp_windows(_write)
             except Exception:
@@ -7249,15 +7289,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                  "pre-spawn MCP row after a failed launch "
                                  "failed; prune drops it after 7 days", wid)
 
+        async def _attempt():
+            try:
+                return await app.ctx.launcher.launch(
+                    params["profile"], pre_spawn=_tag, **launch_kwargs)
+            except LaunchError as exc:
+                # #243: a DEAD-row collision is retried exactly once, on a
+                # fresh id. Anything else -- a claimable row, a store-write
+                # failure, a spawn failure -- is the launcher's answer.
+                if collided and await _drop_dead_row(collided[0]):
+                    collided.clear()
+                    return await app.ctx.launcher.launch(
+                        params["profile"], pre_spawn=_tag, **launch_kwargs)
+                raise
+
         try:
-            status, payload = await app.ctx.launcher.launch(
-                params["profile"], pre_spawn=_tag, **launch_kwargs)
+            status, payload = await _attempt()
         except LaunchError as exc:
             if tagged:
                 await _untag(tagged[0])
             return sanic_json(exc.payload, status=exc.status)
-        return sanic_json(dict(payload, scope=scope, mode=mode),
-                          status=status)
+        return sanic_json(dict(payload, scope=scope, mode=mode,
+                               handle=handle), status=status)
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
