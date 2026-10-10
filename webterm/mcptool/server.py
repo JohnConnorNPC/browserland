@@ -5,8 +5,12 @@ broker's dict/list verbatim — FastMCP turns the return value into structured
 tool output, and the type hints + docstrings drive the tool schema.
 
 The client is built **lazily** from config handed in by ``__main__`` via
-:func:`configure`, so importing this module has no side effects and stdio
-startup never blocks on a network probe. The first tool call surfaces a clean
+:func:`configure`, so importing this module has no side effects. The one
+deliberate exception to "never probe at startup" (#245, owner decision): the
+END of ``configure()`` probes every admin-token host's ``/mcp/info``
+concurrently under a single bounded deadline, because admin-only tools must be
+hidden unless a host confirms admin — that costs at most one timeout at stdio
+startup, then never blocks again. The first tool call surfaces a clean
 :class:`BrowserlandError` if the broker URL or token is wrong.
 """
 
@@ -14,7 +18,9 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
@@ -22,27 +28,111 @@ from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
 
-# Multi-host config (#24). configure() stores an ordered
-# ``name -> (base, token, scope)`` map; the per-host BrowserlandClient is built
-# lazily on first use, so importing this module has no side effects and stdio
-# startup never blocks on a probe (a scoped host's /mcp/info check, #232, runs
-# on its first call). Window ids in every tool are namespaced ``"<host>:<int>"``
-# and :func:`_route` splits one back to a ``(client, int_id)`` pair. A plain
+
+class HostConfig(NamedTuple):
+    """One configured host (#24 multi-host, #245 admin credential): the base
+    URL, the MCP token, the optional declared scope and the optional per-host
+    admin token. This NamedTuple replaces the positional tuples configure()
+    used to store, so a growing host map stays self-describing. Plain tuples
+    ``(name, base, token[, scope[, admin_token]])`` are still accepted at the
+    configure() seam and normalized (missing fields default to None), which
+    keeps every existing caller and test injection working."""
+
+    name: str
+    base: str
+    token: str
+    scope: Optional[str] = None
+    admin_token: Optional[str] = None
+
+
+def _as_host_config(name: str, raw: Any) -> HostConfig:
+    """Normalize one ``_host_configs`` value to a :class:`HostConfig`,
+    tolerating the legacy positional tuples tests inject directly."""
+    if isinstance(raw, HostConfig):
+        return raw
+    scope = raw[2] if len(raw) > 2 else None
+    admin = raw[3] if len(raw) > 3 else None
+    return HostConfig(name, raw[0], raw[1], scope, admin)
+
+
+# Multi-host config (#24). configure() stores an ordered name -> HostConfig
+# map; the per-host BrowserlandClient is built lazily on first use, so
+# importing this module has no side effects and stdio startup never blocks
+# on a probe (a scoped host's /mcp/info check, #232, runs on its first call).
+# Window ids in every tool are namespaced ``"<host>:<int>"`` and
+# :func:`_route` splits one back to a ``(client, int_id)`` pair. A plain
 # ``--broker-url``/``--token`` config is just a single host named ``"default"``.
-# name -> (base, token, scope or None), ordered
-_host_configs: Dict[str, Tuple[str, str, Optional[str]]] = {}
+# name -> HostConfig, ordered
+_host_configs: Dict[str, HostConfig] = {}
 _clients: Dict[str, BrowserlandClient] = {}       # name -> client (lazy)
 # Guards the lazy build in _get_client: FastMCP dispatches sync tools on a thread
 # pool, so two concurrent first-calls for one host could otherwise each construct
 # (and leak) an httpx.Client.
 _clients_lock = threading.Lock()
 
+# #243: launch handles this process holds, keyed by the namespaced window id.
+# Bounded as an LRU (_HANDLES_MAX, oldest evicted): a long-lived server forgets
+# the OLDEST handle, never the newest. NEVER pruned by visibility-filtered
+# listings — a listing that hides an off/out-of-scope window hides exactly the
+# window whose handle is the recovery path. Cleared wholesale by configure()
+# (host names are reusable; a stale "host:id" handle must not survive a
+# re-pointed host).
+_handles: OrderedDict = OrderedDict()             # namespaced id -> handle
+_handles_lock = threading.Lock()
+_HANDLES_MAX = 256
+
+# #245: the hosts whose admin credential the startup probe confirmed (filled
+# by configure()'s probe; empty until then and whenever no host qualified).
+# Admin-path tools check membership and refuse locally for every other host.
+_admin_hosts: set = set()
+# The admin tools are registered at most ONCE per process: FastMCP cannot
+# unregister, and configure() is once-per-process in production (__main__
+# calls it a single time). A later re-configure() re-probes and updates
+# _admin_hosts (the per-host gate), but an earlier registration stays listed
+# — documented as a limitation; the tests pin the refused-locally ladder.
+_admin_tools_registered = False
+
+# One overall deadline for the startup admin probe (#245): the browser's
+# client default timeout, so the worst-case stdio startup delay is one
+# timeout no matter how many admin hosts are configured.
+_ADMIN_PROBE_TIMEOUT_S = 10.0
+
+
+def _handle_remember(nid: str, handle: str) -> None:
+    """Store a launch handle under its namespaced window id, LRU-bounded."""
+    with _handles_lock:
+        _handles[nid] = handle
+        _handles.move_to_end(nid)
+        while len(_handles) > _HANDLES_MAX:
+            _handles.popitem(last=False)
+
+
+def _handle_for(nid: str) -> Optional[str]:
+    """The handle this process holds for ``nid``, or None. A hit counts as
+    use (recently-used handles survive eviction)."""
+    with _handles_lock:
+        handle = _handles.get(nid)
+        if handle is not None:
+            _handles.move_to_end(nid)
+        return handle
+
 
 def configure(hosts) -> None:
-    """Install the host map from an ordered iterable of
-    ``(name, base, token, scope)`` descriptors (scope None = unscoped). Closes
-    any previously-built clients so their sockets aren't leaked; the new
-    clients are built lazily on first use."""
+    """Install the host map from an ordered iterable of descriptors —
+    :class:`HostConfig` or a positional ``(name, base, token[, scope[,
+    admin_token]])`` tuple (scope/admin_token None = unset). Closes any
+    previously-built clients so their sockets aren't leaked; the new clients
+    are built lazily on first use. Also clears, atomically with the rebuild,
+    every cross-config state: the launch-handle store and the admin-host set
+    (host names are reusable; a stale ``host:id`` handle or admin grant must
+    not survive a re-pointed host) — the per-client capability caches die
+    with the closed clients.
+
+    After the rebuild, the one-shot admin probe (#245) runs: every host
+    carrying an admin token is probed concurrently (one overall deadline);
+    the hosts whose ``/mcp/info`` answers ``admin: true`` land in
+    ``_admin_hosts``, and the admin tools are registered once any host
+    qualifies."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -51,23 +141,68 @@ def configure(hosts) -> None:
             except Exception:  # a flaky close must not abort reconfiguration
                 pass
         _clients = {}
-        _host_configs = {name: (base, token, scope)
-                         for name, base, token, scope in hosts}
+        with _handles_lock:
+            _handles.clear()
+        _admin_hosts.clear()
+        new_configs: Dict[str, HostConfig] = {}
+        for h in hosts:
+            cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
+            new_configs[cfg.name] = cfg
+        _host_configs = new_configs
+    _probe_admin_hosts()
+
+
+def _probe_admin_hosts() -> None:
+    """#245: the one-shot startup admin probe. For every host carrying an
+    admin token, GET ``/mcp/info`` (the client sends the admin header); the
+    host is admin-capable iff the body is a dict with ``admin: true`` — a
+    pre-#245 broker answers without the key, and an unreachable host or a
+    wrong token raises: every failure reads as NOT admin (fail closed). The
+    probes run concurrently under one overall deadline
+    (``_ADMIN_PROBE_TIMEOUT_S``, the client default), so the worst-case
+    startup delay is one timeout, not timeout × hosts. When at least one
+    host qualifies, the admin tools are registered exactly once for the
+    process lifetime."""
+    global _admin_tools_registered
+    names = [name for name, cfg in _host_configs.items()
+             if _as_host_config(name, cfg).admin_token]
+    if not names:
+        return
+
+    def probe(name: str) -> bool:
+        try:
+            info = _get_client(name)._send(
+                "GET", "/mcp/info", timeout=_ADMIN_PROBE_TIMEOUT_S)
+        except Exception:
+            return False
+        return isinstance(info, dict) and info.get("admin") is True
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        qualified = list(pool.map(probe, names))
+    _admin_hosts.update(
+        name for name, ok in zip(names, qualified) if ok)
+    if _admin_hosts and not _admin_tools_registered:
+        mcp.tool(name="set_mcp_knobs")(set_mcp_knobs)
+        mcp.tool(name="workspaces")(workspaces)
+        _admin_tools_registered = True
 
 
 def _get_client(name: str) -> BrowserlandClient:
     """Return the (lazily-built) client for an already-validated host name.
     Double-checked locking keeps concurrent first-calls from leaking a client.
     The client carries the host's scope (its header and its fail-closed
-    probe, #232) and its name for error messages."""
+    probe, #232), its per-host admin token (header, #245) and its name for
+    error messages."""
     client = _clients.get(name)
     if client is not None:
         return client
     with _clients_lock:
         client = _clients.get(name)
         if client is None:
-            base, token, scope = _host_configs[name]
-            client = BrowserlandClient(base, token, scope=scope, name=name)
+            cfg = _as_host_config(name, _host_configs[name])
+            client = BrowserlandClient(base=cfg.base, token=cfg.token,
+                                       scope=cfg.scope,
+                                       admin_token=cfg.admin_token, name=name)
             _clients[name] = client
         return client
 
@@ -350,6 +485,11 @@ def list_terminals() -> Dict[str, Any]:
                 t["host"] = name
                 if "id" in t:
                     t["id"] = f"{name}:{t['id']}"
+                    # #243: mark the windows this process holds launch
+                    # handles for — the ones set_window can still manage
+                    # (an owner that restarted this server lost them).
+                    if _handle_for(t["id"]) is not None:
+                        t["owned"] = True
                 host_terms.append(t)
             terminals.extend(host_terms)
         except Exception as exc:
@@ -682,12 +822,16 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     broker; with a single host it's optional. The returned `id` is namespaced
     ("<host>:<int>") so it can be passed straight to the other tools.
 
-    When this server declares a scope for that host, the new window is tagged
-    with the scope before it starts (so you can see it at once) and comes up
-    in `mode` ('off', 'read' or 'readwrite'), or 'readwrite' when `mode` is
-    omitted; the result then carries `scope` and `mode`. Without a scope the
-    window gets the broker's default mode and a valid `mode` is ignored (an
-    invalid value is still refused: 400 bad_mode)."""
+    Every launch, scoped or not, comes up in `mode` ('off', 'read' or
+    'readwrite'), or 'readwrite' when `mode` is omitted — a worker its
+    launcher can't drive is useless (an invalid value is refused: 400
+    bad_mode). When this server declares a scope for that host, the new
+    window is also tagged with the scope before it starts, so you can see it
+    at once. The result carries `scope` and `mode`, plus `handle` — a launch
+    handle this server keeps in memory (keyed by the returned id) so
+    `set_window` can retag this window later; the handle is lost when this
+    process restarts (the admin credential or the browser can recover the
+    window)."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
         profile=profile, cols=cols, rows=rows, title=title, cwd=cwd,
@@ -695,4 +839,354 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     if isinstance(result, dict) and "id" in result:
         result = dict(result)
         result["id"] = f"{name}:{result['id']}"
+        # #243: keep the launch handle the broker minted, keyed by the
+        # namespaced id set_window takes. Lost on this process's restart —
+        # the admin credential or the browser can recover the window.
+        handle = result.get("handle")
+        if isinstance(handle, str) and handle:
+            _handle_remember(result["id"], handle)
     return result
+
+
+@mcp.tool()
+def set_window(id: str, scope: str = "", mode: str = "",
+               clear_scope: bool = False,
+               clear_mode: bool = False) -> Dict[str, Any]:
+    """Set — or clear — the scope and/or MCP access mode of a window this
+    server launched (#243). Pass the namespaced window id ("<host>:<int>")
+    the launch answered.
+
+    Semantics are keep|set|clear per field: a non-empty `scope`/`mode` SETS
+    it, a `clear_scope`/`clear_mode` flag sends an explicit null (back to
+    untagged / the broker default), and a field left empty with its flag
+    false is left untouched (an explicit `clear_*` wins over a value).
+
+    Two paths, picked locally: for a window this server holds a launch
+    handle for, the handle rides the request (the owner may retag its own
+    window, including to `off` or a foreign scope, and back); otherwise, on
+    a host whose admin credential this server confirmed at startup, the
+    admin path edits any window there. Anything else refuses locally and
+    sends nothing. Both paths fail closed when the host's /mcp/info does not
+    advertise `window_edit` (handle path) or `admin` (admin path): an older
+    broker never sees the request."""
+    client, int_id = _route(id)
+    host = id.partition(":")[0]
+    handle = _handle_for(id)
+    if handle is not None:
+        if not client.capabilities()["window_edit"]:
+            raise BrowserlandError(
+                0, "window_edit_unsupported",
+                f"host {host!r} does not advertise window_edit on /mcp/info "
+                "(an older broker); set_window is refused without sending.")
+        body: Dict[str, Any] = {"id": int_id, "handle": handle}
+    elif host in _admin_hosts:
+        if not client.capabilities()["admin"]:
+            raise BrowserlandError(
+                0, "admin_unsupported",
+                f"host {host!r} no longer confirms this server's admin "
+                "credential on /mcp/info (rotated in the Control Panel?); "
+                "set_window is refused without sending.")
+        body = {"id": int_id}
+    else:
+        raise BrowserlandError(
+            0, "no_handle",
+            f"no launch handle for {id!r} (this server restarted, or the "
+            "window was launched elsewhere) and its host has no confirmed "
+            "admin credential: set_window refuses without sending.")
+    # keep|set|clear: a non-empty value sets, a clear flag nulls, a key left
+    # empty+unflagged stays out of the body entirely (the broker keeps the
+    # field). Nothing in the body but id+handle is a local refusal, not a
+    # round-trip the broker would reject.
+    if clear_scope:
+        body["scope"] = None
+    elif scope:
+        body["scope"] = scope
+    if clear_mode:
+        body["mode"] = None
+    elif mode:
+        body["mode"] = mode
+    if "scope" not in body and "mode" not in body:
+        raise BrowserlandError(
+            0, "bad_args",
+            "set_window: nothing to change — pass scope/mode to set, or "
+            "clear_scope/clear_mode to clear (an omitted field is kept).")
+    return client.set_window(body)
+
+
+def set_mcp_knobs(host: str, default_mode: str = "",
+                  allow_launch: Optional[bool] = None,
+                  allow_desktop: Optional[bool] = None) -> Dict[str, Any]:
+    """Change a broker's broker-wide MCP knobs (#245 — ADMIN ONLY): the
+    default window mode (`default_mode`: off/read/readwrite), whether agents
+    may launch terminals (`allow_launch`), and whether the desktop relay is
+    on (`allow_desktop`). Pass a knob's value only to change it.
+
+    Requires a host whose admin credential this server confirmed at startup
+    (its --hosts entry carries "admin_token" and the startup probe saw
+    admin: true); every other host refuses locally and nothing is sent. The
+    MCP token, the admin token and the enabled switch stay Control-Panel
+    only — an admin agent cannot rotate credentials or disable the surface
+    it is using. A successful change re-reads the host's /mcp/info flags, so
+    a knob that turns a capability on (allow_desktop) is visible to the next
+    fail-closed tool call without restarting this server."""
+    if host not in _admin_hosts:
+        raise BrowserlandError(
+            0, "admin_required",
+            f"host {host!r} has no confirmed admin credential (its --hosts "
+            'entry needs "admin_token", and the startup probe must see '
+            "admin: true on /mcp/info); set_mcp_knobs refuses without "
+            "sending.")
+    for key, value in (("allow_launch", allow_launch),
+                       ("allow_desktop", allow_desktop)):
+        # Strict booleans, mirroring the broker's /mcp/knobs validation: a
+        # string "false" is truthy junk and must never reach the wire.
+        if value is not None and not isinstance(value, bool):
+            raise BrowserlandError(
+                0, "bad_args",
+                f"set_mcp_knobs: {key} must be a real boolean (true/false), "
+                f"got {value!r}.")
+    body: Dict[str, Any] = {}
+    if default_mode:
+        body["default_mode"] = default_mode
+    if allow_launch is not None:
+        body["allow_launch"] = allow_launch
+    if allow_desktop is not None:
+        body["allow_desktop"] = allow_desktop
+    if not body:
+        raise BrowserlandError(
+            0, "bad_args",
+            "set_mcp_knobs: nothing to change — pass default_mode, "
+            "allow_launch or allow_desktop.")
+    client = _named_client(host)
+    try:
+        result = client.set_knobs(body)
+    except BrowserlandError as exc:
+        # [c10]: a broker-side admin_required on a host the probe cleared
+        # means the credential rotated AFTER startup. Fail LOUD with the
+        # remedy, never silently retry without the header.
+        if exc.code == "admin_required":
+            raise BrowserlandError(
+                exc.status, exc.code,
+                f"host {host!r}: {exc} — the admin token may have been "
+                "rotated in the broker's Control Panel; refresh this "
+                "server's config and restart it.") from exc
+        raise
+    # [c23]: knobs can flip capabilities (allow_desktop gates the desktop
+    # tools); a successful change refreshes the host's cached flags.
+    client.capabilities(refresh=True)
+    return result
+
+
+def _require_desktop(client: BrowserlandClient, host: str) -> None:
+    """The #244 fail-closed gate, shared by every desktop tool: the relay is
+    opt-in (``allow_desktop``), and a broker that does not advertise it on
+    /mcp/info never sees a desktop request."""
+    if not client.capabilities()["allow_desktop"]:
+        raise BrowserlandError(
+            0, "desktop_unsupported",
+            f"host {host!r} does not advertise allow_desktop on /mcp/info "
+            "(enable the desktop relay in Control Panel → MCP access); the "
+            "desktop tools are refused without sending.")
+
+
+@mcp.tool()
+def get_desktop(host: str = "") -> Dict[str, Any]:
+    """Read a browser's desktop (#244): every window with its layout
+    (tiled column/row/width preset, or floating x/y/w/h), the viewport, the
+    focused column, and the workspaces when the workspaces mod is on. The
+    snapshot comes from the browser holding the control lease; `home` says
+    whether that browser's home is this broker, and floating geometry is
+    AS THAT BROWSER SEES IT (per-browser state, not stored on the broker).
+
+    With `host` set, returns that one host's snapshot. Omit `host` (or pass
+    "") for a dict keyed by host name — each value is that host's snapshot,
+    or `{"ok": false, "error": ...}` when its relay is off or it has no
+    active browser. Fails closed per host: a broker that does not advertise
+    `allow_desktop` is never asked."""
+    if host:
+        client = _named_client(host)
+        _require_desktop(client, host)
+        return client.get_desktop()
+    out: Dict[str, Any] = {}
+    for name in _host_configs:
+        try:
+            client = _get_client(name)
+            _require_desktop(client, name)
+            out[name] = client.get_desktop()
+        except Exception as exc:
+            out[name] = {"ok": False, "error": str(exc)}
+    return out
+
+
+#: The mutating window ops arrange_window relays (the read side is
+#: get_desktop's snapshot; `get` is not arrangeable).
+_ARRANGE_OPS = ("focus", "move_column", "set_width", "tile", "float",
+                "set_geometry", "tab_into", "split")
+
+
+@mcp.tool()
+def arrange_window(id: str, op: str, to: str = "", preset: str = "",
+                   x: int = -1, y: int = -1, w: int = -1, h: int = -1,
+                   target: str = "", axis: str = "") -> Dict[str, Any]:
+    """Arrange a window on the lease-holding browser's desktop (#244). Pass
+    the namespaced window id ("<host>:<int>") and one op:
+      - `focus` — focus the window's column;
+      - `move_column` `to`="left"/"right" or a column index;
+      - `set_width` `preset`="1/3"/"1/2"/"2/3"/"max";
+      - `tile` / `float`;
+      - `set_geometry` `x`,`y`,`w`,`h` (floating only; the browser clamps to
+        the viewport);
+      - `tab_into` `target`=<namespaced id> — tab the window into the
+        target's tile;
+      - `split` `target`=<namespaced id> `axis`="row"/"column" — split after
+        the target.
+    `target` must be a window id on the SAME host as `id`. Ops apply on the
+    browser holding the control lease (window placement is per-browser
+    render, so any holder works) and are applied instantly. Fails closed
+    when the host does not advertise `allow_desktop` on /mcp/info."""
+    if op not in _ARRANGE_OPS:
+        raise BrowserlandError(
+            0, "bad_op",
+            f"arrange_window: unknown op {op!r}; use one of: "
+            + ", ".join(_ARRANGE_OPS) + ".")
+    client, int_id = _route(id)
+    host = id.partition(":")[0]
+    args: Dict[str, Any] = {"id": int_id}
+
+    def _target_int(what: str) -> int:
+        if not target:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"arrange_window: {what} needs target (a namespaced window "
+                "id on the same host).")
+        tclient, t_id = _route(target)
+        if tclient is not client:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"arrange_window: target {target!r} is on another host than "
+                f"{id!r}.")
+        return t_id
+
+    if op == "move_column":
+        if to in ("left", "right"):
+            args["to"] = to
+        else:
+            try:
+                args["to"] = int(to)
+            except ValueError:
+                raise BrowserlandError(
+                    0, "bad_args",
+                    "arrange_window: move_column's to must be 'left', "
+                    "'right' or a column index.") from None
+    elif op == "set_width":
+        if not preset:
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: set_width needs preset ('1/3', '1/2', "
+                "'2/3' or 'max').")
+        args["preset"] = preset
+    elif op == "set_geometry":
+        if min(x, y, w, h) < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: set_geometry needs x, y, w and h (all >= "
+                "0).")
+        args.update(x=x, y=y, w=w, h=h)
+    elif op == "tab_into":
+        args["target"] = _target_int("tab_into")
+    elif op == "split":
+        if axis not in ("row", "column"):
+            raise BrowserlandError(
+                0, "bad_args",
+                "arrange_window: split needs axis 'row' or 'column'.")
+        args["target"] = _target_int("split")
+        args["axis"] = axis
+    _require_desktop(client, host)
+    return client.desktop_op(op, args)
+
+
+#: The workspace ops the `workspaces` tool relays (prefixed
+#: "workspaces:<op>" on the wire, the broker's allowlist).
+_WORKSPACE_OPS = ("list", "add", "rename", "remove", "switch", "send-window")
+
+
+def workspaces(host: str, op: str, name: str = "", index: int = -1,
+               target: int = -1, win: str = "",
+               force: bool = False) -> Dict[str, Any]:
+    """Manage the workspaces of a browser's desktop (#244 — ADMIN ONLY;
+    workspace data spans every window, whatever its scope). Ops:
+      - `list` — the workspaces and the active index;
+      - `add` `name?`;
+      - `rename` `index` `name`;
+      - `remove` `index` — a NON-EMPTY workspace answers needs_confirm
+        unless `force=true` (its windows move to the adjacent workspace; no
+        dialog is ever shown); the last workspace is always refused;
+        `force` is remove-only — every other op rejects it locally;
+      - `switch` `index`;
+      - `send-window` `win`=<namespaced window id on this host>
+        `target`=<workspace index>.
+    Requires a host whose admin credential this server confirmed at
+    startup, and whose relay advertises `allow_desktop`. The op runs on the
+    browser holding the control lease, and workspace data belongs to a
+    browser's HOME desktop: when that browser's home is another broker the
+    op answers `not_home` — run workspace ops from the home broker's host.
+    With the workspaces mod off the op answers
+    `{"ok": false, "reason": "absent"}` (or "inactive") instead of a silent
+    no-op."""
+    if op not in _WORKSPACE_OPS:
+        raise BrowserlandError(
+            0, "bad_op",
+            f"workspaces: unknown op {op!r}; use one of: "
+            + ", ".join(_WORKSPACE_OPS) + ".")
+    # force means "bypass remove's needs_confirm"; on any other op it is a
+    # misunderstood call, and silently ignoring it hides the mistake. Refuse
+    # locally — the broker never sees a frame.
+    if force and op != "remove":
+        raise BrowserlandError(
+            0, "bad_args",
+            "workspaces: force applies only to remove (it bypasses "
+            "needs_confirm); refusing without sending.")
+    if host not in _admin_hosts:
+        raise BrowserlandError(
+            0, "admin_required",
+            f"host {host!r} has no confirmed admin credential (its --hosts "
+            'entry needs "admin_token", and the startup probe must see '
+            "admin: true on /mcp/info); workspaces refuses without "
+            "sending.")
+    client = _named_client(host)
+    args: Dict[str, Any] = {}
+    if op == "add":
+        if name:
+            args["name"] = name
+    elif op == "rename":
+        if not name or index < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces rename needs index and name.")
+        args.update(index=index, name=name)
+    elif op == "remove":
+        if index < 0:
+            raise BrowserlandError(
+                0, "bad_args", "workspaces remove needs index.")
+        args["index"] = index
+        if force:
+            args["force"] = True
+    elif op == "switch":
+        if index < 0:
+            raise BrowserlandError(
+                0, "bad_args", "workspaces switch needs index.")
+        args["index"] = index
+    elif op == "send-window":
+        if not win or target < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces send-window needs win (a namespaced window id "
+                "on this host) and target (a workspace index).")
+        wclient, w_id = _route(win)
+        if wclient is not client:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"workspaces: win {win!r} is on another host than {host!r}.")
+        args.update(win=w_id, target=target)
+    _require_desktop(client, host)
+    return client.desktop_op(f"workspaces:{op}", args)

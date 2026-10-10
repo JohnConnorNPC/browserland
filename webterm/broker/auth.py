@@ -64,6 +64,10 @@ from typing import Optional, Tuple
 
 TOKEN_ENV = "WEB_TERMINAL_TOKEN"
 MCP_TOKEN_ENV = "WEB_TERMINAL_MCP_TOKEN"
+#: #245: the env override pinning the MCP ADMIN token (same "env wins" rule
+#: as MCP_TOKEN_ENV — the Control Panel cannot drift it from what a unit file
+#: pins).
+MCP_ADMIN_TOKEN_ENV = "WEB_TERMINAL_MCP_ADMIN_TOKEN"
 
 #: Sidecar holding the auto-minted browser token, a sibling of the state store
 #: (``webterm_state.json``) like every other broker sidecar. Git-ignored.
@@ -193,6 +197,17 @@ def resolve_mcp_token(config: Optional[dict]) -> Optional[str]:
     sidecar store (set/generated from the Control Panel). Distinct from the
     browser ``auth_token``: it gates the /mcp/* surface only."""
     return os.environ.get(MCP_TOKEN_ENV) or (config or {}).get("mcp_token") or None
+
+
+def resolve_mcp_admin_token(config: Optional[dict]) -> Optional[str]:
+    """Seed token for the MCP ADMIN credential (#245), mirroring
+    resolve_mcp_token: env (``WEB_TERMINAL_MCP_ADMIN_TOKEN``) wins over
+    ``config["mcp_admin_token"]``; unset by default, so admin is off out of
+    the box. Distinct from BOTH the browser ``auth_token`` and #191's broker
+    ``admin_token``: this one gates the /mcp/* admin surface only and never
+    unlocks an ADMIN_ROUTE."""
+    return (os.environ.get(MCP_ADMIN_TOKEN_ENV)
+            or (config or {}).get("mcp_admin_token") or None)
 
 
 def token_matches(provided: Optional[str], expected: Optional[str]) -> bool:

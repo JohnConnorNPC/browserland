@@ -17,7 +17,7 @@ pytest.importorskip("mcp")
 import httpx
 
 from webterm.mcptool import BrowserlandClient, BrowserlandError
-from webterm.protocol import SCOPE_HEADER
+from webterm.protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 
 
 # ---- client unit tests (httpx.MockTransport, no real broker) -------------
@@ -56,13 +56,21 @@ def _reset_server():
         c.close()
     server._host_configs = {}
     server._clients = {}
+    # Cross-config state the _install() injections bypass configure() for:
+    # cleared here the way a real configure() would clear them.
+    server._handles.clear()
+    server._admin_hosts.clear()
 
 
 @pytest.fixture(autouse=True)
 def _no_scope_env(monkeypatch):
-    """#232: --scope defaults from $BROWSERLAND_MCP_SCOPE, so a value in the
-    developer's shell must not leak into any argument-parsing cell."""
+    """#232/#245: --scope defaults from $BROWSERLAND_MCP_SCOPE and the admin
+    token from $BROWSERLAND_MCP_ADMIN_TOKEN / $WEB_TERMINAL_MCP_ADMIN_TOKEN,
+    so a value in the developer's shell must not leak into any
+    argument-parsing cell."""
     monkeypatch.delenv("BROWSERLAND_MCP_SCOPE", raising=False)
+    monkeypatch.delenv("BROWSERLAND_MCP_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("WEB_TERMINAL_MCP_ADMIN_TOKEN", raising=False)
 
 
 def test_info_get():
@@ -599,6 +607,28 @@ def test_ctrl_l_token_translation_unchanged():
     from webterm.mcptool import server
     assert server._keys_to_text(["C-l"]) == "\x0c"
     assert server._keys_to_text(["C-L"]) == "\x0c"   # case-insensitive, unchanged
+
+
+# ---- #243 review round 1: launch docstrings must state the unified wire ----
+
+def test_launch_docstrings_match_the_unified_mode_wire():
+    """Owner decision 2 on #243 (broker atom B2): EVERY /mcp/launch, scoped or
+    not, honors a valid `mode` and defaults to readwrite; the answer carries
+    `handle`. The shipped docstrings used to describe the pre-B2 wire ("a
+    valid mode is ignored" unscoped) while every test stayed green — exactly
+    the class of quiet wrongness the #131 docstring pins above exist for."""
+    from webterm.mcptool import server
+    doc = server.launch_terminal.__doc__ or ""
+    assert "ignored" not in doc, (
+        "launch_terminal still claims a valid mode can be ignored")
+    assert "default mode" not in doc, (
+        "launch_terminal still describes the unscoped default-mode inheritance")
+    assert "readwrite" in doc          # the new default is stated
+    assert "handle" in doc             # the launch handle is stated
+    cdoc = BrowserlandClient.launch_terminal.__doc__ or ""
+    assert "ignores a valid one" not in cdoc
+    assert "readwrite" in cdoc
+    assert "handle" in cdoc
 
 
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
@@ -1276,8 +1306,8 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None),
-                                   ("b", "https://y:4445", "t2", None)]
+    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None),
+                                    ("b", "https://y:4445", "t2", None, None)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1304,7 +1334,8 @@ def test_resolve_hosts_single_default(monkeypatch):
     from webterm.mcptool import __main__ as m
     monkeypatch.delenv(m.HOSTS_ENV, raising=False)
     args = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
-    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None)]
+    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None,
+                                       None)]
 
 
 def test_resolve_hosts_multi_from_env(monkeypatch):
@@ -1312,7 +1343,7 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1321,7 +1352,7 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None)]
 
 
 def _hosts_json(*entries):
@@ -1334,8 +1365,8 @@ def _hosts_json(*entries):
 def test_parse_hosts_reads_a_per_host_scope():
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
-    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA"),
-                                   ("b", "http://b:4445", "t", None)]
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None),
+                                    ("b", "http://b:4445", "t", None, None)]
 
 
 @pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
@@ -1344,8 +1375,8 @@ def test_an_absent_or_empty_host_scope_inherits(entry):
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, entry)
     assert m._parse_hosts(raw, "proc") == [
-        ("a", "http://a:4445", "t", "teamA"), ("b", "http://b:4445", "t",
-                                               "proc")]
+        ("a", "http://a:4445", "t", "teamA", None),
+        ("b", "http://b:4445", "t", "proc", None)]
 
 
 @pytest.mark.parametrize("bad", ["a b", "a:b", "x" * 65, "-lead", 5, None,
@@ -1372,7 +1403,7 @@ def test_the_scope_env_applies_to_every_host(monkeypatch):
                                                        "envscope"]
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         "envscope")]
+                                         "envscope", None)]
 
 
 def test_a_host_scope_beats_the_env(monkeypatch):
@@ -1389,7 +1420,7 @@ def test_the_scope_flag_beats_the_env(monkeypatch):
     args = m._parse_args(["--scope", "flagscope", "--token", "t",
                           "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t",
-                                       "flagscope")]
+                                       "flagscope", None)]
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])
@@ -1418,8 +1449,8 @@ def test_main_wires_scopes_into_configure(monkeypatch):
     monkeypatch.setattr(server.mcp, "run", lambda: None)
     raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
     assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA"),
-                                 ("b", "http://b:4445", "t", "teamB")]
+    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None),
+                                 ("b", "http://b:4445", "t", "teamB", None)]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1834,8 +1865,8 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta", None),
-                                 ("b", "http://y:4445", "tb", None)]
+    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None),
+                                 ("b", "http://y:4445", "tb", None, None)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------
@@ -1846,9 +1877,10 @@ async def test_tools_registered():
 
     tools = await server.mcp.list_tools()
     names = sorted(t.name for t in tools)
-    assert names == ["flush_input", "launch_terminal", "list_profiles",
-                     "list_terminals", "mcp_info", "read_screen",
-                     "reset_terminal", "send_input", "send_keys", "set_pace"]
+    assert names == ["arrange_window", "flush_input", "get_desktop",
+                     "launch_terminal", "list_profiles", "list_terminals",
+                     "mcp_info", "read_screen", "reset_terminal",
+                     "send_input", "send_keys", "set_pace", "set_window"]
 
 
 def test_tools_round_trip_through_http():
@@ -2156,3 +2188,691 @@ def test_the_readme_documents_scopes():
     launch = next(line for line in readme
                   if line.startswith("| `launch_terminal("))
     assert "mode?)" in launch and "`readwrite`" in launch
+
+
+# ---- #245 D1: the admin credential plumbs through every layer -------------
+
+def test_admin_header_sent_when_configured():
+    """#245: a client built with an admin token sends X-Browserland-Mcp-Admin
+    on EVERY request — beside the Bearer MCP token, never replacing it (the
+    admin credential unlocks admin-only ops; the MCP token still
+    authenticates the caller)."""
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append((req.headers.get(MCP_ADMIN_HEADER),
+                     req.headers.get("authorization")))
+        return httpx.Response(200, json={"ok": True})
+
+    with BrowserlandClient(base="http://broker:4445", token="t",
+                           admin_token="adm-sekrit",
+                           transport=httpx.MockTransport(handler)) as c:
+        for _label, call in _EVERY_CALL:
+            call(c)
+    assert seen == [("adm-sekrit", "Bearer t")] * len(_EVERY_CALL)
+
+
+def test_no_admin_header_without_token():
+    """#245: without an admin token the header is never sent — the wire is
+    exactly the pre-#245 surface for a non-admin host."""
+    broker = _ScopeBroker()
+    with _scoped(broker) as c:          # scope=None: plain unscoped client
+        c.list_terminals()
+        c.info()
+    assert all(MCP_ADMIN_HEADER not in r.headers for r in broker.requests)
+
+
+def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
+    """#245: --admin-token > $BROWSERLAND_MCP_ADMIN_TOKEN >
+    $WEB_TERMINAL_MCP_ADMIN_TOKEN (empty = none); a --hosts entry's own
+    "admin_token" is that host's credential (never inherited from the
+    process-wide value); the single-host fallback carries the resolved
+    token as the 5th descriptor field."""
+    from webterm.mcptool import __main__ as m
+
+    # flag beats both env vars
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "from-env")
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV_ALT, "from-alt")
+    args = m._parse_args(["--token", "t", "--admin-token", "from-flag"])
+    assert m._resolve_admin_token(args) == "from-flag"
+    # primary env beats the alt env
+    args = m._parse_args(["--token", "t"])
+    assert m._resolve_admin_token(args) == "from-env"
+    # alt env used when the primary is unset; nothing set -> None
+    monkeypatch.delenv(m.ADMIN_TOKEN_ENV, raising=False)
+    assert m._resolve_admin_token(args) == "from-alt"
+    monkeypatch.delenv(m.ADMIN_TOKEN_ENV_ALT, raising=False)
+    assert m._resolve_admin_token(args) is None
+
+    # --hosts entries carry their own admin_token; absent = None
+    raw = _hosts_json({"name": "a", "admin_token": "per-host"},
+                      {"name": "b"})
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", None,
+                                    "per-host"),
+                                   ("b", "http://b:4445", "t", None, None)]
+    with pytest.raises(ValueError) as ei:
+        m._parse_hosts(_hosts_json({"name": "a", "admin_token": 5}))
+    assert "admin_token" in str(ei.value) and "'a'" in str(ei.value)
+
+    # the single-host shorthand carries the resolved admin token
+    monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "env-admin")
+    single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
+    assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
+                                         None, "env-admin")]
+
+
+def test_get_client_carries_the_hosts_admin_token():
+    """#245: _get_client builds each host's client with that host's admin
+    token (the header rides every request of that host), via the HostConfig
+    map configure() installs."""
+    from webterm.mcptool import server
+    server.configure([("a", "http://a:4445", "t", None, "adm-a"),
+                      server.HostConfig("b", "http://b:4445", "t")])
+    try:
+        a, b = server._get_client("a"), server._get_client("b")
+        assert (a.admin_token, b.admin_token) == ("adm-a", None)
+        # the internal map is HostConfig-shaped; a legacy positional tuple
+        # still reads back normalized (test injections keep working)
+        server._host_configs["legacy"] = ("http://c:4445", "t", "teamA")
+        assert server._get_client("legacy").admin_token is None
+        assert server._get_client("legacy").scope == "teamA"
+    finally:
+        server._host_configs.pop("legacy", None)
+        server.configure([])
+
+
+# ---- #243/#244/#245: a mock broker for the capability-gated tool cells ----
+
+class _ToolBroker:
+    """MockTransport broker for the #243/#245/#244 tool cells. /mcp/info
+    answers the ``caps`` dict (default: every capability on); /mcp/launch
+    answers ``launch`` (default: an id + handle); /mcp/terminals answers
+    ``terminals``; everything else answers ``{"ok": True}``. ``responses``
+    maps a path to a ``request -> httpx.Response`` callable for bespoke
+    cells; ``faults`` works like _ScopeBroker's (a queue consumed one entry
+    per request to that path: None = answer normally, an httpx exception
+    class = raise, an httpx.Response = return). Every request is recorded."""
+
+    ALL_CAPS = {"admin": True, "window_edit": True, "allow_desktop": True}
+
+    def __init__(self, caps=None, launch=None, terminals=(), responses=None,
+                 faults=None):
+        self.caps = dict(self.ALL_CAPS) if caps is None else dict(caps)
+        self.launch = launch if launch is not None else {
+            "ok": True, "id": 7, "handle": "hh"}
+        self.terminals = list(terminals)
+        self.responses = responses or {}
+        self.faults = faults or {}
+        self.requests = []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        path = request.url.path
+        queue = self.faults.get(path)
+        fault = queue.pop(0) if queue else None
+        if isinstance(fault, httpx.Response):
+            return fault
+        if fault is not None:
+            raise fault("injected", request=request)
+        custom = self.responses.get(path)
+        if custom is not None:
+            return custom(request)
+        if path == "/mcp/info":
+            return httpx.Response(200, json=dict({"ok": True}, **self.caps))
+        if path == "/mcp/launch":
+            return httpx.Response(200, json=self.launch)
+        if path == "/mcp/terminals":
+            return httpx.Response(200, json=self.terminals)
+        return httpx.Response(200, json={"ok": True})
+
+    def count(self, path):
+        return sum(1 for r in self.requests if r.url.path == path)
+
+    def bodies(self, path):
+        return [json.loads(r.content) for r in self.requests
+                if r.url.path == path]
+
+
+# ---- #243 D2: launch handles, owned: true, set_window ----------------------
+
+def test_launch_stores_handle_and_list_marks_owned():
+    """#243: launch_terminal keeps the broker's handle keyed by the
+    namespaced id, and list_terminals marks exactly those rows ``owned:
+    true`` (a key only the handle-holders get, so a caller can tell which
+    windows set_window can still manage)."""
+    def handler(req):
+        if req.url.path == "/mcp/terminals":
+            return httpx.Response(200, json=[{"id": 7, "mode": "readwrite"},
+                                             {"id": 8, "mode": "read"}])
+        if req.url.path == "/mcp/launch":
+            return httpx.Response(200, json={"ok": True, "id": 7,
+                                             "handle": "h-7"})
+        return httpx.Response(200, json={"ok": True})
+
+    server = _install({"h": handler})
+    try:
+        out = server.launch_terminal()
+        listing = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["id"] == "h:7" and out["handle"] == "h-7"
+    owned = {t["id"]: t.get("owned") for t in listing["terminals"]}
+    assert owned == {"h:7": True, "h:8": None}
+
+
+def test_set_window_sends_handle_with_set_and_clear_semantics():
+    """#243: the tool composes the wire body from keep|set|clear semantics —
+    a non-empty string SETS the field, a clear_* flag sends an explicit
+    null, a key left empty+unflagged is absent from the body (the broker
+    keeps the field) — and the stored handle rides every call. A call with
+    nothing to change is a LOCAL refusal (no request)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()                     # mints + stores "hh"
+        server.set_window("h:7", scope="teamA")
+        server.set_window("h:7", clear_mode=True)
+        server.set_window("h:7", mode="read", clear_scope=True)
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7")
+    finally:
+        _reset_server()
+    assert broker.bodies("/mcp/window") == [
+        {"id": 7, "handle": "hh", "scope": "teamA"},
+        {"id": 7, "handle": "hh", "mode": None},
+        {"id": 7, "handle": "hh", "scope": None, "mode": "read"},
+    ]
+    assert ei.value.code == "bad_args"
+
+
+def test_set_window_without_handle_refuses_locally_and_sends_nothing():
+    """#243: no stored handle and no confirmed admin credential for the host
+    — the tool refuses locally (no_handle) and the broker sees NOTHING, not
+    even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:999", scope="x")
+    finally:
+        _reset_server()
+    assert ei.value.code == "no_handle"
+    assert broker.requests == []
+
+
+def test_set_window_fails_closed_without_window_edit_flag():
+    """#243: a broker whose /mcp/info does not advertise window_edit (an
+    older build) never sees a /mcp/window request: the owner path fails
+    closed after exactly one capability fetch."""
+    broker = _ToolBroker(caps={"admin": False, "window_edit": False,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()                     # handle stored
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "window_edit_unsupported"
+    assert broker.count("/mcp/info") == 1
+    assert broker.count("/mcp/window") == 0
+
+
+def test_set_window_admin_path_without_admin_flag_refuses():
+    """#245: on a host marked admin-capable at startup, the no-handle path
+    still fails closed when the broker's /mcp/info no longer answers
+    admin: true (a rotated credential): local refusal, nothing sent."""
+    broker = _ToolBroker(caps={"admin": False, "window_edit": True,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")       # what D3's startup probe would set
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_unsupported"
+    assert broker.count("/mcp/window") == 0
+
+
+def test_handles_lru_bounded_not_pruned_by_listing():
+    """#243: the handle store is an LRU bounded at 256 — a listing that HIDES
+    a window (off windows never arrive in /mcp/terminals) must not prune its
+    handle (it is the recovery path), while 256 newer handles evict the
+    OLDEST, whose set_window then refuses locally."""
+    state = {"next": 0}
+    broker = _ToolBroker(terminals=[{"id": 999, "mode": "read"}])
+
+    def launch(req):
+        state["next"] += 1
+        return httpx.Response(200, json={"ok": True, "id": state["next"],
+                                         "handle": f"h{state['next']}"})
+
+    broker.responses["/mcp/launch"] = launch
+    server = _install({"h": broker})
+    try:
+        first = server.launch_terminal()             # h:1, the eviction victim
+        for _ in range(server._HANDLES_MAX):         # 256 newer handles
+            server.launch_terminal()
+        assert first["id"] == "h:1"
+        server.list_terminals()                      # shows only 999
+        # h:2's handle survived a listing that hides it
+        server.set_window("h:2", mode="read")
+        assert broker.bodies("/mcp/window")[-1] == {
+            "id": 2, "handle": "h2", "mode": "read"}
+        # the OLDEST handle was evicted by the 256 newer ones
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:1", mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "no_handle"
+
+
+def test_caps_are_forgotten_when_the_broker_goes_away():
+    """#243: the capability cache follows the scope cache's rule — a failure
+    that can mean 'the broker behind this URL went away' (connection_error)
+    forgets it, so the next call re-probes /mcp/info instead of trusting
+    flags from the previous build."""
+    phase = {"info": 0}
+
+    def info(req):
+        phase["info"] += 1
+        if phase["info"] == 1:
+            return httpx.Response(200, json={"ok": True,
+                                             "window_edit": True})
+        return httpx.Response(200, json={"ok": True})   # no window_edit
+
+    broker = _ToolBroker(responses={"/mcp/info": info},
+                         faults={"/mcp/input": [httpx.ConnectError]})
+    server = _install({"h": broker})
+    try:
+        server.launch_terminal()
+        server.set_window("h:7", mode="read")         # caches caps (v1)
+        assert broker.count("/mcp/info") == 1
+        with pytest.raises(BrowserlandError) as gone:
+            server.send_input("h:7", "x")
+        assert gone.value.code == "connection_error"
+        assert broker.count("/mcp/info") == 1         # not yet re-probed
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")     # re-probes: caps v2
+    finally:
+        _reset_server()
+    assert ei.value.code == "window_edit_unsupported"
+    assert broker.count("/mcp/info") == 2
+    assert broker.count("/mcp/window") == 1           # only the v1 send
+
+
+def test_configure_clears_handles_admin_and_caps():
+    """#243/#245: configure() clears the handle store and the admin-host set
+    atomically with the rebuild (host names are reusable; a stale
+    'host:id' handle must not survive a re-pointed host), and the
+    capability caches die with the closed clients."""
+    from webterm.mcptool import server
+    server.configure([("h", "http://h:4445", "t", None)])
+    try:
+        old_client = server._get_client("h")
+        server._handle_remember("h:7", "stale")
+        server._admin_hosts.add("h")
+        server.configure([("h", "http://elsewhere:4445", "t", None)])
+        assert list(server._handles) == [] and server._admin_hosts == set()
+        assert server._get_client("h") is not old_client
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_window("h:7", mode="read")
+    finally:
+        server.configure([])
+    assert ei.value.code == "no_handle"
+
+
+# ---- #245 D3: the startup admin probe + admin-only tools -------------------
+
+def _configure_with(monkeypatch, hosts, handler_for):
+    """configure() with every host's client built over a MockTransport
+    running ``handler_for(name)`` (the way _get_client builds them), so the
+    startup admin probe is exercised for real without any network."""
+    from webterm.mcptool import server
+
+    def factory(base, token, scope=None, admin_token=None, name=None,
+                **kw):
+        return BrowserlandClient(base=base, token=token, scope=scope,
+                                 admin_token=admin_token, name=name,
+                                 transport=httpx.MockTransport(
+                                     handler_for(name)))
+    monkeypatch.setattr(server, "BrowserlandClient", factory)
+    server.configure(hosts)
+
+
+@pytest.mark.asyncio
+async def test_admin_tools_absent_when_no_host_admin(monkeypatch):
+    """#245: with no admin-token host configured, the probe never runs and
+    the admin tools stay unregistered (hidden unless admin). MUST run
+    before any test that registers them: FastMCP cannot unregister, so a
+    registration is process-lifetime [c24]."""
+    from webterm.mcptool import server
+    broker = _ToolBroker()
+    _configure_with(monkeypatch, [("h", "http://h:4445", "t", None, None)],
+                    lambda name: broker)
+    try:
+        assert server._admin_hosts == set()
+        assert broker.requests == []               # nothing probed at all
+        names = [t.name for t in await server.mcp.list_tools()]
+        assert "set_mcp_knobs" not in names
+    finally:
+        _reset_server()
+
+
+@pytest.mark.asyncio
+async def test_admin_probe_registers_admin_tools_when_any_host_admin(
+        monkeypatch):
+    """#245: the startup probe GETs /mcp/info on every admin-token host (the
+    header riding), records exactly the hosts whose body says admin: true —
+    with the header present; a probe without it reads admin: false and
+    registers nothing — and registers the admin tools once ANY host
+    qualifies. A host without an admin token is never probed."""
+    from webterm.mcptool import server
+
+    def a_info(req):
+        # admin is confirmed ONLY when the admin header rode the probe
+        return httpx.Response(200, json={
+            "ok": True, "admin": req.headers.get(MCP_ADMIN_HEADER) == "adm-a"})
+
+    brokers = {"a": _ToolBroker(responses={"/mcp/info": a_info}),
+               "b": _ToolBroker(caps={"window_edit": True})}   # no admin key
+    seen = []
+
+    def handler_for(name):
+        def handler(req):
+            seen.append((name, req.url.path))
+            return brokers[name](req)
+        return handler
+
+    _configure_with(monkeypatch, [
+        ("a", "http://a:4445", "t", None, "adm-a"),
+        ("b", "http://b:4445", "t", None, "adm-b"),
+        ("c", "http://c:4445", "t", None)],            # no admin token
+        handler_for)
+    try:
+        assert server._admin_hosts == {"a"}
+        assert sorted(seen) == [("a", "/mcp/info"), ("b", "/mcp/info")]
+        assert server._admin_tools_registered is True
+        names = [t.name for t in await server.mcp.list_tools()]
+        assert "set_mcp_knobs" in names
+    finally:
+        _reset_server()
+
+
+def test_admin_probe_failure_fails_closed(monkeypatch):
+    """#245: an admin host that cannot be reached (or answers anything but
+    admin: true) is NOT admin-capable: the probe fails closed, the host is
+    absent from _admin_hosts, and its admin tool calls refuse locally."""
+    from webterm.mcptool import server
+    broker = _ToolBroker(faults={"/mcp/info": [httpx.ConnectError]})
+    _configure_with(monkeypatch, [("h", "http://h:4445", "t", None, "adm")],
+                    lambda name: broker)
+    try:
+        assert server._admin_hosts == set()
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert broker.count("/mcp/knobs") == 0
+
+
+def test_admin_probe_concurrent_deadline(monkeypatch):
+    """#245: the probes run concurrently under ONE deadline — three slow
+    admin hosts cost about one wait, not three (the owner's worst case for
+    stdio startup is one client timeout, not timeout × hosts)."""
+    import time
+    from webterm.mcptool import server
+
+    def handler(req):
+        time.sleep(0.6)
+        return httpx.Response(200, json={"ok": True, "admin": True})
+
+    started = time.monotonic()
+    try:
+        _configure_with(monkeypatch, [
+            (n, f"http://{n}:4445", "t", None, "adm") for n in "abc"],
+            lambda name: handler)
+        elapsed = time.monotonic() - started
+        assert server._admin_hosts == {"a", "b", "c"}
+    finally:
+        _reset_server()
+    assert elapsed < 1.5, f"probe looked serial: {elapsed:.2f}s for 3 hosts"
+
+
+def test_admin_tool_refuses_locally_for_non_admin_host_and_sends_nothing():
+    """#245: set_mcp_knobs on a host without a confirmed admin credential
+    refuses LOCALLY (admin_required naming the host) and the broker sees
+    nothing — not even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert "'h'" in str(ei.value)
+    assert broker.requests == []
+
+
+def test_knobs_success_refreshes_capability_cache():
+    """#245 [c23]: a successful knobs call re-reads the host's /mcp/info, so
+    a knob that flips a capability (allow_desktop) is visible to the next
+    fail-closed tool call without restarting this server."""
+    broker = _ToolBroker()
+
+    def info(req):
+        if broker.count("/mcp/knobs"):
+            return httpx.Response(200, json={"ok": True,
+                                             "allow_desktop": True})
+        return httpx.Response(200, json={"ok": True})
+
+    broker.responses["/mcp/info"] = info
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")     # what the startup probe would set
+    try:
+        client = server._get_client("h")
+        assert client.capabilities()["allow_desktop"] is False
+        out = server.set_mcp_knobs("h", allow_desktop=True)
+    finally:
+        _reset_server()
+    assert out == {"ok": True}
+    assert broker.bodies("/mcp/knobs") == [{"allow_desktop": True}]
+    assert client.capabilities()["allow_desktop"] is True
+    assert broker.count("/mcp/info") == 2
+
+
+def test_rotated_admin_token_error_names_rotation():
+    """#245 [c10]: a broker-side 403 admin_required on a host the probe once
+    cleared surfaces as a LOUD error naming the host and the rotation
+    remedy — never a silent retry without the header."""
+    broker = _ToolBroker(responses={
+        "/mcp/knobs": lambda req: httpx.Response(
+            403, json={"error": "admin_required"})})
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("h", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert "'h'" in str(ei.value) and "rotated" in str(ei.value)
+
+
+# ---- #244 D4: get_desktop / arrange_window / workspaces --------------------
+
+def test_get_desktop_fails_closed_without_allow_desktop():
+    """#244: a broker whose /mcp/info does not advertise allow_desktop never
+    sees a /mcp/desktop request — the named form raises desktop_unsupported
+    after exactly one capability fetch, and the host-less aggregate reports
+    the refusal as that host's error entry instead of sinking the call."""
+    broker = _ToolBroker(caps={"admin": True, "window_edit": True,
+                               "allow_desktop": False})
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.get_desktop("h")
+        agg = server.get_desktop()
+    finally:
+        _reset_server()
+    assert ei.value.code == "desktop_unsupported"
+    assert broker.count("/mcp/info") == 1     # cached; the aggregate re-reads it
+    assert broker.count("/mcp/desktop") == 0
+    assert agg["h"]["ok"] is False
+    assert "allow_desktop" in agg["h"]["error"]
+
+
+def test_get_desktop_returns_the_snapshot():
+    """#244: with allow_desktop on, GET /mcp/desktop answers the snapshot the
+    browser produced (the broker re-identifies rows against its registry
+    before answering)."""
+    snapshot = {"ok": True, "viewport": {"w": 1920, "h": 1040},
+                "home": True, "windows": [{"id": 7, "title": "t",
+                                           "tiled": True}]}
+    broker = _ToolBroker(responses={"/mcp/desktop": lambda req: httpx.Response(
+        200, json=snapshot)})
+    server = _install({"h": broker})
+    try:
+        out = server.get_desktop("h")
+    finally:
+        _reset_server()
+    assert out == snapshot
+
+
+def test_arrange_window_builds_op_args_and_routes_id():
+    """#244: every op composes its args from the non-default params only,
+    the namespaced id is SPLIT to the bare int on the wire, a numeric
+    move_column `to` rides as an int, and a same-host `target` rides as an
+    int too."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        server.arrange_window("h:7", "focus")
+        server.arrange_window("h:7", "move_column", to="left")
+        server.arrange_window("h:7", "move_column", to="2")
+        server.arrange_window("h:7", "set_width", preset="1/3")
+        server.arrange_window("h:7", "tile")
+        server.arrange_window("h:7", "set_geometry", x=10, y=20, w=640, h=480)
+        server.arrange_window("h:7", "tab_into", target="h:9")
+        server.arrange_window("h:7", "split", target="h:9", axis="row")
+    finally:
+        _reset_server()
+    assert broker.bodies("/mcp/desktop") == [
+        {"op": "focus", "args": {"id": 7}},
+        {"op": "move_column", "args": {"id": 7, "to": "left"}},
+        {"op": "move_column", "args": {"id": 7, "to": 2}},
+        {"op": "set_width", "args": {"id": 7, "preset": "1/3"}},
+        {"op": "tile", "args": {"id": 7}},
+        {"op": "set_geometry", "args": {"id": 7, "x": 10, "y": 20,
+                                        "w": 640, "h": 480}},
+        {"op": "tab_into", "args": {"id": 7, "target": 9}},
+        {"op": "split", "args": {"id": 7, "target": 9, "axis": "row"}},
+    ]
+
+
+def test_arrange_window_rejects_unknown_op_locally():
+    """#244: an unknown op, a missing required param and a cross-host target
+    are all LOCAL refusals — the broker sees nothing, not even /mcp/info."""
+    broker = _ToolBroker()
+    server = _install({"h": broker, "o": _ToolBroker()})
+    try:
+        for kwargs in (
+                {"op": "explode"},                              # unknown op
+                {"op": "set_width"},                            # no preset
+                {"op": "move_column"},                          # no to
+                {"op": "set_geometry"},                         # no x/y/w/h
+                {"op": "tab_into"},                             # no target
+                {"op": "split", "target": "h:9"},               # no axis
+                {"op": "tab_into", "target": "o:9"}):           # other host
+            with pytest.raises(BrowserlandError) as ei:
+                server.arrange_window("h:7", kwargs.pop("op"), **kwargs)
+            assert ei.value.code in ("bad_op", "bad_args"), ei.value
+    finally:
+        _reset_server()
+    assert broker.requests == []
+
+
+def test_workspaces_admin_gate_and_arg_building():
+    """#244: workspace ops are admin-only — a host without a confirmed
+    admin credential refuses locally and sees nothing — and the ops compose
+    their args (bare ints for win, force only when true, the wire op
+    prefixed workspaces:)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.workspaces("h", "list")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert broker.requests == []
+
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")     # what the startup probe would set
+    try:
+        server.workspaces("h", "list")
+        server.workspaces("h", "add", name="build")
+        server.workspaces("h", "rename", index=1, name="w2")
+        server.workspaces("h", "remove", index=1, force=True)
+        server.workspaces("h", "switch", index=0)
+        server.workspaces("h", "send-window", win="h:5", target=2)
+        with pytest.raises(BrowserlandError) as bad:
+            server.workspaces("h", "send-window", target=2)   # no win
+    finally:
+        _reset_server()
+    assert bad.value.code == "bad_args"
+    assert broker.bodies("/mcp/desktop") == [
+        {"op": "workspaces:list", "args": {}},
+        {"op": "workspaces:add", "args": {"name": "build"}},
+        {"op": "workspaces:rename", "args": {"index": 1, "name": "w2"}},
+        {"op": "workspaces:remove", "args": {"index": 1, "force": True}},
+        {"op": "workspaces:switch", "args": {"index": 0}},
+        {"op": "workspaces:send-window", "args": {"win": 5, "target": 2}},
+    ]
+
+
+def test_workspaces_force_is_remove_only_and_refuses_locally():
+    """Review round 1 on #244: `force` means "bypass remove's needs_confirm".
+    On any other op it is a misunderstood call — silently ignoring it hides
+    the mistake — so the tool refuses locally (bad_args) and the broker sees
+    NOTHING, not even /mcp/info (the guard sits before the admin gate)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    try:
+        for op, kwargs in (("list", {}), ("add", {"name": "w"}),
+                           ("switch", {"index": 0}),
+                           ("send-window", {"win": "h:5", "target": 1})):
+            with pytest.raises(BrowserlandError) as ei:
+                server.workspaces("h", op, force=True, **kwargs)
+            assert ei.value.code == "bad_args", (
+                f"force on {op!r} must refuse bad_args, got {ei.value.code!r}")
+    finally:
+        _reset_server()
+    assert broker.requests == []
+
+
+def test_desktop_error_codes_map_to_readable_messages():
+    """#244: the relay's error codes surface as readable tool errors via the
+    client's table (never a raw code passthrough): no holder, not_home, and
+    the needs_confirm + force guidance."""
+    cases = [
+        ("no_active_browser", 409, "control lease"),
+        ("not_home", 409, "home"),
+        ("needs_confirm", 409, "force"),
+        ("desktop_timeout", 504, "answer"),
+    ]
+    for code, status, fragment in cases:
+        broker = _ToolBroker(responses={
+            "/mcp/desktop": lambda req, code=code, status=status: (
+                httpx.Response(status, json={"error": code}))})
+        server = _install({"h": broker})
+        try:
+            with pytest.raises(BrowserlandError) as ei:
+                server.arrange_window("h:7", "focus")
+        finally:
+            _reset_server()
+        assert ei.value.code == code
+        assert fragment in str(ei.value), (code, str(ei.value))
