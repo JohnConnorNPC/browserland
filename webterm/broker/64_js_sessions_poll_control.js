@@ -654,6 +654,13 @@
         }
         // The int ids of every window the op would reshape through `key`'s
         // membership: its whole column when tiled, just itself otherwise.
+        // PER-OP RULE (review round 1, N4): focus arranges nothing, so ONLY
+        // the named window gates for it (singleOnly in desktopVisibleGate);
+        // move_column/set_width reshape the whole column, tab_into/split
+        // both windows' columns, and tile/float/set_geometry reshape a tiled
+        // window's column too (a floating one is alone in its blast radius).
+        // Keys outside this broker's namespace (app windows, other brokers'
+        // windows sharing a column) have no id in visible and do not gate.
         function _desktopAffectedIds(hid, key) {
             const loc = findKeyInLayout(key);
             if (!loc) {
@@ -667,12 +674,15 @@
             }
             return out;
         }
-        function desktopVisibleGate(hid, visible, keys) {
+        function desktopVisibleGate(hid, visible, keys, singleOnly) {
             if (visible === null) return true;          // admin, unrestricted
             const seen = Object.create(null);
             for (let i = 0; i < visible.length; i++) seen[visible[i]] = true;
             for (const key of keys) {
-                for (const id of _desktopAffectedIds(hid, key)) {
+                const ids = singleOnly
+                    ? [_desktopIntId(hid, key)]
+                    : _desktopAffectedIds(hid, key);
+                for (const id of ids) {
                     if (seen[id] !== true) return false;
                 }
             }
@@ -803,8 +813,8 @@
             const badArgs = function (detail) {
                 return { ok: false, error: 'bad_args', detail: detail };
             };
-            const refuseGate = function (keys) {
-                if (!desktopVisibleGate(hid, visible, keys)) {
+            const refuseGate = function (keys, singleOnly) {
+                if (!desktopVisibleGate(hid, visible, keys, singleOnly)) {
                     return { ok: false, error: 'unknown_window' };
                 }
                 return null;
@@ -815,7 +825,10 @@
             const live = (win && !win.disposed) ? win : null;
             if (op === 'focus') {
                 if (!live) return { ok: false, error: 'unknown_window' };
-                const g = refuseGate([key]);
+                // Focus arranges nothing: only the named window gates (N4) --
+                // refusing because an invisible sibling shares the column
+                // would be over-strict.
+                const g = refuseGate([key], true);
                 if (g) return g;
                 revealAndFocusWindow(key);
                 return { ok: true, value: {
@@ -995,6 +1008,7 @@
                         out = { ok: false, error: 'not_home' };
                     } else {
                         const args = argsOf();
+                        let r = null;
                         if (msg.op === 'workspaces:send-window') {
                             // The wire's `win` int resolves in THIS
                             // connection's namespace before dispatch.
@@ -1003,16 +1017,28 @@
                                 out = { ok: false, error: 'unknown_window' };
                             } else {
                                 args.key = k;
-                                const r = await _execModCommand(msg.op, args);
-                                out = desktopLeaseLost()
-                                    ? { ok: false, error: 'lost_lease' }
-                                    : desktopCommandResult(r);
+                                r = await _execModCommand(msg.op, args);
                             }
                         } else {
-                            const r = await _execModCommand(msg.op, args);
+                            r = await _execModCommand(msg.op, args);
+                        }
+                        if (r !== null) {
                             out = desktopLeaseLost()
                                 ? { ok: false, error: 'lost_lease' }
                                 : desktopCommandResult(r);
+                            // Flush before ack, exactly as the core branch
+                            // (S1): every MUTATING workspace op awaits
+                            // pushState() first -- 'list' is a read -- and
+                            // the lease is re-checked after the flush.
+                            if (out.ok === true
+                                    && msg.op !== 'workspaces:list') {
+                                if (!desktopLeaseLost()) {
+                                    try { await pushState(); } catch (_) {}
+                                }
+                                if (desktopLeaseLost()) {
+                                    out = { ok: false, error: 'lost_lease' };
+                                }
+                            }
                         }
                     }
                 } else {

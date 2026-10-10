@@ -32,6 +32,11 @@ def test_mcp_applet_markup_wired_into_the_page():
         'id="set-mcp-copy-admin"',       # #245 Copy .mcp.json Admin checkbox
     ):
         assert el_id in INDEX_HTML, f"missing MCP applet element {el_id!r}"
+    # Review round 1 (N3): the checkbox carries its own hint line naming the
+    # master-switch + admin-token rule.
+    chunk = INDEX_HTML.split('id="set-mcp-allow-desktop"')[1][:600]
+    assert "One master switch for the desktop relay;" in chunk
+    assert "managing workspaces also needs the admin token." in chunk
 
 
 def test_allow_desktop_roundtrips_through_mcp_config():

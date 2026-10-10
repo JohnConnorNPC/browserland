@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 37
+EXPECTED_ASSERTS = 46
 
 _HARNESS = r"""
 'use strict';
@@ -315,6 +315,47 @@ function countMut(name) {
     state.deactivated = false;
     execNext = null;
 
+    // F4 (review round 1, S1): MUTATING workspaces ops flush before the ack
+    // exactly like the core branch; list is a read.
+    resetWorld();
+    execNext = { ok: true, value: { active: 2 } };
+    rearmPush(false);
+    const wsW = mkSock();
+    const pW = api.handleDesktopRpc('local', { ws: wsW }, wsW,
+        { rid: freshRid(), op: 'workspaces:switch', args: { index: 2 } });
+    await Promise.resolve();
+    await Promise.resolve();
+    ok(wsW.sent.length === 0,
+        'F4a a mutating workspaces op replies only after the flush');
+    pushResolve();
+    await pW;
+    ok(wsW.sent.length === 1 && wsW.sent[0].ok === true,
+        'F4b the workspaces reply lands once the flush resolves');
+    rearmPush(true);
+    const pushBefore = pushCalls;
+    execNext = { ok: true, value: { active: 0, items: [] } };
+    await drive('local', { rid: freshRid(), op: 'workspaces:list' });
+    ok(pushCalls === pushBefore,
+        'F4c workspaces:list never flushes');
+    resetWorld();
+    execNext = { ok: true, value: { removed: true } };
+    rearmPush(false);
+    const wsD = mkSock();
+    const pD = api.handleDesktopRpc('local', { ws: wsD }, wsD,
+        { rid: freshRid(), op: 'workspaces:remove',
+          args: { index: 1, force: true } });
+    await Promise.resolve();
+    await Promise.resolve();
+    state.deactivated = true;      // lease lost while the flush is pending
+    pushResolve();
+    await pD;
+    ok(wsD.sent.length === 1 && wsD.sent[0].ok === false
+        && wsD.sent[0].error === 'lost_lease',
+        'F4d lease lost after the workspaces flush answers lost_lease');
+    rearmPush(true);
+    state.deactivated = false;
+    execNext = null;
+
     // ---- V: the visible-set gate ------------------------------------------
     resetWorld();
     r = await drive('local', { rid: freshRid(), op: 'move_column',
@@ -337,6 +378,29 @@ function countMut(name) {
     ok(r && r.ok === false && r.error === 'unknown_window'
         && countMut('tabWindowInto') === 0,
         'V5 tab_into gates the target window too');
+
+    // S2 (review round 1): an absent or malformed visible fails CLOSED --
+    // never as an admin-style unrestricted frame.
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 7 } });
+    ok(r && r.ok === false && r.error === 'unknown_window',
+        'S2a a gated op with no visible key refuses (fail closed)');
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 7, visible: '7' } });
+    ok(r && r.ok === false && r.error === 'unknown_window',
+        'S2b a malformed visible (a string) refuses (fail closed)');
+
+    // V6 (review round 1, N4): focus arranges nothing, so only the named
+    // window gates; float keeps the column-wide gate for a tiled window.
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 7, visible: [7] } });
+    ok(r && r.ok === true && countMut('reveal') === 1,
+        'V6a focus applies even when the column holds an invisible sibling');
+    r = await drive('local', { rid: freshRid(), op: 'float',
+        args: { id: 7, visible: [7] } });
+    ok(r && r.ok === false && r.error === 'unknown_window'
+        && countMut('detachToFloat') === 0,
+        'V6b float keeps the column-wide gate (unknown_window)');
 
     // ---- C: command-result mapping ----------------------------------------
     resetWorld();
@@ -405,6 +469,8 @@ function countMut(name) {
     const rr = byId['null|remoteX:5'];
     ok(rr && rr.workspace === 1,
         'S1f a foreign-broker window is listed with a null id');
+    ok(r7 && r7.title === 'agent 7' && ra && ra.title === 'notes',
+        'S1g titles resolve from the session, falling back to the window name');
     execNext = { ok: false, reason: 'absent' };
     r = await drive('local', { rid: freshRid(), op: 'get',
         args: { visible: null } });
@@ -563,6 +629,18 @@ def test_lease_lost_mid_await_answers_lost_lease(scenario_run):
     _ok(scenario_run, "F3 lease lost during the command await answers lost_lease")
 
 
+def test_mutating_workspaces_ops_flush_before_the_ack(scenario_run):
+    # Review round 1 (S1): workspaces:add/rename/remove/switch/send-window
+    # ride the same flush-before-ack rule as the core branch -- success means
+    # the /state write was attempted under our lease -- and 'list' (a read)
+    # never flushes.
+    _ok(scenario_run, "F4a a mutating workspaces op replies only after the flush")
+    _ok(scenario_run, "F4b the workspaces reply lands once the flush resolves")
+    _ok(scenario_run, "F4c workspaces:list never flushes")
+    # The lease is re-checked after the flush too.
+    _ok(scenario_run, "F4d lease lost after the workspaces flush answers lost_lease")
+
+
 # ---- the visible-set gate (the owner's scope rule) ----------------------------
 
 
@@ -575,6 +653,22 @@ def test_the_gate_covers_the_affected_topology(scenario_run):
     _ok(scenario_run, "V2 an admin frame (visible null) applies")
     _ok(scenario_run, "V3 set_width gates the whole column, not the named id")
     _ok(scenario_run, "V5 tab_into gates the target window too")
+
+
+def test_focus_gates_only_the_named_window(scenario_run):
+    # Review round 1 (N4): focusing arranges nothing, so an invisible
+    # sibling sharing the column must not refuse a focus; tile/float/
+    # set_geometry keep the column-wide affected set for a tiled window.
+    _ok(scenario_run, "V6a focus applies even when the column holds an invisible sibling")
+    _ok(scenario_run, "V6b float keeps the column-wide gate (unknown_window)")
+
+
+def test_an_absent_or_malformed_visible_fails_closed(scenario_run):
+    # Review round 1 (S2): the broker always stamps args.visible (int[] or
+    # null); a frame without it -- or with a garbage shape -- must never
+    # read as unrestricted.
+    _ok(scenario_run, "S2a a gated op with no visible key refuses (fail closed)")
+    _ok(scenario_run, "S2b a malformed visible (a string) refuses (fail closed)")
 
 
 def test_a_non_admin_get_lists_only_visible_windows(scenario_run):
@@ -607,6 +701,7 @@ def test_the_snapshot_matches_the_world(scenario_run):
     _ok(scenario_run, "S1d a floating row carries live geometry as this browser sees it")
     _ok(scenario_run, "S1e an app window is listed with a null id")
     _ok(scenario_run, "S1f a foreign-broker window is listed with a null id")
+    _ok(scenario_run, "S1g titles resolve from the session, falling back to the window name")
     _ok(scenario_run, "S2 mod off: workspaces fields are null, rows keep flowing")
 
 
