@@ -156,6 +156,31 @@ writes the host's `admin_token` for you.)
   read the admin agent's `.mcp.json`, and with it the admin token. The admin
   token separates well-behaved agents; it is not a sandbox.
 
+### Launch handles (#243)
+
+Every `launch_terminal` answer carries a `handle`, minted by the broker for
+that launch. This server keeps each handle in memory, keyed by the returned
+namespaced id, and uses it to let the launching agent manage its own window
+afterwards:
+
+- `set_window(id, scope, mode, clear_scope, clear_mode)` presents the handle.
+  Fields are keep / set / clear: a non-empty value sets the field, a
+  `clear_scope`/`clear_mode` flag resets it (untagged / broker default), and
+  a field left empty with its flag false is left alone. The handle lets an
+  owner move its window to `off` or a foreign scope and back.
+- `list_terminals` marks the windows this server holds handles for as
+  `owned: true`.
+- **Restart loses handles.** They live in this process only (a bounded set;
+  the oldest are forgotten first, and a listing never prunes the handle of a
+  window it can no longer see — that hidden window is exactly the recovery
+  case). A restarted session recovers through the admin credential or the
+  browser. A browser-side edit to the window clears the stored owner, after
+  which the old handle answers 404.
+- The tool refuses locally (`no_handle`, nothing sent) when it holds no
+  handle and the host has no confirmed admin credential, and fails closed
+  when `/mcp/info` does not advertise `window_edit` (handle path) or `admin`
+  (admin path).
+
 A project's `.mcp.json` pins its scope like this:
 
 ```json
@@ -229,7 +254,7 @@ on the host prefix:
 | Tool | Endpoint | Notes |
 |---|---|---|
 | `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version` + `scope` (the scope this server declared, as the broker saw it). Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
-| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), `pace_ms` (the default `send_keys` pacing, `0` = single-burst) and `scope` (its tag, `null` when untagged). A scoped host lists only its own windows (see **Scopes**); one that does not confirm the scope, or lists a window with another tag, lands in `errors` with `scope_unsupported` |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), `pace_ms` (the default `send_keys` pacing, `0` = single-burst) and `scope` (its tag, `null` when untagged). Windows this server holds launch handles for (#243) are marked `owned: true`. A scoped host lists only its own windows (see **Scopes**); one that does not confirm the scope, or lists a window with another tag, lands in `errors` with `scope_unsupported` |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, wait_for_idle?, timeout_ms?, since?, attrs?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`, plus `stable_hash` (the same digest with the hardware-cursor cell masked — a cursor blink in place doesn't change it, a move does) and `idle_ms` (best-effort ms since the last PTY output; absent from older agents); `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame; `wait_for_idle=<ms>` holds until the screen has stopped changing for that many ms (measured on `stable_hash`) and returns `matched` (#135) — pass a `timeout_ms` comfortably larger than the idle window, and note a perpetually-animating app (Dwarf Fortress) never settles. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false`. `attrs=true` adds `attr_runs` — the styled fg/bg/reverse/bold/underscore cell runs — so a menu selection the plain text drops (marked by color, reverse-video, bold, or underline alone) is visible (#128, #136) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
@@ -237,7 +262,8 @@ on the host prefix:
 | `set_pace(id, pace_ms)` | `POST /mcp/pace` | **`readwrite`**; set a per-terminal DEFAULT `send_keys` pacing (ms, capped 1000, `0` disables) so multi-key sends auto-pace without passing `delay_ms` (#133). Broker-local + ephemeral (resets on agent reconnect) |
 | `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
 | `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
-| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?, mode?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced. A scoped launch is tagged before it starts and comes up in `mode` (`off`/`read`/`readwrite`), or `readwrite` without one; the result adds `scope` and `mode`. An unscoped launch ignores a valid `mode` (an invalid one is still `400 bad_mode`) |
+| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?, mode?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced. **Every** launch, scoped or not, comes up in `mode` (`off`/`read`/`readwrite`), or `readwrite` without one; a scoped launch is also tagged with its scope, and the answer adds `scope`, `mode` and a launch `handle` (see **Launch handles**) |
+| `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | `POST /mcp/window` | changes the scope and/or MCP mode of a window this server holds a launch handle for (`owned: true` in `list_terminals`), or of any window on an admin-confirmed host. Keep / set / clear per field: a value sets it, a `clear_*` flag sends an explicit null, an omitted field is left alone. Fails closed (no request) without a handle and without admin, or when `/mcp/info` lacks `window_edit` (handle path) / `admin` (admin path) |
 | `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` | `POST /mcp/knobs` | **admin only** (registered when the startup probe confirmed an admin host; refused locally for every other host). Sets the broker's default window mode and launch gate — never the tokens or `enabled`. A successful call re-reads `/mcp/info`, so a knob that turns a capability on is visible to the next fail-closed tool call |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,

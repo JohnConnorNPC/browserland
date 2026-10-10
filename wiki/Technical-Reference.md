@@ -573,6 +573,7 @@ up the contract:
 | POST | `/mcp/pace` | set a terminal's default send_keys pacing (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
+| POST | `/mcp/window` | set a window's scope/mode via launch handle or admin (#243) |
 | POST | `/mcp/knobs` | set broker-wide knobs (admin credential, #245) |
 
 The interface is **disabled by default** — nothing under `/mcp/*` answers until
@@ -722,6 +723,7 @@ effective mode to permit them.
 | `POST /mcp/pace` | mode `readwrite` | set the default send_keys pacing |
 | `GET /mcp/profiles` | token | profile names |
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
+| `POST /mcp/window` | handle or admin | set a window's scope/mode (#243) |
 | `POST /mcp/knobs` | admin credential | broker-wide knobs (#245) |
 
 **`GET /mcp/info`** →
@@ -881,19 +883,56 @@ Response is the launcher's:
 **200** when the agent registered within 10 s, **202** when it spawned but had
 not said `hello` yet (`"registered":false`).
 
-A **scoped** launch (the caller declared `X-Browserland-Scope`) tags the new
-window before its agent is spawned: the window's row in
-`webterm_mcp_windows.json` is written with a `null` pid and host, and the
-agent's first `hello` claims it, even a `hello` that reaches a restarted broker
-after a 202. The window comes up in the body's `mode`, or in **`readwrite`**
-when there is none (not `default_mode`: a launched worker is meant to be driven
-by its launcher, and `allow_launch` is already its own opt-in). The response
-adds `"scope"` and `"mode"`. If the launch fails after that, the row is removed
-again. A launch whose new window id already has a stored row is refused with
-**500 `prespawn_failed`** (a retry gets a new id), as is one whose row cannot be
-written; nothing is spawned either way. An **unscoped** launch writes no row:
-the window inherits `default_mode`, and a valid `mode` in the body is ignored.
-The browser's `/launch` never reads `mode`.
+Every **MCP** launch, scoped or not, takes the same path (#243): the window's
+row in `webterm_mcp_windows.json` is written before the agent is spawned, with
+a `null` pid and host, and the agent's first `hello` claims it — even a `hello`
+that reaches a restarted broker after a 202. The window comes up in the body's
+`mode`, or in **`readwrite`** when there is none (**not** `default_mode`,
+scoped or unscoped alike: a launched worker is meant to be driven by its
+launcher, and `allow_launch` is already its own opt-in). The broker also mints
+a **launch handle** — `secrets.token_urlsafe(32)` — and stores only its SHA-256
+hex digest as the row's `owner`; the plaintext handle is returned in the
+response (`"handle": "…"`, alongside `"scope"` and `"mode"`; `"scope"` is
+`null` for an unscoped launch) and nowhere else. An unscoped launch's row
+survives on its `owner` (and mode) even with no scope. If the launch fails
+after the row was written, the row is removed again — unless the agent's
+`hello` already claimed it. A launch whose new window id already has a stored
+row is refused with **500 `prespawn_failed`** (a retry gets a new id); when
+the collided row is long dead — not claimable by any live producer and not
+pending — the broker deletes just that row and retries **once** on a fresh id
+(never an in-place replacement, which would re-open the wildcard-claim
+hazard). A row that is still claimable keeps the refusal. The browser's
+`/launch` is unchanged: it never reads `mode` and writes no row.
+
+**`POST /mcp/window`** — body `{"id": <int>, "handle"?: <str>, "scope"?:
+<str>|null, "mode"?: "off"|"read"|"readwrite"|null}` (#243). Sets the scope
+and/or MCP mode of one window; an absent key leaves its field, an explicit
+`null` clears it (exactly `/session/mcp`'s body rules). Two paths, tried in
+order:
+
+* **handle** (preferred, admin included): the row must carry an `owner`, the
+  caller's handle must hash to it (constant-time compare), and a live entry
+  for the id must be the row's own producer. The handle bypasses the
+  off/out-of-scope filter — an owner can set its window to `off`, or to a
+  scope it does not hold, and undo it. A matching-handle write **keeps** the
+  owner.
+* **no handle**: requires the admin credential; the write targets any window
+  with a live entry or a stored row, and **clears** the old owner (a stale
+  agent handle cannot undo an admin decision) while stamping the window as
+  admin-driven (the taskbar badge).
+
+Every handle-path failure — a wrong or missing handle, an unknown id, an
+unowned row, a foreign producer — answers the **identical 404
+`unknown_or_off` bytes** as every other id-taking route, so the route cannot
+be used to probe which ids exist. Validation (`bad_json`/`bad_id`, `bad_mode`,
+`bad_scope` — 400) runs before any write, and the authorization is re-checked
+**inside** the store's single locked write, so an admin's owner-clear landing
+between validation and commit turns a stale handle into the same 404 rather
+than a write. The change persists across a broker restart and is re-applied on
+the same producer's reconnect; a `/session/mcp` edit clears the row's `owner`,
+after which the old handle gets the 404; a pre-spawn row (202 window before
+its first `hello`) is editable by its owner. `GET /mcp/info` answers
+`"window_edit": true` on a broker that has this route. <!-- VERIFY-BROKER: /mcp/window route, its identical-404 construction, in-mutate authorization, /mcp/info window_edit flag (atom B3, branch b243-broker at docs time) -->
 
 ### Error reference
 
@@ -904,7 +943,7 @@ The browser's `/launch` never reads `mode`.
 | 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after mcp_disabled and the token. An empty value is not refused: it means unscoped, which sees every window its mode allows |
 | 400 | `bad_json` | body is not a JSON object |
 | 400 | `bad_id` | `id` missing or not an integer |
-| 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope |
+| 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope; on `POST /mcp/window` (#243) every handle-path failure answers these same bytes, so ids cannot be probed |
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
 | 413 | `too_large` | `/mcp/input` payload > 256 KiB |
@@ -979,7 +1018,9 @@ that field as it was. `"mode": null` clears the override (the window inherits
 is the RAW override (`null` while inheriting), never the effective mode. Every
 change is written to `webterm_mcp_windows.json` before it takes effect, so it
 survives a broker restart (see Access modes), and an identical repeat writes
-nothing. Errors, in the order they are checked: `bad_json` / `bad_id` (400),
+nothing. A browser-side edit also clears the row's `owner` (#243) — the human
+decision wins over the launching agent's handle, which stops working at once.
+Errors, in the order they are checked: `bad_json` / `bad_id` (400),
 `unknown_session` (404, no live window with that id; nothing is stored),
 `bad_mode` (400, an invalid mode, or neither `mode` nor `scope` given),
 `bad_scope` (400), `write_failed` (500, the store could not be written; nothing
@@ -1006,16 +1047,22 @@ written atomically next to the `/state` store (default
 
 ```json
 {"windows": {"<window id>": {"scope": "<str or null>", "mode": "<str or null>",
+                             "owner": "<64-hex sha256 or null>",
+                             "admin_set": false,
                              "pid": 12345, "host": "<str or null>",
                              "seen": 1790000000}}}
 ```
 
-`mode` is the RAW override (`null` = inherit `default_mode`), and a row with
-neither a scope nor a mode is deleted. `pid` (an int or `null`) and `host` name
+`mode` is the RAW override (`null` = inherit `default_mode`), `owner` (#243)
+is the SHA-256 hex digest of a launch handle (never the handle itself), and
+`admin_set` (#245) marks a window an admin credential launched or last
+re-tagged (it feeds the taskbar's `mcp_admin` flag on `/sessions`). A row
+carrying none of scope, mode or owner is deleted. `pid` (an int or `null`) and
+`host` name
 the producer the row was written for. Window ids are reused (an OS window
 handle is recycled), so a row is re-applied only to a hello from the same host
 with the same nonzero pid; a `null` pid or host is a wildcard, claimed by the
-first hello with a nonzero pid that matches the rest (a scoped `/mcp/launch`
+first hello with a nonzero pid that matches the rest (an `/mcp/launch`
 writes its row that way, before the agent exists). `seen` (epoch seconds)
 moves whenever a hello re-applies the row or a write changes it, and once a day
 while the window stays connected; the hello bumps reach disk through a

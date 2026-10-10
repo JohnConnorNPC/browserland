@@ -26,7 +26,7 @@ Every terminal window has a **robot button** that sets that window's MCP access 
 
 When an agent reads the screen or types into a terminal, that window's **robot icon briefly flashes**, so you can see at a glance when a harness is touching a session.
 
-You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below), except a window a scoped MCP client launches: that one starts in **Read-write** unless the launch asks for another mode. A mode set on a window is stored by the broker and kept across broker restarts (see **Scopes** below).
+You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below) — except a window an MCP client launches, scoped or not: that one starts in **Read-write** unless the launch asks for another mode (a worker its launcher can't drive is useless). A mode set on a window is stored by the broker and kept across broker restarts (see **Scopes** below).
 
 On a broker that supports scopes, the robot button also holds the window's **scope**: see **Scopes** below.
 
@@ -37,7 +37,7 @@ The robot button is specific to **terminals**. For the full list of window types
 MCP is configured per host in **Control Panel → Access → MCP access**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
-- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window a scoped MCP client launches starts in `readwrite` instead, unless the launch passes a `mode`, and a mode set on a window is kept across broker restarts (see **Scopes**).
+- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window an MCP client launches starts in `readwrite` instead — scoped or not, unless the launch passes a `mode` — and a mode set on a window is kept across broker restarts (see **Scopes**).
 - **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones).
 - **token** — a secret that authenticates the agent (set it yourself or hit **generate**). This is a **bearer secret distinct from the browser/UI password** you use to log in; granting MCP access does not hand out your login.
 
@@ -50,7 +50,7 @@ The in-app guide also shows a live **MCP status (this host)** entry — whether 
 Access is layered and **off by default** — you opt in at every level:
 
 - **Master enable is OFF by default.** While it is off, every MCP call returns `403 mcp_disabled`.
-- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows (a scoped MCP launch starts in `readwrite` unless it passes a `mode`, and a mode set on a window survives broker restarts). `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
+- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows (an MCP-launched window — scoped or not — starts in `readwrite` unless the launch passes a `mode`, and a mode set on a window survives broker restarts). `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
 - **`allow_launch`** is a separate gate — turning MCP on does not, by itself, let agents spawn terminals.
 - **The MCP token** is a separate bearer secret from your browser auth/UI password.
 
@@ -100,7 +100,7 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | Tool | What it does |
 |---|---|
 | `mcp_info(host?)` | Reports feature flags (`allow_launch`, `default_mode`) |
-| `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode, scope); a scoped server lists only its scope's windows |
+| `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode, scope); a scoped server lists only its scope's windows, and each row it can still manage with `set_window` is marked `owned: true` |
 | `list_profiles(host?)` | Lists launchable profile names and the default |
 | `read_screen(id, …)` | Returns the terminal's screen. Far more than a bounded grid: `view="scrollback"` and `lines` widen what is returned, `since` returns only what is new, `attrs` adds styling runs, and it can **wait** rather than poll — `wait_for_change`, `wait_for_text`, `wait_for_regex`, `wait_absent`, `wait_for_idle` |
 | `send_input(id, data)` | Types text into a window (window must be `readwrite`; newlines are sent as Enter) |
@@ -108,11 +108,22 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `set_pace(id, pace_ms)` | Sets a per-terminal default inter-key pacing for `send_keys` (window must be `readwrite`; ephemeral, `0` disables, capped at 1000 ms) |
 | `reset_terminal(id)` | Wipes Browserland's screen buffer for the window so the next `read_screen` starts clean (window must be `readwrite`; does not touch the running app) |
 | `flush_input(id)` | Discards keystrokes queued to the app but not yet consumed (window must be `readwrite`; a no-op on a Windows/ConPTY agent) |
-| `launch_terminal(profile?, cols, rows, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled). A scoped server's launch is tagged with its scope and starts in `readwrite`, or in `mode` when given |
+| `launch_terminal(profile?, cols, rows, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled). Every launch comes up in `readwrite`, or in `mode` when given — scoped or not; a scoped launch is tagged with its scope; the answer includes a launch `handle` (see **Launch handles**) |
+| `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | Changes the scope and/or MCP mode of a window this server launched (`owned: true`), or — on a host with an admin credential — of any window. Keep / set / clear per field: a value sets it, a `clear_*` flag resets it, an omitted field is left alone |
 
 ### Window ids
 
 Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`. The host part matches the name of the host the terminal belongs to, so one MCP server can front several brokers at once. See [[Hosts-and-Multi-Browser]] for how hosts are named.
+
+## Launch handles
+
+An agent that launches terminals gets a say in how they are exposed afterwards — including an **unscoped** agent, which previously could only watch its windows inherit the default mode. The rule is "the terminals *it* launched":
+
+- **Every launch mints a handle.** Each `launch_terminal` answer carries a `handle` — an opaque secret minted for that launch. The broker stores only its SHA-256 hash (in `webterm_mcp_windows.json`, as the row's `owner`); the handle itself lives only in the answer.
+- **What the owner can do.** `set_window(id, …)` presents the handle and sets the window's scope and/or MCP mode — it can set its own window to `off` and back, or to a foreign scope and back (the handle deliberately bypasses the off/out-of-scope filter, or an owner could never undo a change). Fields follow keep / set / clear semantics: a value sets it, a `clear_scope`/`clear_mode` flag resets it to untagged / the broker default, and a field you leave out is left alone.
+- **The browser wins.** Any edit you make in the browser (the window's MCP menu, `POST /session/mcp`) clears the row's owner — once you have set a window by hand, the agent that launched it cannot change it back. A relaunch that reuses a window id starts clean too: ownership never carries over to a different process.
+- **Seeing which are yours.** `list_terminals` marks the windows the MCP server holds handles for as `owned: true` — exactly the ones `set_window` can still manage.
+- **Restart loses handles.** The MCP server keeps handles in memory only (a bounded set; the oldest are forgotten). If it restarts — a Claude session ends and a new one begins — the new process holds no handles for the old windows. Recovery is by design: the **admin credential** can set any window's scope/mode without a handle, and you can always set it in the browser.
 
 <!-- help:ignore-start -->
 <!-- External-link cross-nav (README / TECHNICAL / mcptool) — not useful inside

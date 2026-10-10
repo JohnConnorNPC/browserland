@@ -16,6 +16,21 @@ story behind anything named below.
 
 ### Added
 
+- **Launch handles: an MCP agent can set the scope and MCP mode of the
+  terminals it launched** (#243). Every `/mcp/launch`, scoped or not, mints an
+  opaque handle returned in the answer (only its SHA-256 hash is stored on
+  disk); the new `POST /mcp/window` accepts `{id, handle, scope?, mode?}` and
+  lets the owner retag its own window — including to `off` or a foreign scope,
+  and back — while a browser-side edit clears the stored owner (the human
+  wins). `list_terminals` marks handle-held windows `owned: true`; the MCP
+  server's new `set_window` tool uses keep/set/clear field semantics, keeps
+  handles in memory (lost on its restart — the admin credential or the browser
+  recovers the window), and fails closed on brokers without `window_edit`.
+  A launch colliding with a long-dead stored row now deletes just that row and
+  retries once on a fresh id.
+  **Behaviour change:** an unscoped `/mcp/launch` with no `mode` now comes up
+  in `readwrite` instead of inheriting `default_mode` — every MCP launch does,
+  scoped or not (a launched worker its launcher cannot drive is useless).
 - **An MCP admin credential: one designated agent can manage every window and
   the broker-wide MCP knobs** (#245). A second, server-minted secret
   (Control Panel → MCP access → admin token: generate/rotate/clear, or the
