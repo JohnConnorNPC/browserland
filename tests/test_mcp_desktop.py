@@ -589,6 +589,30 @@ def test_stalled_sockets_cannot_stretch_the_deadline(tmp_path, monkeypatch):
     assert elapsed < 0.9, elapsed
 
 
+def test_desktop_get_keeps_unnamed_workspaces(tmp_path, monkeypatch):
+    """#244 round 2: a null/absent name is the UNNAMED workspace (the mod's
+    default label mode) and survives the rebuild with name null -- a default
+    desktop's get_desktop must not answer an empty workspaces list while
+    active_workspace points into it. Only a PRESENT name that is not a
+    str<=64 drops the entry."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    snap = {"active_workspace": 1, "workspaces": [
+        {"index": 0, "id": "L1", "name": None},      # unnamed
+        {"index": 1, "id": "L2"},                    # name absent
+        {"index": 2, "id": "L3", "name": "named"},
+        {"index": 3, "id": "L4", "name": 7},         # present, wrong type
+    ]}
+    _holder(app, _reply_ok(snap))
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    assert resp.status == 200
+    assert resp.json["workspaces"] == [
+        {"index": 0, "id": "L1", "name": None},
+        {"index": 1, "id": "L2", "name": None},
+        {"index": 2, "id": "L3", "name": "named"},
+    ]
+    assert resp.json["active_workspace"] == 1
+
+
 def test_desktop_result_union_enforced(tmp_path, monkeypatch):
     """#244 round 1 A6: the success/error union is ENFORCED, not just
     documented -- ok:true carries a value and no error key; ok:false one of

@@ -7721,9 +7721,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     continue
                 index = _snap_int(entry.get("index"))
                 ident = _snap_str(entry.get("id"), 64)
-                name = _snap_str(entry.get("name"), 64)
-                if index is None or ident is None or name is None:
+                if index is None or ident is None:
                     continue
+                # Round 2: a null/ABSENT name is the UNNAMED workspace (the
+                # mod's default label mode) and stays null; only a PRESENT
+                # name that is not a str<=64 drops the entry.
+                name = entry.get("name")
+                if name is not None:
+                    name = _snap_str(name, 64)
+                    if name is None:
+                        continue
                 items.append({"index": index, "id": ident, "name": name})
             out["workspaces"] = items
         return out
