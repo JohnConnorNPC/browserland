@@ -692,7 +692,6 @@ full URLs, so a token in a query string can leak there: the header is the
 only accepted channel. A **repeated** admin header is refused like a repeated
 scope header (**403 `admin_required`** — fail closed rather than silently
 picking one).
-<!-- VERIFY-ROUND1: repeated X-Browserland-Mcp-Admin header -> 403 (broker round 1, item A5) -->
 The refusal ladder on every token route is fixed order:
 `mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 403 `admin_required`
 (the header is present but wrong) → the route's own checks. A header sent
@@ -767,7 +766,9 @@ Every top-level field is rebuilt and type-checked broker-side — `viewport`
 ints, `mode` a short string, `focused_column`/`active_workspace` int or null,
 `home` a bool, `workspaces` a bounded list of small typed rows or null — so
 a lying or buggy browser cannot smuggle foreign ids or oversized strings
-past the relay. <!-- VERIFY-ROUND1: snapshot top-level type discipline (broker round 1, item A2) -->
+past the relay. Each workspace row is reduced to `{index, id, name}` with an
+unnamed workspace appearing as `name: null` (only a present, non-string or
+oversized name drops the row).
 
 **`POST /mcp/desktop`** — body `{"op": …, "args": …}` with the op allowlist
 above (else **400 `bad_op`**); op-specific arg errors answer **400
@@ -987,7 +988,6 @@ is a pre-spawn orphan (no pid and no host) or older than the 7-day prune age
 policy stays untouched. A row that is still claimable keeps the refusal
 (**500 `prespawn_failed`**) and nothing is spawned. The browser's
 `/launch` is unchanged: it never reads `mode` and writes no row.
-<!-- VERIFY-ROUND1: collision retry deletes only a pre-spawn orphan or a >7-day row (broker round 1, item A1) -->
 
 **`POST /mcp/window`** — body `{"id": <int>, "handle"?: <str>, "scope"?:
 <str>|null, "mode"?: "off"|"read"|"readwrite"|null}` (#243). Sets the scope
