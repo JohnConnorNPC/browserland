@@ -52,8 +52,16 @@
         const setMcpGenerate = document.getElementById('set-mcp-generate');
         const setMcpDefaultMode = document.getElementById('set-mcp-default-mode');
         const setMcpAllowLaunch = document.getElementById('set-mcp-allow-launch');
+        // #244: the desktop-relay master switch; #245: the separate admin
+        // credential's field + generate/rotate + clear, and the Copy .mcp.json
+        // Admin checkbox.
+        const setMcpAllowDesktop = document.getElementById('set-mcp-allow-desktop');
+        const setMcpAdminToken = document.getElementById('set-mcp-admin-token');
+        const setMcpAdminGenerate = document.getElementById('set-mcp-admin-generate');
+        const setMcpAdminClear = document.getElementById('set-mcp-admin-clear');
+        const setMcpCopyAdmin = document.getElementById('set-mcp-copy-admin');
         const setMcpUrlEl = document.getElementById('set-mcp-url');
-        const mcpConfigCache = new Map();     // hostId -> GET /mcp/config: {enabled,token,default_mode,allow_launch,token_env_pinned,known_scopes,python,pythonpath,local_url}
+        const mcpConfigCache = new Map();     // hostId -> GET /mcp/config: {enabled,token,admin_token,default_mode,allow_launch,allow_desktop,token_env_pinned,admin_token_env_pinned,known_scopes,python,pythonpath,local_url}
         const mcpConfigFetching = new Set();  // hostIds with an in-flight GET
         // #195: the CACHE joins the core-owned invalidation set; the in-flight
         // SET deliberately does not. It is a request guard that drops its own

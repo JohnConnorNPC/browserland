@@ -575,6 +575,8 @@
                 setMcpToken.value = '';
                 setMcpDefaultMode.value = 'off';
                 setMcpAllowLaunch.checked = false;
+                setMcpAllowDesktop.checked = false;
+                setMcpAdminToken.value = '';
                 if (setMcpCopyJson) setMcpCopyJson.disabled = true;
                 // Re-render ONLY if the GET actually populated the cache. An
                 // unconditional re-render re-enters this branch and re-fetches,
@@ -601,8 +603,23 @@
             // otherwise overwrite their typing before the change event fires).
             if (document.activeElement !== setMcpToken)
                 setMcpToken.value = cfg.token || '';
+            // ...nor the admin token (same rule, #245).
+            if (document.activeElement !== setMcpAdminToken)
+                setMcpAdminToken.value = cfg.admin_token || '';
             setMcpDefaultMode.value = cfg.default_mode || 'off';
             setMcpAllowLaunch.checked = !!cfg.allow_launch;
+            // #244: the desktop relay's master switch (old brokers: absent ->
+            // unchecked).
+            setMcpAllowDesktop.checked = !!cfg.allow_desktop;
+            // #245: env-pinned admin token mirrors the token rule — the field
+            // shows the pinned value but can never change it.
+            const adminPinned = !!cfg.admin_token_env_pinned;
+            setMcpAdminToken.disabled = adminPinned;
+            setMcpAdminGenerate.disabled = adminPinned;
+            setMcpAdminClear.disabled = adminPinned;
+            setMcpAdminToken.placeholder = adminPinned
+                ? 'set by WEB_TERMINAL_MCP_ADMIN_TOKEN (env)'
+                : '(none — no MCP admin)';
             // Env-pinned token: the broker won't accept UI token changes, so
             // disable the field + Generate and say why.
             const pinned = !!cfg.token_env_pinned;
@@ -621,6 +638,15 @@
                 setMcpCopyJson.title = canCopy ? ''
                     : (cfg.token ? 'this broker is too old to describe its MCP server'
                                  : 'set a token first');
+            }
+            // #245: the Admin checkbox is only meaningful when this host HAS
+            // an admin token to include.
+            if (setMcpCopyAdmin) {
+                setMcpCopyAdmin.disabled = !cfg.admin_token;
+                setMcpCopyAdmin.checked = !!cfg.admin_token
+                    && setMcpCopyAdmin.checked;
+                setMcpCopyAdmin.title = cfg.admin_token ? ''
+                    : 'no admin token — generate one first';
             }
         }
         // POST a patch to /mcp/config on the settings-target host; on success
@@ -646,12 +672,20 @@
                 saveMcpConfig({ enabled: setMcpEnabled.checked }));
             setMcpAllowLaunch.addEventListener('change', () =>
                 saveMcpConfig({ allow_launch: setMcpAllowLaunch.checked }));
+            setMcpAllowDesktop.addEventListener('change', () =>
+                saveMcpConfig({ allow_desktop: setMcpAllowDesktop.checked }));
             setMcpDefaultMode.addEventListener('change', () =>
                 saveMcpConfig({ default_mode: setMcpDefaultMode.value }));
             setMcpToken.addEventListener('change', () =>
                 saveMcpConfig({ token: setMcpToken.value }));
             setMcpGenerate.addEventListener('click', () =>
                 saveMcpConfig({ generate: true }));
+            // #245: generate over an existing admin token IS the rotate (the
+            // broker always mints fresh); clear nulls it.
+            setMcpAdminGenerate.addEventListener('click', () =>
+                saveMcpConfig({ admin_generate: true }));
+            setMcpAdminClear.addEventListener('click', () =>
+                saveMcpConfig({ admin_token: null }));
         }
 
         // ---- Copy .mcp.json (#235) -----------------------------------------
@@ -670,6 +704,10 @@
         function buildMcpJson(o) {
             const host = { name: o.name, url: o.url, token: o.token };
             if (o.scope) host.scope = o.scope;
+            // #245: the admin credential rides IN ADDITION to the token —
+            // the host entry carries both, and mcptool sends the admin header
+            // only when admin_token is present.
+            if (o.adminToken) host.admin_token = o.adminToken;
             const env = { BROWSERLAND_MCP_HOSTS: JSON.stringify([host]) };
             if (o.pythonpath) env.PYTHONPATH = o.pythonpath;
             return JSON.stringify({ mcpServers: { browserland: {
@@ -735,12 +773,23 @@
                     return;
                 }
                 setMcpCopyErr.classList.remove('show');
+                // #245: Admin checked requires an admin token to include; a
+                // missing one is an inline error, never a file without it.
+                const wantAdmin = !!(setMcpCopyAdmin
+                    && setMcpCopyAdmin.checked);
+                if (wantAdmin && !cfg.admin_token) {
+                    setMcpCopyErr.textContent = 'no admin token on this broker '
+                        + '— generate one first (or untick Admin)';
+                    setMcpCopyErr.classList.add('show');
+                    return;
+                }
                 const text = buildMcpJson({
                     name: mcpJsonHostName(host),
                     url: host.id === 'local' ? cfg.local_url
                         : String(host.url || '').replace(/\/+$/, ''),
                     token: cfg.token,
                     scope: scope,
+                    adminToken: wantAdmin ? cfg.admin_token : null,
                     python: cfg.python,
                     pythonpath: cfg.pythonpath,
                 });
