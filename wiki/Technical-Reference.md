@@ -575,6 +575,8 @@ up the contract:
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
 | POST | `/mcp/window` | set a window's scope/mode via launch handle or admin (#243) |
 | POST | `/mcp/knobs` | set broker-wide knobs (admin credential, #245) |
+| GET | `/mcp/desktop` | read the lease-holding browser's desktop snapshot (#244) |
+| POST | `/mcp/desktop` | relay one desktop op to the lease-holding browser (#244) |
 
 The interface is **disabled by default** — nothing under `/mcp/*` answers until
 an admin both enables it and sets a token (below). The broker serves the desktop
@@ -707,6 +709,75 @@ visibility and reach, and only tags the admin's own launches.
 **Never.** The MCP token, the admin token and `enabled` stay browser-only —
 `/mcp/knobs` answers 400 `bad_key` for them before any write.
 
+### Desktop relay (#244)
+
+`allow_desktop` (Control Panel → MCP access, `POST /mcp/config`, or an
+admin's `POST /mcp/knobs`; default **off**) is the master switch for the whole
+desktop relay — window arranging *and* workspace management, admin included.
+`GET /mcp/info` advertises it as `"allow_desktop": true|false`. The two routes
+below are gated by the full `/mcp/*` ladder and then by the flag (**403
+`desktop_disabled`**), and they relay each op to the **browser holding the
+control lease** over its `/control` socket: one frame per op
+(`{"type":"desktop_rpc","rid":<int>,"op":…,"args":…}`), one answer per rid.
+<!-- VERIFY-BROKER: allow_desktop key/flag/route behaviour (atoms C1+C2, branch b243-broker at docs time) -->
+
+* **No lease holder** → **409 `no_active_browser`** (fail, never queue); a
+  browser that does not answer within the 10 s end-to-end deadline → **504
+  `desktop_timeout`**; a browser that lost the lease mid-op → **409
+  `lost_lease`** with nothing half-applied.
+* **Visibility.** Every frame relayed for a NON-admin caller carries
+  `args.visible` — the int ids of the caller's visible windows on this broker
+  (effective mode ≠ `off`, in scope), computed at relay time; an admin's frame
+  carries `null`. The browser refuses `unknown_window` unless every window
+  the op **affects** — the named window, plus the whole column for
+  `move_column`/`set_width`, plus both windows' columns for `tab_into`/
+  `split` — is in that set, and the broker re-checks every **named** id
+  before relaying, answering the identical **404 `unknown_or_off`** bytes.
+  `get` for a non-admin keeps only rows whose id is in the visible set (the
+  broker re-filters rows against its own registry as a belt: identity and
+  titles come from the registry, never from the browser). Workspace ops are
+  **admin-only at the broker** (`403 admin_required` before any relay).
+* **Ops.** Window ops: `get`, `focus`, `move_column` (`to` = `left`/`right`
+  or an absolute column index — an index move expels a shared window to its
+  own column first, like a drag), `set_width` (`preset` = `1/3`/`1/2`/`2/3`/
+  `max`), `tile`, `float`, `set_geometry` (`x`,`y`,`w`,`h`, floating only,
+  browser-clamped, answered with the **applied** box), `tab_into`
+  (`target`), `split` (`target`, `axis` = `row`/`column`). Workspace ops
+  (`workspaces:list`/`add`/`rename`/`remove`/`switch`/`send-window`) are
+  forwarded to the mod's `ctx.commands`; the mod being off/absent answers
+  **200 `{"ok": false, "reason": "inactive"|"absent"}`**, not an error.
+
+**`GET /mcp/desktop`** — op `get`; answers `200 {"ok": true, …snapshot}`.
+The snapshot (as the lease-holding browser produces it, after the broker's
+registry re-identification) carries `viewport`, `mode`, `focused_column`,
+`workspaces` + `active_workspace` (`null` with the mod off), `home` (whether
+that browser's home is this broker), and one row per live window: `key`,
+`id` (an int for this broker's windows, `null` for app/foreign windows),
+`title`, `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
+for a custom width), `tabbed`/`split`, `minimized`, `workspace`, and
+`geometry` (`{x,y,w,h}` when floating — **per-browser pixel geometry, as that
+browser sees it**; never stored on the broker) or `null` when tiled.
+<!-- VERIFY-BROKER: snapshot processing + row re-identification (atom C2) -->
+
+**`POST /mcp/desktop`** — body `{"op": …, "args": …}` with the op allowlist
+above (else **400 `bad_op`**); op-specific arg errors answer **400
+`bad_args`**. The browser's own error codes map as:
+
+| browser `error` | HTTP | body |
+|---|---|---|
+| `unknown_window` | 404 | `unknown_or_off` — byte-identical to the chokepoint's 404 |
+| `bad_args` / `bad_op` | 400 | `bad_args` / `bad_op` |
+| `not_home` | 409 | workspace op arrived on a non-home broker's relay |
+| `lost_lease` | 409 | the browser lost the lease mid-op |
+| `needs_confirm` | 409 | `{"error":"needs_confirm","count":<live windows>}` — pass `force: true` |
+| `last_workspace` | 409 | the last workspace cannot be removed |
+| `absent` / `inactive` | 200 | `{"ok": false, "reason": …}` — the workspaces mod is off/absent |
+| `error` (op threw) | 502 | `desktop_op_failed` |
+
+`force: true` on `workspaces:remove` moves the windows to the **adjacent**
+workspace; **no dialog is ever shown in the browser for an MCP op**.
+<!-- VERIFY-BROKER: desktop_result validation + the whole HTTP mapping table (atom C2) -->
+
 ### Endpoints (MCP-token-gated)
 
 All require a valid MCP token; `read`/`input` additionally require the target's
@@ -725,6 +796,8 @@ effective mode to permit them.
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 | `POST /mcp/window` | handle or admin | set a window's scope/mode (#243) |
 | `POST /mcp/knobs` | admin credential | broker-wide knobs (#245) |
+| `GET /mcp/desktop` | `allow_desktop` | desktop snapshot (#244) |
+| `POST /mcp/desktop` | `allow_desktop` | one desktop op (#244) |
 
 **`GET /mcp/info`** →
 `{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e",
@@ -736,7 +809,10 @@ when it declared none or a proxy stripped the header, and absent from a broker
 that predates scopes. A client that declared a scope checks it here to fail
 closed (#230). `admin` (#245) is `true` only when this call carries a matching
 `X-Browserland-Mcp-Admin` credential — absent from a pre-#245 broker, which
-mcptool reads as "not admin" and fails closed on.
+mcptool reads as "not admin" and fails closed on. `window_edit` (#243) and
+`allow_desktop` (#244) advertise `POST /mcp/window` and the desktop relay the
+same way; a flag absent from an older broker reads as false.
+<!-- VERIFY-BROKER: window_edit + allow_desktop on /mcp/info (atoms B3/C1) -->
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
 omitted, and so are windows outside the caller's declared scope. `agent` is the
@@ -962,6 +1038,15 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 403 | `admin_required` | the `X-Browserland-Mcp-Admin` header is present but wrong, or an admin-only operation was called without admin (#245) |
 | 400 | `bad_key` | `POST /mcp/knobs` carries a key outside its three knobs — `token`, `admin_token` and `enabled` are browser-only (#245) |
 | 400 | `bad_value` | `POST /mcp/knobs` boolean knob is not a real JSON boolean (`"false"` is refused, not coerced) |
+| 403 | `desktop_disabled` | the desktop relay's `allow_desktop` switch is off (#244) |
+| 409 | `no_active_browser` | `/mcp/desktop` with no browser holding the control lease (ops are never queued) |
+| 504 | `desktop_timeout` | the lease-holding browser did not answer the desktop op in time |
+| 409 | `not_home` | a `workspaces:*` op arrived on a relay whose lease holder's home is another broker |
+| 409 | `lost_lease` | the browser lost the control lease mid-op; nothing was half-applied |
+| 409 | `needs_confirm` | `workspaces:remove` of a non-empty workspace without `force: true` — the body carries the live window `count` |
+| 409 | `last_workspace` | the last workspace cannot be removed |
+| 502 | `desktop_op_failed` | the browser's desktop op raised |
+| 400 | `bad_op` / `bad_args` | `/mcp/desktop` op outside the allowlist / op arguments invalid |
 
 ### Admin surface (browser `auth_token`-gated)
 
@@ -978,7 +1063,8 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 and `admin_token` are the live secrets, `""` when unset). `admin_token` (#245)
 is the MCP admin credential, shown to the browser-token holder like `token`
 (the browser is the root of trust); `admin_token_env_pinned` mirrors
-`token_env_pinned` for it. `known_scopes` lists the scopes on live
+`token_env_pinned` for it. `allow_desktop` (#244) is the desktop relay's
+master switch — a browser checkbox and an admin knob. `known_scopes` lists the scopes on live
 windows (any mode) and on stored per-window rows, sorted; a name a caller only
 declared on the header never appears. `python` is the interpreter running this
 broker (`sys.executable`), `pythonpath` the directory holding the `webterm`
@@ -988,7 +1074,8 @@ Panel's **Copy .mcp.json** builds a client file from them (#235). They are
 absolute server paths, shown only to a holder of the browser token.
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
-(`off`/`read`/`readwrite`), `allow_launch`, `token`, `generate:true` (mint a
+(`off`/`read`/`readwrite`), `allow_launch`, `allow_desktop` (#244), `token`,
+`generate:true` (mint a
 fresh `token_urlsafe(32)`), `admin_token` (the #245 credential: `null` or `""`
 clears it) or `admin_generate:true` (mint/rotate — a server-minted value only,
 never a client-chosen secret). Validated before any write; returns the GET
@@ -998,15 +1085,18 @@ shape. While the env pins the token, `token`/`generate` edits are **ignored**
 `bad_json` (400), `bad_mode` (400), `bad_token` (400, non-string `token`).
 
 **`POST /mcp/knobs`** (#245, admin credential required) — body
-`{"default_mode"?: "off"|"read"|"readwrite", "allow_launch"?: bool}` →
-`{"ok":true,"default_mode":…,"allow_launch":…}`. The admin agent's broker-wide
+`{"default_mode"?: "off"|"read"|"readwrite", "allow_launch"?: bool,
+"allow_desktop"?: bool}` → `{"ok":true,"default_mode":…,"allow_launch":…}`.
+The admin agent's broker-wide
 knobs, validated before any write: an unknown key — in particular `token`,
 `admin_token` or `enabled`, which stay browser-only — is **400 `bad_key`**, and
-`allow_launch` must be a real JSON boolean (a string `"false"` is truthy junk →
+the booleans must be real JSON booleans (a string `"false"` is truthy junk →
 **400 `bad_value`**, not coerced: the browser realm's `/mcp/config` keeps its
 historical coercion as pinned wire). A non-admin call is **403
 `admin_required`** before any validation. The write shares `/mcp/config`'s
-locked sidecar writer, so the two routes never interleave.
+locked sidecar writer, so the two routes never interleave. `allow_desktop`
+becomes a valid knob with #244's relay.
+<!-- VERIFY-BROKER: allow_desktop joining /mcp/knobs (atom C1) -->
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
 "scope": <str>|null}`, both keys optional →
@@ -1032,11 +1122,13 @@ config `mcp_state_path`). Schema:
 
 ```json
 {"token": "<secret or null>", "admin_token": "<secret or null>",
- "default_mode": "off", "allow_launch": false, "enabled": true}
+ "default_mode": "off", "allow_launch": false,
+ "allow_desktop": false, "enabled": true}
 ```
 
 `token` is `null` when the env pins it (the secret stays off disk), and so is
-`admin_token` under its own pin. The file self-heals if hand-edited or
+`admin_token` under its own pin; `allow_desktop` (#244) is the desktop relay's
+master switch, default off. The file self-heals if hand-edited or
 truncated. It holds only these broker-wide knobs: per-window modes and scopes
 live in `webterm_mcp_windows.json`, below.
 

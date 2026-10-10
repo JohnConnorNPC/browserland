@@ -16,6 +16,26 @@ story behind anything named below.
 
 ### Added
 
+- **MCP agents can read and arrange the desktop, and manage workspaces**
+  (#244). A new `allow_desktop` switch (Control Panel → MCP access, or an
+  admin's `set_mcp_knobs`; default off, master switch for the whole relay,
+  admin included) gates `GET`/`POST /mcp/desktop`: the broker relays each op
+  to the browser holding the control lease, which applies it through the
+  normal layout mutators and pushes `/state` before acknowledging, so other
+  viewers converge. New tools: `get_desktop` (snapshot incl. per-browser
+  floating geometry), `arrange_window` (focus / move column / set width /
+  tile / float / set geometry / tab into / split — with `move_column` to an
+  index expelling a shared window to its own column, like a drag) and
+  `workspaces` (list / add / rename / remove / switch / send-window).
+  A non-admin agent may arrange only the windows it can see — ops that would
+  reshape an invisible window answer the same `unknown_or_off` 404 as a
+  missing id, so nothing is probeable. Workspace management is admin-only;
+  with the mod off it answers `absent`/`inactive` rather than a silent no-op.
+  No active browser → `409 no_active_browser` (never queued); workspace ops
+  on a non-home relay → `409 not_home`; removing a non-empty workspace →
+  `409 needs_confirm` + the live window count, `force: true` moves its
+  windows to the adjacent workspace and **no dialog is ever shown in the
+  browser for an MCP op**; the last workspace is always refused.
 - **Launch handles: an MCP agent can set the scope and MCP mode of the
   terminals it launched** (#243). Every `/mcp/launch`, scoped or not, mints an
   opaque handle returned in the answer (only its SHA-256 hash is stored on

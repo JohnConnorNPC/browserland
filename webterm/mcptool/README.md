@@ -181,6 +181,28 @@ afterwards:
   when `/mcp/info` does not advertise `window_edit` (handle path) or `admin`
   (admin path).
 
+### Desktop tools (#244)
+
+`get_desktop`, `arrange_window` and `workspaces` drive the desktop of the
+browser holding the control lease, relayed by the broker — so they need the
+broker's **Allow MCP to arrange the desktop** switch (`allow_desktop`). All
+three fail closed per host (`desktop_unsupported`, no request) while
+`/mcp/info` lacks `allow_desktop: true`; a capability flip via
+`set_mcp_knobs` is picked up on the next call.
+
+- `get_desktop` is the read side: layout as that browser sees it (floating
+  geometry is per-browser state), plus the workspaces when the mod is on and
+  a `home` flag telling you which desktop you are looking at. Omit `host` to
+  get one entry per configured host — a snapshot, or an `{"ok": false}`
+  error entry for a host that cannot answer (relay off, no active browser).
+- A **non-admin** agent may arrange only the windows it can see: an op that
+  would reshape an invisible window (an `off` window, or another scope's
+  window sharing the moved/resized column) is refused with the same
+  `unknown_or_off` 404 as a missing id. An admin host is unrestricted.
+- `workspaces` needs the admin credential as well (workspace changes span
+  every window). `force` is **remove-only**: it exists to bypass remove's
+  `needs_confirm` and is refused locally on every other op.
+
 A project's `.mcp.json` pins its scope like this:
 
 ```json
@@ -265,6 +287,9 @@ on the host prefix:
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?, mode?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced. **Every** launch, scoped or not, comes up in `mode` (`off`/`read`/`readwrite`), or `readwrite` without one; a scoped launch is also tagged with its scope, and the answer adds `scope`, `mode` and a launch `handle` (see **Launch handles**) |
 | `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | `POST /mcp/window` | changes the scope and/or MCP mode of a window this server holds a launch handle for (`owned: true` in `list_terminals`), or of any window on an admin-confirmed host. Keep / set / clear per field: a value sets it, a `clear_*` flag sends an explicit null, an omitted field is left alone. Fails closed (no request) without a handle and without admin, or when `/mcp/info` lacks `window_edit` (handle path) / `admin` (admin path) |
 | `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` | `POST /mcp/knobs` | **admin only** (registered when the startup probe confirmed an admin host; refused locally for every other host). Sets the broker's default window mode and launch gate — never the tokens or `enabled`. A successful call re-reads `/mcp/info`, so a knob that turns a capability on is visible to the next fail-closed tool call |
+| `get_desktop(host?)` | `GET /mcp/desktop` | the lease-holding browser's desktop snapshot (window layout, viewport, workspaces). Fails closed (`desktop_unsupported`, no request) when the host does not advertise `allow_desktop`. Without `host`: one entry per configured host — a snapshot, or `{"ok": false, "error": …}` for a host whose relay is off or has no active browser |
+| `arrange_window(id, op, to?, preset?, x?, y?, w?, h?, target?, axis?)` | `POST /mcp/desktop` | op = `focus` / `move_column` (`to` = left, right or a column index — an index expels a shared window to its own column) / `set_width` (`preset`) / `tile` / `float` / `set_geometry` (`x,y,w,h`; the answer reports the box **as applied**) / `tab_into` (`target`) / `split` (`target`, `axis`). `target` must be a window id on the same host. Fails closed without `allow_desktop` |
+| `workspaces(host, op, …)` | `POST /mcp/desktop` | **admin only** (same registration as `set_mcp_knobs`). op = `list` / `add` (`name?`) / `rename` (`index`,`name`) / `remove` (`index`, `force?` — remove-only; `force` bypasses `needs_confirm` and is refused on any other op) / `switch` (`index`) / `send-window` (`win`, `target`). Fails closed without `allow_desktop`; a non-home lease holder answers `not_home` |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
 …) surface as a readable tool error (a `BrowserlandError`), not a raw stack

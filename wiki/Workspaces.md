@@ -111,6 +111,19 @@ Everything the dots could do is still reachable: the workspace menu (right-click
 
 Like the other two, this setting follows the browser you set it from, and every browser viewing the same broker converges on it.
 
+## Workspaces over MCP
+
+An MCP agent can manage workspaces too — with two gates stacked on top of each other, because workspace changes span **every** window on the desktop, whatever its scope:
+
+- the broker's **Allow MCP to arrange the desktop** switch (`allow_desktop`) must be on — it gates the whole desktop relay, window arranging included; and
+- the agent must hold the **admin credential** (#245) — a plain scoped or unscoped agent never gets to rename or remove a workspace out from under windows it cannot even see.
+
+The surface is the `workspaces` tool of the shipped MCP server (see [[MCP-and-AI-Agents]]): `list`, `add` (optional name, trimmed to 40 characters), `rename` (index + name; a blank name clears it), `switch` (index), `send-window` (a window id + a target index), and `remove` (index). Semantics follow the desktop's own rules, with one deliberate difference:
+
+- **Removing a non-empty workspace never pops a dialog.** Over MCP the answer is `needs_confirm` carrying the number of **live** windows the workspace holds; the agent passes `force: true` to proceed, and the windows move to the **adjacent** workspace — exactly what the desktop's own confirmation dialog says happens. The last workspace is refused outright (`last_workspace`), force or not.
+- **Mod off or absent.** With the workspaces mod disabled every op answers `inactive`; with it not installed, `absent` — a state report, never a silent no-op. (Over MCP you also learn *which* desktop you missed: workspace data belongs to a browser's **home** broker, and an op relayed through any other broker answers `not_home`.)
+- Everything else behaves as the desktop does: adding switches to the new workspace, `send-window` re-stamps the window's column onto the target workspace, and `list` reports the workspaces, the active index and where each column lives.
+
 ## What is shared, and what is per browser
 
 The set of workspaces, their names, and which columns belong to each are part of the broker's shared layout, so every browser looking at that broker sees the same workspaces. Which workspace a **floating** window belongs to is per browser, because a floating window's pixel geometry is per browser too.
