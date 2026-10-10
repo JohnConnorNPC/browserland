@@ -6580,12 +6580,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # shows: a write that REPLACES the row (always, for pid 0) must
             # not drop the other field. That value is the RAW override, so a
             # scope-only change never materialises the default mode.
-            # #245: the write also clears the durable ADMIN badge — the
-            # browser edit means a HUMAN took the window back, so the admin
-            # badge (and, from #243, the launch handle's owner) must not
-            # survive it.
+            # #245/#243: the write also clears the durable ADMIN badge AND
+            # the launch handle's owner — the browser edit means a HUMAN
+            # took the window back, so neither an agent's badge nor its
+            # handle may survive it.
             want = dict(fields)
             want["admin_set"] = None
+            want["owner"] = None
             if not work.merges(wid, pid=pid, host=host):
                 want.setdefault("scope", entry.mcp_scope)
                 want.setdefault("mode", entry.mcp_mode)
@@ -6834,7 +6835,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            # credential. A broker predating admin answers
                            # without the key, and a client must take absence
                            # as false (the scope echo pattern).
-                           "admin": _mcp_is_admin(request)})
+                           "admin": _mcp_is_admin(request),
+                           # #243: the window-edit route exists. A broker
+                           # without the flag does not accept handles; a
+                           # client fails closed on absence.
+                           "window_edit": True})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
@@ -7311,6 +7316,138 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json(exc.payload, status=exc.status)
         return sanic_json(dict(payload, scope=scope, mode=mode,
                                handle=handle), status=status)
+
+    async def _mcp_window(request: Request):
+        """POST /mcp/window (#243): set a window's scope and/or RAW mode
+        from the MCP side — the missing other half of allow_launch, so an
+        agent that launched a worker can also choose how it is exposed
+        afterwards. Body {id, handle?, scope?, mode?}: an absent key leaves
+        that field alone, an explicit null clears it (mode null = inherit
+        the default), exactly as /session/mcp reads its body.
+
+        Two paths, decided by the handle (a PRESENT handle is preferred for
+        everyone, admin included — an admin client editing its own launched
+        window keeps the owner, so the handle stays truthful):
+
+        * HANDLE: the row must carry an ``owner`` that is the sha256 of the
+          handle (constant-time compare), and when a live entry holds the id
+          the row must still be that producer's (same_producer) — a recycled
+          id under a different producer invalidates the handle. With no live
+          entry the row alone suffices: a pre-spawn edit, or an owner
+          editing while its producer reconnects. The handle bypasses the
+          scope/off filter ON PURPOSE: an owner that set its window off, or
+          into a scope it does not hold, must be able to undo it. A wrong or
+          missing handle, an unknown id, an unowned row and a foreign
+          producer all answer the ONE 404 unknown_or_off, so the route
+          cannot be used to probe which ids exist.
+        * NO handle: admin only (#245). Any window with a live entry or a
+          stored row; the write displaces the old owner (owner=None, so a
+          stale agent handle cannot undo an admin decision) and stamps
+          admin_set (the badge is "an admin agent is driving this window").
+
+        The authorization runs INSIDE the one shared writer's critical
+        section (against the working copy), so an admin's owner-clear or a
+        same-id producer swap cannot interleave between the check and the
+        write; a refusal detected there aborts with nothing written. The
+        write itself is ONE set() like /session/mcp's, carrying the live
+        entry's pid/host when there is one (the admin path on a recycled id
+        stamps the LIVE window's row, never the old row's) and the row's own
+        otherwise (a pre-spawn row keeps its wildcards). After the writer,
+        reapply() refreshes whatever entry holds the id, with the same
+        direct-set fallback as /session/mcp for a row that cannot re-apply
+        (a pid-0 producer)."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        try:
+            wid = int(body.get("id"))
+        except (TypeError, ValueError):
+            return sanic_json({"error": "bad_id"}, status=400)
+        # Validation order mirrors /session/mcp: neither key, then a bad
+        # mode, then a bad scope — all BEFORE any write.
+        if "mode" not in body and "scope" not in body:
+            return sanic_json({"error": "bad_mode"}, status=400)
+        fields: Dict[str, Any] = {}
+        if "mode" in body:
+            if body["mode"] is not None and body["mode"] not in MCP_MODES:
+                return sanic_json({"error": "bad_mode"}, status=400)
+            fields["mode"] = body["mode"]
+        if "scope" in body:
+            scope = body["scope"]
+            if scope is not None and not (isinstance(scope, str)
+                                          and SCOPE_RE.fullmatch(scope)):
+                return sanic_json({"error": "bad_scope"}, status=400)
+            fields["scope"] = scope or None
+        handle = body.get("handle")
+        admin = _mcp_is_admin(request)
+        store = app.ctx.mcp_windows
+        entry_now = app.ctx.registry.get(wid)
+
+        class _Refuse(Exception):
+            """The one refusal: answer the shared 404, write nothing."""
+
+        def _authorize(work):
+            """(pid, host, admin_stamp) for the write, or _Refuse. Runs
+            inside the writer against the working copy, so the decision is
+            linearized with the write."""
+            row = work.get(wid)
+            if isinstance(handle, str) and handle:
+                want = hashlib.sha256(handle.encode()).hexdigest()
+                if (row is None or row.get("owner") is None
+                        or not auth.token_matches(row["owner"], want)):
+                    raise _Refuse()
+                live = app.ctx.registry.get(wid)
+                if live is not None and not same_producer(row, live):
+                    raise _Refuse()
+                return row["pid"], row["host"], None
+            if not admin:
+                raise _Refuse()
+            live = app.ctx.registry.get(wid)
+            if row is None and live is None:
+                raise _Refuse()
+            if live is not None:
+                return live.pid, live.host, True
+            return row["pid"], row["host"], True
+
+        def _write(work):
+            pid, host, admin_stamp = _authorize(work)
+            want = dict(fields)
+            if admin_stamp is True:
+                want["owner"] = None
+                want["admin_set"] = True
+                if not work.merges(wid, pid=pid, host=host):
+                    # A REPLACING write must not drop the fields the body
+                    # left out: they come from the live entry (what
+                    # /sessions shows), exactly as /session/mcp does.
+                    if entry_now is not None:
+                        want.setdefault("scope", entry_now.mcp_scope)
+                        want.setdefault("mode", entry_now.mcp_mode)
+            work.set(wid, pid=pid, host=host, now=work.clock(), **want)
+            row = work.get(wid)
+            return ((row["scope"], row["mode"], bool(admin_stamp))
+                    if row is not None else (None, None, False))
+
+        try:
+            scope_out, mode_out, stamped = (
+                await app.ctx.persist_mcp_windows(_write))
+        except _Refuse:
+            return _mcp_unknown_or_off()
+        # Only now does the live entry change, re-applied from the row on
+        # whatever entry holds the id NOW (a hello that landed mid-write got
+        # the pre-write row; the writer's inflight mirror re-applies it
+        # there). The direct-set fallback covers the row a pid-0 producer
+        # can never re-apply.
+        live = app.ctx.registry.get(wid)
+        applied = live is not None and store.reapply(live)
+        if not applied and live is entry_now and entry_now is not None:
+            live.mcp_scope = scope_out
+            live.mcp_mode = mode_out
+            live.mcp_admin_launch = stamped
+        return sanic_json({"ok": True, "id": wid, "mode": mode_out,
+                           "scope": scope_out})
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
@@ -10060,6 +10197,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_pace, "/mcp/pace", methods=["POST"])
     app.add_route(_mcp_profiles, "/mcp/profiles", methods=["GET"])
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
+    app.add_route(_mcp_window, "/mcp/window", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
     app.add_route(_mcp_config_post, "/mcp/config", methods=["POST"])
     app.add_route(_mcp_knobs, "/mcp/knobs", methods=["POST"])
@@ -10125,6 +10263,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/pace", "preflight_mcp_pace"),
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
+    ("/mcp/window", "preflight_mcp_window"),
                              ("/mcp/config", "preflight_mcp_config"),
     ("/mcp/knobs", "preflight_mcp_knobs"),
                              ("/profiles/config", "preflight_profiles_config"),

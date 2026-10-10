@@ -356,7 +356,7 @@ def test_launch_claimable_row_still_refuses_prespawn_failed(tmp_path,
                                                              monkeypatch):
     """#243: the collided row IS claimable — its producer is live on the id —
     so the dead-row path declines: prespawn_failed, nothing spawned, the row
-    exactly as it was, and     only ONE launch attempt."""
+    exactly as it was, and only ONE launch attempt."""
     stale = _row(scope="old", mode="read", pid=55, host="hostA",
                  seen=T - 8 * 86400)
     _write_sidecar(_windows_path(tmp_path), {str(LAUNCHED): stale})
@@ -375,3 +375,294 @@ def test_launch_claimable_row_still_refuses_prespawn_failed(tmp_path,
     seen = after.pop("seen")
     assert seen >= stale["seen"]
     assert after == {k: v for k, v in stale.items() if k != "seen"}
+
+
+# ---- B3: POST /mcp/window -----------------------------------------------------
+
+from webterm.protocol import MCP_ADMIN_HEADER  # noqa: E402
+
+ADMIN_TOKEN = "admin-token-0123456789abcdef"
+
+
+def _make_admin_app(tmp_path, monkeypatch):
+    return _make_app(tmp_path, monkeypatch, mcp_admin_token=ADMIN_TOKEN)
+
+
+def _launch_for_handle(app, *, scope=None):
+    """A completed launch returning (handle, owner-hash)."""
+    _launch(app)
+    headers = [("Authorization", f"Bearer {MCP_TOKEN}")]
+    if scope is not None:
+        headers.append(("X-Browserland-Scope", scope))
+    _, resp = app.test_client.post("/mcp/launch", json={},
+                                   headers=headers)
+    assert resp.status == 200
+    handle = resp.json["handle"]
+    return handle, hashlib.sha256(handle.encode()).hexdigest()
+
+
+def _window(app, body, *, admin=None, token=MCP_TOKEN):
+    headers = [("Authorization", f"Bearer {token}")]
+    if admin is not None:
+        headers.append((MCP_ADMIN_HEADER, admin))
+    return app.test_client.post("/mcp/window", json=body, headers=headers)
+
+
+def test_window_route_sets_scope_and_mode_via_handle(tmp_path, monkeypatch):
+    """#243: the owner's edit writes BOTH fields through the one shared
+    writer and re-applies onto the live entry."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, owner = _launch_for_handle(app)
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": "teamB", "mode": "read"})
+    assert (resp.status, resp.json) == (200, {
+        "ok": True, "id": LAUNCHED, "scope": "teamB", "mode": "read"})
+    entry = app.ctx.registry.get(LAUNCHED)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamB", "read")
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert (row["scope"], row["mode"], row["owner"]) == ("teamB", "read",
+                                                         owner)
+
+
+def test_owner_sets_off_then_back_and_foreign_scope_then_back(
+        tmp_path, monkeypatch):
+    """#243: the handle lookup BYPASSES the scope/off filter — an owner that
+    sets its window off, or into a scope it does not hold, can undo it in
+    the next call."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    entry = app.ctx.registry.get(LAUNCHED)
+
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "off"})
+    assert resp.status == 200
+    assert (entry.mcp_mode, entry.mcp_scope) == ("off", None)
+
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "readwrite"})
+    assert resp.status == 200
+    assert entry.mcp_mode == "readwrite"
+
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": "theirs"})
+    assert resp.status == 200
+    assert entry.mcp_scope == "theirs"
+
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": None})
+    assert resp.status == 200
+    assert entry.mcp_scope is None
+
+
+def test_window_wrong_handle_missing_handle_unknown_id_unowned_row_identical_404_bytes(
+        tmp_path, monkeypatch):
+    """#243: a wrong handle, a missing handle (non-admin), an unknown id and
+    an unowned row all answer the ONE 404, byte for byte, so the route
+    cannot probe which ids exist."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    # an unowned row: a plain /session/mcp-written window
+    asyncio.run(app.ctx.persist_mcp_windows(
+        lambda work: work.set(8, scope="a", mode="read", pid=8,
+                              host="hostA", now=work.clock())))
+    _, wrong = _window(app, {"id": LAUNCHED, "handle": "not-the-handle",
+                             "mode": "off"})
+    _, missing = _window(app, {"id": LAUNCHED, "mode": "off"})
+    _, unknown = _window(app, {"id": 424242, "handle": handle,
+                               "mode": "off"})
+    _, unowned = _window(app, {"id": 8, "handle": handle, "mode": "off"})
+    assert wrong.status == missing.status == unknown.status \
+        == unowned.status == 404
+    assert wrong.json == {"error": "unknown_or_off"}
+    assert wrong.body == missing.body == unknown.body == unowned.body
+    # nothing was written: the launched row still carries its owner
+    assert app.ctx.mcp_windows.get(LAUNCHED)["mode"] == "readwrite"
+
+
+def test_window_bad_mode_bad_scope_400_no_write(tmp_path, monkeypatch):
+    """#243: validation runs before any write — a bad mode or a bad scope is
+    a 400 (the /session/mcp order: neither key, then mode, then scope) and
+    the store is untouched."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    row_before = app.ctx.mcp_windows.get(LAUNCHED)
+    _, neither = _window(app, {"id": LAUNCHED, "handle": handle})
+    _, bad_mode = _window(app, {"id": LAUNCHED, "handle": handle,
+                                "mode": "sometimes"})
+    _, bad_scope = _window(app, {"id": LAUNCHED, "handle": handle,
+                                 "scope": "a:b"})
+    for resp, code in ((neither, "bad_mode"), (bad_mode, "bad_mode"),
+                       (bad_scope, "bad_scope")):
+        assert (resp.status, resp.json["error"]) == (400, code)
+    assert app.ctx.mcp_windows.get(LAUNCHED) == row_before
+
+
+def test_window_absent_key_leaves_explicit_null_clears(tmp_path,
+                                                        monkeypatch):
+    """#243: an absent key leaves the field alone; an explicit null clears it
+    (mode null = inherit), exactly as /session/mcp reads its body."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app, scope="teamA")
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "read"})
+    assert resp.json["scope"] == "teamA"      # scope left alone
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle, "mode": None})
+    assert resp.json["mode"] is None          # inherit again
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": None})
+    assert resp.json["scope"] is None         # untagged again
+
+
+def test_window_change_persists_restart_and_same_producer_reconnect(
+        tmp_path, monkeypatch):
+    """#243: the change is durable — a fresh broker on the same sidecar
+    re-applies it when the same producer reconnects."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app, scope="teamA")
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": "moved", "mode": "read"})
+    assert resp.status == 200
+
+    again = _make_app(tmp_path, monkeypatch)
+    entry = asyncio.run(again.ctx.registry.register(
+        _WS(), _hello(LAUNCHED, 4242)))
+    assert (entry.mcp_scope, entry.mcp_mode) == ("moved", "read")
+
+
+def test_session_mcp_edit_clears_owner_then_handle_404(tmp_path,
+                                                        monkeypatch):
+    """#243: the browser wins — a /session/mcp edit clears the owner, after
+    which the old handle answers the shared 404."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    _, resp = app.test_client.post(
+        "/session/mcp", json={"id": LAUNCHED, "mode": "read"},
+        params={"token": app.ctx.auth_token})
+    assert resp.status == 200
+    assert app.ctx.mcp_windows.get(LAUNCHED)["owner"] is None
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "off"})
+    assert (resp.status, resp.json["error"]) == (404, "unknown_or_off")
+
+
+def test_recycled_id_different_producer_handle_404(tmp_path, monkeypatch):
+    """#243: the id was reused by a different producer — the old handle no
+    longer names its window, and the answer is the shared 404 (never a
+    write to the new producer's row)."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    row_before = app.ctx.mcp_windows.get(LAUNCHED)
+    _live(app, LAUNCHED, 9999)              # a different producer on the id
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "off"})
+    assert (resp.status, resp.json["error"]) == (404, "unknown_or_off")
+    assert app.ctx.mcp_windows.get(LAUNCHED) == row_before
+
+
+def test_prespawn_window_editable_before_first_hello(tmp_path, monkeypatch):
+    """#243: the row alone suffices when nothing is live — an owner can
+    retag its window before the first hello (a 202 mid-flight, or a
+    pre-spawn edit), and the row keeps its pid/host wildcards."""
+    app = _make_app(tmp_path, monkeypatch)
+    handle = "prespawn-handle-0123456789"
+    owner = hashlib.sha256(handle.encode()).hexdigest()
+    _write_sidecar(_windows_path(tmp_path), {})
+    asyncio.run(app.ctx.persist_mcp_windows(
+        lambda work: work.set(LAUNCHED, mode="readwrite", owner=owner,
+                              now=work.clock())))
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "scope": "early"})
+    assert resp.status == 200
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert (row["scope"], row["pid"], row["host"]) == ("early", None, None)
+
+
+def test_admin_edits_any_window_clears_owner_and_stamps_admin_set(
+        tmp_path, monkeypatch):
+    """#245: an admin (no handle) edits ANY window — a foreign scope, even
+    one with another agent's owner — and the write displaces that owner and
+    stamps the admin badge."""
+    app = _make_admin_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app, scope="theirs")
+    _, resp = _window(app, {"id": LAUNCHED, "scope": "mine",
+                            "mode": "readwrite"}, admin=ADMIN_TOKEN)
+    assert (resp.status, resp.json) == (200, {
+        "ok": True, "id": LAUNCHED, "scope": "mine", "mode": "readwrite"})
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert row["owner"] is None and row["admin_set"] is True
+    entry = app.ctx.registry.get(LAUNCHED)
+    assert (entry.mcp_scope, entry.mcp_mode, entry.mcp_admin_launch) == (
+        "mine", "readwrite", True)
+    # the displaced owner's handle no longer works
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "off"})
+    assert resp.status == 404
+
+
+def test_admin_client_handle_edit_keeps_owner_and_admin_set(
+        tmp_path, monkeypatch):
+    """#245/#243 [c27]: a PRESENT, matching handle takes the owner path for
+    everyone, admin included — an admin client's ordinary edit of its own
+    launched window keeps the owner and does not re-stamp."""
+    app = _make_admin_app(tmp_path, monkeypatch)
+    handle, owner = _launch_for_handle(app, scope="teamA")
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "read"}, admin=ADMIN_TOKEN)
+    assert resp.status == 200
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert row["owner"] == owner and row["admin_set"] is None
+    assert app.ctx.registry.get(LAUNCHED).mcp_admin_launch is False
+
+
+def test_owner_clear_concurrent_with_admin_clear_owner_wins(
+        tmp_path, monkeypatch):
+    """#243/#245 [c1][c2]: the authorization runs INSIDE the writer's
+    critical section, so an admin's owner-clear that lands between the
+    route's parse and the write turns the owner's edit into the shared 404
+    instead of a stale-handle write."""
+    app = _make_admin_app(tmp_path, monkeypatch)
+    handle, _owner = _launch_for_handle(app)
+    real_persist = app.ctx.persist_mcp_windows
+
+    async def interleaved(mutate):
+        def admin_clear(work):
+            row = work.get(LAUNCHED)
+            if row is not None:
+                work.set(LAUNCHED, owner=None, pid=row["pid"],
+                         host=row["host"], now=work.clock())
+        await real_persist(admin_clear)      # the admin write lands first
+        return await real_persist(mutate)    # then the owner's
+
+    app.ctx.persist_mcp_windows = interleaved
+    _, resp = _window(app, {"id": LAUNCHED, "handle": handle,
+                            "mode": "off"})
+    assert (resp.status, resp.json["error"]) == (404, "unknown_or_off")
+    # and nothing was written by the refused owner call
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert row["mode"] == "readwrite" and row["owner"] is None
+
+
+def test_admin_window_write_stamps_live_window_not_old_row(
+        tmp_path, monkeypatch):
+    """#245 [c7]: a recycled id under a different producer — the admin edit
+    stamps the LIVE window's row (the new row carries the live pid), never
+    the old row's identity."""
+    app = _make_admin_app(tmp_path, monkeypatch)
+    _launch_for_handle(app, scope="teamA")
+    _live(app, LAUNCHED, 9999)              # a different producer took the id
+    _, resp = _window(app, {"id": LAUNCHED, "scope": None, "mode": "read"},
+                      admin=ADMIN_TOKEN)
+    assert resp.status == 200
+    row = app.ctx.mcp_windows.get(LAUNCHED)
+    assert (row["pid"], row["host"], row["admin_set"]) == (9999, "hostA",
+                                                           True)
+
+
+def test_info_advertises_window_edit(tmp_path, monkeypatch):
+    """#243: /mcp/info carries window_edit: true — the fail-closed flag a
+    client checks before sending a handle."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, resp = app.test_client.get(
+        "/mcp/info", headers=[("Authorization", f"Bearer {MCP_TOKEN}")])
+    assert resp.status == 200
+    assert resp.json["window_edit"] is True

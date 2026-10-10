@@ -1716,6 +1716,8 @@ MCP_TOKEN_ROUTES = {
     # #245 (existing-test edit): the admin knob route joined the token
     # realm; its bad_scope cells ride this table like every other route.
     "/mcp/knobs": ("POST", {}),
+    # #243 (existing-test edit): the window-edit route is token-gated too.
+    "/mcp/window": ("POST", {"id": 5}),
 }
 BAD_SCOPES = ["a:b", "a b", "x" * 65, "-lead"]
 _ABSENT = object()

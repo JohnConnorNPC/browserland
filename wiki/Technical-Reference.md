@@ -559,12 +559,12 @@ masks that broker (remote), as a lost lease does.
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
 server wraps as MCP tools so an AI agent can list, observe, drive, and launch
 terminals. A ready-to-run server ships in [`webterm/mcptool/`](../webterm/mcptool/)
-(stdio transport; `pip install -e ".[mcp]"`). Nine token-gated endpoints make
+(stdio transport; `pip install -e ".[mcp]"`). The token-gated endpoints make
 up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": true|false` #245, `"window_edit": true` #243) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -572,7 +572,9 @@ up the contract:
 | POST | `/mcp/flush` | discard a terminal's unread queued input (`readwrite` only) |
 | POST | `/mcp/pace` | set a terminal's default send_keys pacing (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
-| POST | `/mcp/launch` | spawn a new terminal from a profile |
+| POST | `/mcp/launch` | spawn a new terminal from a profile (every launch mints an ownership `handle` #243) |
+| POST | `/mcp/window` | set a window's `scope`/`mode` with its launch `handle`, or any window with the admin credential #245 (#243) |
+| POST | `/mcp/knobs` | admin-only: set `default_mode`/`allow_launch` #245 |
 
 The interface is **disabled by default** — nothing under `/mcp/*` answers until
 an admin both enables it and sets a token (below). The broker serves the desktop

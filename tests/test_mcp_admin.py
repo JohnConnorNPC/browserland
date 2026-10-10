@@ -170,6 +170,7 @@ MCP_TOKEN_ROUTES = {
     "/mcp/profiles": ("GET", None),
     "/mcp/launch": ("POST", {}),
     "/mcp/knobs": ("POST", {}),
+    "/mcp/window": ("POST", {"id": 5}),
 }
 BAD_ADMIN = [("Authorization", f"Bearer {MCP_TOKEN}"),
              (MCP_ADMIN_HEADER, "wrong-admin-credential")]
