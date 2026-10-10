@@ -16,6 +16,28 @@ story behind anything named below.
 
 ### Added
 
+- **An MCP admin credential: one designated agent can manage every window and
+  the broker-wide MCP knobs** (#245). A second, server-minted secret
+  (Control Panel → MCP access → admin token: generate/rotate/clear, or the
+  `WEB_TERMINAL_MCP_ADMIN_TOKEN` env pin) sent as the
+  `X-Browserland-Mcp-Admin` header **in addition to** the MCP token; a
+  credential in the URL query string is refused outright. The refusal ladder
+  gains `403 admin_required` after the scope check. An admin lists every
+  window (`off` and foreign-scope included — reads/typing still need the
+  window's own mode), sets any window's scope/mode without a launch handle,
+  arranges the desktop and manages workspaces (#244), and flips
+  `default_mode`/`allow_launch`/`allow_desktop` through `POST /mcp/knobs`
+  (strict booleans; `token`/`admin_token`/`enabled` are browser-only). An
+  admin that also declares a scope keeps full reach — the scope only tags its
+  own launches. Windows an admin launched or last retagged over MCP show an
+  amber **admin** badge on the taskbar chip (tooltip: *Set by an MCP admin
+  agent*), cleared by any browser-side edit. The MCP server takes a per-host
+  `admin_token` (flag/env/`--hosts` key), hides its admin-only tools unless
+  the broker's `/mcp/info` confirms `admin: true`, refuses them locally for
+  non-admin hosts, and fails loudly with the rotation remedy when a token is
+  rotated. Known limit: an agent running as the same OS user as the admin
+  agent can read its `.mcp.json`; the admin token separates well-behaved
+  agents, it is not a sandbox.
 - **MCP scopes: several MCP clients can share one broker without seeing each
   other's windows** (#237: #227–#236). A client declares a scope (`--scope`,
   `BROWSERLAND_MCP_SCOPE`, or a per-host `"scope"`; sent as the

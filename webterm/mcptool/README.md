@@ -33,6 +33,7 @@ Config resolves **flag > env > default**:
 |---|---|---|---|
 | Broker base URL | `--broker-url` | `BROWSERLAND_MCP_URL` | `http://127.0.0.1:4445` |
 | MCP token | `--token` | `BROWSERLAND_MCP_TOKEN` (or `WEB_TERMINAL_MCP_TOKEN`) | — (required) |
+| Admin token | `--admin-token` | `BROWSERLAND_MCP_ADMIN_TOKEN` (or `WEB_TERMINAL_MCP_ADMIN_TOKEN`) | — (no admin) |
 | Token from sidecar | `--token-file PATH` | — | — |
 | Multiple brokers | `--hosts JSON` | `BROWSERLAND_MCP_HOSTS` | — (single-host) |
 | Scope (see **Scopes**) | `--scope NAME` | `BROWSERLAND_MCP_SCOPE` | — (unscoped) |
@@ -112,6 +113,49 @@ browserland-mcp --scope projA            # or BROWSERLAND_MCP_SCOPE=projA
 - A scope is a **convention, not security**. Every client holds the same
   bearer token and can declare any scope, or none.
 
+### Admin credentials (#245)
+
+One agent per broker can hold the **admin credential** — a second, separate
+secret minted in the broker's Control Panel (MCP access → admin token). It is
+sent as the `X-Browserland-Mcp-Admin` header **in addition to** the MCP token
+on every request to that host, and it unlocks the admin-only surface there:
+listing every window (off and foreign-scope included), setting any window's
+scope/mode, the desktop tools' workspace management (#244), and
+`set_mcp_knobs`.
+
+An admin credential applies to **one host only** — there is no process-wide
+default for `--hosts` entries:
+
+```bash
+browserland-mcp --token abc… --admin-token adm…        # single host "default"
+BROWSERLAND_MCP_ADMIN_TOKEN=adm… browserland-mcp --token abc…
+browserland-mcp --hosts '[{"name":"local","url":"http://127.0.0.1:4445",
+                           "token":"abc…","admin_token":"adm…"}]'
+```
+
+(`--admin-token` beats `$BROWSERLAND_MCP_ADMIN_TOKEN`, which beats
+`$WEB_TERMINAL_MCP_ADMIN_TOKEN`; empty means none. The Control Panel's
+**Copy .mcp.json** has an *Include the admin token in .mcp.json* checkbox that
+writes the host's `admin_token` for you.)
+
+- **Hidden unless admin.** At startup the server probes every admin-token
+  host's `/mcp/info` (concurrently, one bounded deadline): the admin-only
+  tools (`set_mcp_knobs`, `workspaces`) are registered only when **at least
+  one** host answers `admin: true`. A broker without the key, an unreachable
+  host, or a wrong token all read as not-admin — fail closed.
+- **Per-host refusals.** An admin tool called against a host whose probe did
+  not confirm admin refuses **locally** (`admin_required`, naming the host)
+  and sends nothing. FastMCP cannot unregister tools, so a later
+  re-`configure()` with fewer admin hosts leaves the locally-refusing tools
+  listed — in production `configure()` runs once, at startup.
+- **Rotation.** If you rotate the admin token in the Control Panel, a running
+  server's admin calls fail loudly with a `403 admin_required` error naming
+  the host and the remedy (refresh this server's config and restart it). It
+  never silently retries without the header, and never degrades to non-admin.
+- **Known limit.** An agent running as the same OS user as the admin agent can
+  read the admin agent's `.mcp.json`, and with it the admin token. The admin
+  token separates well-behaved agents; it is not a sandbox.
+
 A project's `.mcp.json` pins its scope like this:
 
 ```json
@@ -173,7 +217,8 @@ claude mcp add browserland \
   -- python -m webterm.mcptool
 ```
 
-(`-e` is the short form of `--env`.) Then the ten tools below are callable.
+(`-e` is the short form of `--env`.) Then the tools below are callable (the
+admin-only ones appear only when the startup probe confirmed an admin host).
 
 ## Tools
 
@@ -193,6 +238,7 @@ on the host prefix:
 | `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
 | `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?, mode?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced. A scoped launch is tagged before it starts and comes up in `mode` (`off`/`read`/`readwrite`), or `readwrite` without one; the result adds `scope` and `mode`. An unscoped launch ignores a valid `mode` (an invalid one is still `400 bad_mode`) |
+| `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` | `POST /mcp/knobs` | **admin only** (registered when the startup probe confirmed an admin host; refused locally for every other host). Sets the broker's default window mode and launch gate — never the tokens or `enabled`. A successful call re-reads `/mcp/info`, so a knob that turns a capability on is visible to the next fail-closed tool call |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
 …) surface as a readable tool error (a `BrowserlandError`), not a raw stack

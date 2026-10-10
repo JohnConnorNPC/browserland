@@ -559,7 +559,7 @@ masks that broker (remote), as a lost lease does.
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
 server wraps as MCP tools so an AI agent can list, observe, drive, and launch
 terminals. A ready-to-run server ships in [`webterm/mcptool/`](../webterm/mcptool/)
-(stdio transport; `pip install -e ".[mcp]"`). Nine token-gated endpoints make
+(stdio transport; `pip install -e ".[mcp]"`). The token-gated endpoints make
 up the contract:
 
 | Method | Path | Purpose |
@@ -573,6 +573,7 @@ up the contract:
 | POST | `/mcp/pace` | set a terminal's default send_keys pacing (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
+| POST | `/mcp/knobs` | set broker-wide knobs (admin credential, #245) |
 
 The interface is **disabled by default** — nothing under `/mcp/*` answers until
 an admin both enables it and sets a token (below). The broker serves the desktop
@@ -666,6 +667,45 @@ a scoped host it reads `/mcp/info`, and it refuses every call to that host with
 `scope_unsupported` when the `scope` echo is absent (an older broker) or differs
 (a proxy dropped or rewrote the header).
 
+### The MCP admin credential (`X-Browserland-Mcp-Admin`) — #245
+
+One designated agent can manage the whole MCP surface on the owner's behalf.
+Admin is **its own secret** — `mcp_admin_token`, minted in Control Panel → MCP
+access (generate = mint/rotate, clear = remove), pinnable with env
+**`WEB_TERMINAL_MCP_ADMIN_TOKEN`** (same rules as the token pin: env wins, the
+value never reaches disk, UI edits are disabled) — and it is **unset by
+default**, so admin is off out of the box. One shared admin token serves every
+admin agent; it is separate from both the MCP token and the #191 browser
+`admin_token` (an MCP admin gets no `ADMIN_ROUTES`).
+
+**Wire.** The credential travels as the **`X-Browserland-Mcp-Admin`** header
+**in addition to** the normal MCP token — never instead of it. A credential in
+the URL query string is refused outright (400 `admin_token_in_url`, both keys
+and values scanned in constant time, logged with the route and peer but never
+the value), even when the header is also correct, following the #191 rule.
+The refusal ladder on every token route is fixed order:
+`mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 403 `admin_required`
+(the header is present but wrong) → the route's own checks. A header sent
+while no admin token is configured is **ignored** (that caller is a plain
+non-admin, and `/mcp/info` answers `admin: false`); an admin-only operation
+called without admin also answers 403 `admin_required`. CORS: the header name
+is advertised **unconditionally** in `/mcp/*` preflights (the realm is
+runtime-mutable, so a cached conditional answer would go stale for the 86400 s
+`Max-Age`), and every `/mcp/*` response lists it in `Vary`.
+
+**Reach.** An admin lists every window — `off` windows and foreign-scope
+windows included, each row carrying its raw `scope` and effective `mode` —
+and the out-of-scope `unknown_or_off` filter is skipped for it (reads and
+input still require the window's own mode; mode gates terminal I/O, not
+visibility). An admin may set any window's scope/mode (`POST /mcp/window`
+without a launch handle, #243), arrange the desktop when `allow_desktop` is
+on (#244), and set the broker-wide knobs (`POST /mcp/knobs`, below). An admin
+that also declares a scope keeps all of this: the scope is ignored for
+visibility and reach, and only tags the admin's own launches.
+
+**Never.** The MCP token, the admin token and `enabled` stay browser-only —
+`/mcp/knobs` answers 400 `bad_key` for them before any write.
+
 ### Endpoints (MCP-token-gated)
 
 All require a valid MCP token; `read`/`input` additionally require the target's
@@ -682,16 +722,19 @@ effective mode to permit them.
 | `POST /mcp/pace` | mode `readwrite` | set the default send_keys pacing |
 | `GET /mcp/profiles` | token | profile names |
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
+| `POST /mcp/knobs` | admin credential | broker-wide knobs (#245) |
 
 **`GET /mcp/info`** →
 `{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e",
-"scope":null}`.
+"scope":null,"admin":false}`.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22). `scope` is the caller's own declared scope echoed back: `null`
 when it declared none or a proxy stripped the header, and absent from a broker
 that predates scopes. A client that declared a scope checks it here to fail
-closed (#230).
+closed (#230). `admin` (#245) is `true` only when this call carries a matching
+`X-Browserland-Mcp-Admin` credential — absent from a pre-#245 broker, which
+mcptool reads as "not admin" and fails closed on.
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
 omitted, and so are windows outside the caller's declared scope. `agent` is the
@@ -876,6 +919,10 @@ The browser's `/launch` never reads `mode`.
 | 400 | `bad_mode` | `/mcp/launch` `mode` is not `off`/`read`/`readwrite` (or `null`) |
 | 500 | `spawn_failed` / `agent_exited_early` | `/mcp/launch` agent failed to start |
 | 500 | `prespawn_failed` | scoped `/mcp/launch`: the new window's row could not be written, or its id already has one; nothing was spawned |
+| 400 | `admin_token_in_url` | an MCP admin credential was sent in the URL query string (#245) — the header is the only accepted channel, and the refusal holds even when the header is also correct |
+| 403 | `admin_required` | the `X-Browserland-Mcp-Admin` header is present but wrong, or an admin-only operation was called without admin (#245) |
+| 400 | `bad_key` | `POST /mcp/knobs` carries a key outside its three knobs — `token`, `admin_token` and `enabled` are browser-only (#245) |
+| 400 | `bad_value` | `POST /mcp/knobs` boolean knob is not a real JSON boolean (`"false"` is refused, not coerced) |
 
 ### Admin surface (browser `auth_token`-gated)
 
@@ -885,10 +932,14 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 `?token=`.
 
 **`GET /mcp/config`** →
-`{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
-"token_env_pinned":false,"known_scopes":[],"python":"/usr/bin/python3",
+`{"ok":true,"enabled":false,"token":"","admin_token":"","default_mode":"off",
+"allow_launch":false,"token_env_pinned":false,"admin_token_env_pinned":false,
+"known_scopes":[],"python":"/usr/bin/python3",
 "pythonpath":"/opt/browserland","local_url":"http://127.0.0.1:4445"}` (`token`
-is the live secret, `""` when unset). `known_scopes` lists the scopes on live
+and `admin_token` are the live secrets, `""` when unset). `admin_token` (#245)
+is the MCP admin credential, shown to the browser-token holder like `token`
+(the browser is the root of trust); `admin_token_env_pinned` mirrors
+`token_env_pinned` for it. `known_scopes` lists the scopes on live
 windows (any mode) and on stored per-window rows, sorted; a name a caller only
 declared on the header never appears. `python` is the interpreter running this
 broker (`sys.executable`), `pythonpath` the directory holding the `webterm`
@@ -898,11 +949,25 @@ Panel's **Copy .mcp.json** builds a client file from them (#235). They are
 absolute server paths, shown only to a holder of the browser token.
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
-(`off`/`read`/`readwrite`), `allow_launch`, `token`, or `generate:true` (mint a
-fresh `token_urlsafe(32)`). Validated before any write; returns the GET shape.
-While the env pins the token, `token`/`generate` edits are **ignored** (the live
-token stays the env value). Errors: `bad_json` (400), `bad_mode` (400),
-`bad_token` (400, non-string `token`).
+(`off`/`read`/`readwrite`), `allow_launch`, `token`, `generate:true` (mint a
+fresh `token_urlsafe(32)`), `admin_token` (the #245 credential: `null` or `""`
+clears it) or `admin_generate:true` (mint/rotate — a server-minted value only,
+never a client-chosen secret). Validated before any write; returns the GET
+shape. While the env pins the token, `token`/`generate` edits are **ignored**
+(the live token stays the env value), and the same rule holds for
+`admin_token`/`admin_generate` under `WEB_TERMINAL_MCP_ADMIN_TOKEN`. Errors:
+`bad_json` (400), `bad_mode` (400), `bad_token` (400, non-string `token`).
+
+**`POST /mcp/knobs`** (#245, admin credential required) — body
+`{"default_mode"?: "off"|"read"|"readwrite", "allow_launch"?: bool}` →
+`{"ok":true,"default_mode":…,"allow_launch":…}`. The admin agent's broker-wide
+knobs, validated before any write: an unknown key — in particular `token`,
+`admin_token` or `enabled`, which stay browser-only — is **400 `bad_key`**, and
+`allow_launch` must be a real JSON boolean (a string `"false"` is truthy junk →
+**400 `bad_value`**, not coerced: the browser realm's `/mcp/config` keeps its
+historical coercion as pinned wire). A non-admin call is **403
+`admin_required`** before any validation. The write shares `/mcp/config`'s
+locked sidecar writer, so the two routes never interleave.
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
 "scope": <str>|null}`, both keys optional →
@@ -925,13 +990,14 @@ to the `/state` store (default `<state_path dir>/webterm_mcp.json`; override wit
 config `mcp_state_path`). Schema:
 
 ```json
-{"token": "<secret or null>", "default_mode": "off",
- "allow_launch": false, "enabled": true}
+{"token": "<secret or null>", "admin_token": "<secret or null>",
+ "default_mode": "off", "allow_launch": false, "enabled": true}
 ```
 
-`token` is `null` when the env pins it (the secret stays off disk). The file
-self-heals if hand-edited or truncated. It holds only these broker-wide knobs:
-per-window modes and scopes live in `webterm_mcp_windows.json`, below.
+`token` is `null` when the env pins it (the secret stays off disk), and so is
+`admin_token` under its own pin. The file self-heals if hand-edited or
+truncated. It holds only these broker-wide knobs: per-window modes and scopes
+live in `webterm_mcp_windows.json`, below.
 
 **Sidecar `webterm_mcp_windows.json`** — the durable per-window MCP store,
 written atomically next to the `/state` store (default
