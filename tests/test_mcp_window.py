@@ -329,6 +329,33 @@ def test_launch_rollback_removes_owner_with_row(tmp_path, monkeypatch):
     assert app.ctx.mcp_windows.get(LAUNCHED) is None
 
 
+def test_admin_launch_rollback_leaves_no_row_and_no_badge(tmp_path,
+                                                           monkeypatch):
+    """P2 (broker audit round): an ADMIN launch that fails after the
+    pre-spawn write leaves NOTHING behind -- owner AND admin_set clear in
+    the ONE rollback set(), so neither the handle nor the badge survives
+    for an id nothing was spawned on (owner-liveness cannot keep the row
+    alive)."""
+    from webterm.protocol import MCP_ADMIN_HEADER
+    app = _make_app(tmp_path, monkeypatch, mcp_admin_token=ADMIN_TOKEN)
+
+    class _FailBeforeHello(_FakeLauncher):
+        async def launch(self, profile, **kwargs):
+            pre_spawn = kwargs.get("pre_spawn")
+            if pre_spawn is not None:
+                await pre_spawn(LAUNCHED)
+            raise LaunchError(500, "agent_exited_early", returncode=3)
+
+    app.ctx.launcher = _FailBeforeHello(app)
+    _, resp = app.test_client.post(
+        "/mcp/launch", json={},
+        headers=[("Authorization", f"Bearer {MCP_TOKEN}"),
+                 (MCP_ADMIN_HEADER, ADMIN_TOKEN)])
+    assert (resp.status, resp.json["error"]) == (500, "agent_exited_early")
+    assert str(LAUNCHED) not in _disk_windows(tmp_path)
+    assert app.ctx.mcp_windows.get(LAUNCHED) is None
+
+
 def test_launch_dead_row_collision_deleted_and_retried_once(tmp_path,
                                                              monkeypatch):
     """#243 [c4]: a collided row whose producer is gone (no live entry

@@ -7402,8 +7402,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 row = work.get(wid)
                 if (row is not None and row["pid"] is None
                         and row["host"] is None):
+                    # P2 (broker audit): the rollback clears EVERY
+                    # ownership fact in the ONE set() -- owner (B2) and
+                    # the admin badge -- so nothing survives for an id
+                    # nothing was spawned on.
                     work.set(wid, scope=None, mode=None, owner=None,
-                             now=work.clock())
+                             admin_set=None, now=work.clock())
             try:
                 await app.ctx.persist_mcp_windows(_write)
             except Exception:
@@ -8032,7 +8036,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "allow_launch": bool(cfg["allow_launch"]),
                            "allow_desktop": bool(cfg["allow_desktop"])})
 
-        return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 
     # ---- launch profiles config (browser-facing, #70) --------------------
     # The Control Panel reads/writes the FULL profile objects here. Gated by the
