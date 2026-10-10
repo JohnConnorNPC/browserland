@@ -686,11 +686,12 @@ admin agent; it is separate from both the MCP token and the #191 browser
 the URL query string is refused outright (400 `admin_token_in_url`, both keys
 and values scanned in constant time, logged with the route and peer but never
 the value), even when the header is also correct, following the #191 rule —
-and because the HTTP server's access log records the full request line, a
-token sent in the query string would land in that log even though the request
-is refused: the header is the only channel that keeps the secret out of the
-logs. A **repeated** admin header is refused like a repeated scope header
-(**403 `admin_required`** — fail closed rather than silently picking one).
+the broker keeps its own access log off, but a reverse proxy or tunnel in
+front of it (nginx, `tailscale serve`) or the browser's history may record
+full URLs, so a token in a query string can leak there: the header is the
+only accepted channel. A **repeated** admin header is refused like a repeated
+scope header (**403 `admin_required`** — fail closed rather than silently
+picking one).
 <!-- VERIFY-ROUND1: repeated X-Browserland-Mcp-Admin header -> 403 (broker round 1, item A5) -->
 The refusal ladder on every token route is fixed order:
 `mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 403 `admin_required`
