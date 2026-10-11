@@ -949,15 +949,29 @@
             // this mod: it writes an index over ALL columns, we read one over the
             // visible subset, and core's reconcile clamps only against the storage
             // count. Clamp it to what is actually on screen (an out-of-range value
-            // focuses nothing at all), then mirror it into the active workspace
-            // entry so switching away and back returns to the right column.
+            // focuses nothing at all). It lives in the SYNCED layout, so a real
+            // clamp is saved (#246: an unsaved write left the tab dirty with no
+            // push queued).
+            // This runs on every render, including the one after ADOPTING a
+            // peer's state, so it must never save a value derived from valid
+            // state -- only repair state that is invalid here. It used to also
+            // mirror focusedCol into the active workspace entry; core's focus
+            // writes (bringToFront) save without a relayout, so every peer
+            // "fixed" that lagging mirror and its save beat this tab's next
+            // focus change in a 409 (#246 review, A6). The entry is recorded
+            // where it is read instead: switchWorkspace and
+            // sendWindowToWorkspace store the active focus before they apply
+            // another one.
             function syncFocusedCol() {
                 const L = getLayout();
                 const n = visibleColumns().length;
                 const clamped = Math.max(0, Math.min(L.focusedCol | 0, Math.max(0, n - 1)));
-                if (L.focusedCol !== clamped) L.focusedCol = clamped;
-                const entry = activeWorkspaceEntry();
-                if (entry) entry.focusedCol = clamped;
+                if (L.focusedCol === clamped) return false;
+                L.focusedCol = clamped;
+                // Same rule as adoptUnstampedColumns: a torn-down browser never
+                // writes shared state (the clamp above still keeps it drawable).
+                if (!leaseLost()) savePrefs();
+                return true;
             }
             function switchWorkspace(index) {
                 const st = wsStore();
@@ -1024,6 +1038,11 @@
                 }
                 target.focusedCol = Math.max(0,
                     workspaceColumns(target.id).indexOf(col));
+                // applyWorkspaceView below re-applies the ACTIVE entry, which
+                // is only recorded on demand (see syncFocusedCol): record the
+                // current focus first so it is kept (clamped), not rewound.
+                const cur = activeWorkspaceEntry();
+                if (cur && cur !== target) cur.focusedCol = L.focusedCol | 0;
                 savePrefs();
                 parkWindow(win);                  // belongs to a hidden column now
                 // The moved window is no longer visible, so it must not stay the
