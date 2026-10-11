@@ -564,7 +564,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": true|false` #245, `"window_edit": true` #243, `"allow_desktop": true|false` #244) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -985,8 +985,9 @@ after the row was written, the row is removed again — unless the agent's
 row retries **once** on a fresh id; the collided row is deleted only when it
 is a pre-spawn orphan (no pid and no host) or older than the 7-day prune age
 — never a row a reconnecting producer could still claim, whose off/scope
-policy stays untouched. A row that is still claimable keeps the refusal
-(**500 `prespawn_failed`**) and nothing is spawned. The browser's
+policy stays untouched (the retry runs whether or not the row was deleted).
+Only a row write that fails, or a retry whose fresh id collides again, is
+**500 `prespawn_failed`**, and nothing is spawned. The browser's
 `/launch` is unchanged: it never reads `mode` and writes no row.
 
 **`POST /mcp/window`** — body `{"id": <int>, "handle"?: <str>, "scope"?:
@@ -1042,7 +1043,7 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 429 | `too_many_pending_launches` | `/mcp/launch` backpressure |
 | 400 | `bad_mode` | `/mcp/launch` `mode` is not `off`/`read`/`readwrite` (or `null`) |
 | 500 | `spawn_failed` / `agent_exited_early` | `/mcp/launch` agent failed to start |
-| 500 | `prespawn_failed` | scoped `/mcp/launch`: the new window's row could not be written, or its id already has one; nothing was spawned |
+| 500 | `prespawn_failed` | `/mcp/launch`: the new window's row could not be written, or the one retry's fresh id also had a stored row; nothing was spawned |
 | 400 | `admin_token_in_url` | an MCP admin credential was sent in the URL query string (#245) — the header is the only accepted channel, and the refusal holds even when the header is also correct |
 | 403 | `admin_required` | the `X-Browserland-Mcp-Admin` header is present but wrong, or an admin-only operation was called without admin (#245) |
 | 400 | `bad_key` | `POST /mcp/knobs` carries a key outside its three knobs — `token`, `admin_token` and `enabled` are browser-only (#245) |
