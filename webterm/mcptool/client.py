@@ -21,10 +21,10 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-# The header name comes from the dependency-free protocol module, never from
+# The header names come from the dependency-free protocol module, never from
 # webterm.broker: this package is the optional `mcp` extra and must not pull
 # in the broker (and sanic with it).
-from ..protocol import SCOPE_HEADER
+from ..protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 
 # Broker error codes -> human-readable messages. Source of truth is the error
 # table in wiki/Technical-Reference.md ("MCP HTTP interface" error reference). Codes not
@@ -64,7 +64,57 @@ _ERROR_MESSAGES = {
     "scope_unsupported": "The broker did not confirm this server's scope, so "
                          "its answers could include windows outside it; every "
                          "call to this host is refused.",
+    # #245: the admin credential's error surface.
+    "admin_required": "The broker refused this server's admin credential for "
+                      "an admin-only operation. If the admin token was rotated "
+                      "in the broker's Control Panel (MCP access), refresh "
+                      "this server's config — the hosts entry's "
+                      "\"admin_token\", or $BROWSERLAND_MCP_ADMIN_TOKEN — and "
+                      "restart it; an unrotated credential never yields this.",
+    "admin_token_in_url": "The broker refused the request: an admin token must "
+                          "travel in the X-Browserland-Mcp-Admin header, never "
+                          "the URL query string.",
+    # #244: the desktop relay's error surface (workspace results answer
+    # 200 {"ok": false, "reason": "absent"|"inactive"} and are DATA, not
+    # errors — the mod being off is a state, not a failure).
+    "desktop_disabled": "The desktop relay is off on the broker (enable "
+                        "it in Control Panel → MCP access).",
+    "no_active_browser": "No browser holds the control lease: open the "
+                         "Browserland desktop (or bring it active) and "
+                         "retry; ops are never queued.",
+    "not_home": "The lease-holding browser's HOME is another broker, and "
+                "workspace data belongs to a browser's home desktop — run "
+                "workspace ops from the home broker's host.",
+    "lost_lease": "The browser lost the control lease mid-op and nothing "
+                  "was half-applied — check the screen and retry.",
+    "needs_confirm": "That workspace is not empty: pass force=true to remove "
+                     "it (its windows move to the adjacent workspace).",
+    "last_workspace": "The last workspace cannot be removed.",
+    "desktop_timeout": "The browser did not answer the desktop op in time.",
+    "desktop_op_failed": "The browser's desktop op raised an error.",
+    "bad_op": "Unknown desktop op.",
+    "bad_args": "The desktop op's arguments are invalid.",
 }
+
+
+def _error_detail(body: Optional[Dict[str, Any]]) -> str:
+    """The small extra fields of a broker error body, as text for the
+    message (e.g. needs_confirm's window ``count``). Only short scalars are
+    kept; bool is skipped."""
+    if not body:
+        return ""
+    parts = []
+    for key, val in body.items():
+        if key == "error" or isinstance(val, bool):
+            continue
+        if isinstance(val, int):
+            parts.append(f"{key}={val}")
+        elif isinstance(val, str) and len(val) <= 120:
+            parts.append(f"{key}={val}")
+    if isinstance(body.get("count"), int) and not isinstance(body["count"], bool):
+        return (f"{body['count']} windows affected; "
+                + ", ".join(p for p in parts if not p.startswith("count=")))            .rstrip("; ").rstrip(", ")
+    return ", ".join(parts)
 
 
 class BrowserlandError(RuntimeError):
@@ -74,10 +124,13 @@ class BrowserlandError(RuntimeError):
     (e.g. ``"read_only"``), or ``None`` when the body had no parseable error.
     """
 
-    def __init__(self, status: int, code: Optional[str], message: str):
+    def __init__(self, status: int, code: Optional[str], message: str,
+                 body: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.status = status
         self.code = code
+        #: The parsed error body when the broker sent one, else None.
+        self.body = body
 
 
 class BrowserlandClient:
@@ -86,7 +139,8 @@ class BrowserlandClient:
     def __init__(self, base: str = "http://127.0.0.1:4445", token: str = "",
                  timeout: float = 10.0, read_timeout: float = 30.0,
                  transport: Optional[httpx.BaseTransport] = None,
-                 scope: Optional[str] = None, name: Optional[str] = None):
+                 scope: Optional[str] = None, name: Optional[str] = None,
+                 admin_token: Optional[str] = None):
         self.base = base.rstrip("/")
         #: The scope this client declares (#232), or None. An empty string is
         #: unscoped, exactly as the broker reads an empty header.
@@ -94,6 +148,11 @@ class BrowserlandClient:
         #: What error messages call this host: its configured name, else the
         #: base URL.
         self.name = name or self.base
+        #: The per-host MCP admin credential (#245), or None. Sent IN
+        #: ADDITION to the MCP token (never instead of it): the admin header
+        #: unlocks admin-only ops on brokers that have an admin token
+        #: configured; a broker without one ignores the header.
+        self.admin_token = admin_token or None
         # `read` does a producer round-trip on the broker, so it gets a longer
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
@@ -101,8 +160,13 @@ class BrowserlandClient:
         headers = {"Authorization": f"Bearer {token}"}
         if self.scope:
             headers[SCOPE_HEADER] = self.scope
+        if self.admin_token:
+            headers[MCP_ADMIN_HEADER] = self.admin_token
         # Set once /mcp/info has echoed our scope; see _check_scope.
         self._scope_confirmed = False
+        # Cached /mcp/info capability flags (#243/#244/#245), or None before
+        # the first fetch; see capabilities().
+        self._caps: Optional[Dict[str, bool]] = None
         # `transport` is an injection seam for tests (httpx.MockTransport); in
         # production it stays None and httpx uses its default network transport.
         self._client = httpx.Client(
@@ -126,24 +190,36 @@ class BrowserlandClient:
         if r.is_success:
             return
         code: Optional[str] = None
+        parsed: Optional[Dict[str, Any]] = None
         try:
             body = r.json()
             if isinstance(body, dict) and isinstance(body.get("error"), str):
                 code = body["error"]
+                parsed = body
         except ValueError:
             pass
         if code is not None:
             message = _ERROR_MESSAGES.get(code, f"Broker error: {code}")
             message = f"{message} (HTTP {r.status_code})"
+            extra = _error_detail(parsed)
+            if extra:
+                message = f"{message} [{extra}]"
         else:
             message = f"Broker returned HTTP {r.status_code} with no error code."
-        raise BrowserlandError(r.status_code, code, message)
+        raise BrowserlandError(r.status_code, code, message, parsed)
 
     def _request(self, method: str, path: str, *, json_body: Any = None,
                  timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
         if self.scope and not self._scope_confirmed:
             self._check_scope()
         return self._send(method, path, json_body=json_body, timeout=timeout)
+
+    def _forget_broker(self) -> None:
+        """Drop every cached fact about this host: whatever answers next may
+        be a different build (the same rule the scope confirmation follows
+        in :meth:`_send`)."""
+        self._scope_confirmed = False
+        self._caps = None
 
     def _send(self, method: str, path: str, *, json_body: Any = None,
               timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
@@ -152,16 +228,17 @@ class BrowserlandClient:
         # into a BrowserlandError too, so callers only ever see BrowserlandError.
         #
         # Either kind of failure that can mean "the broker behind this URL
-        # went away" forgets a confirmed scope, because whatever answers next
-        # may be a different build: connection_error, and a non-2xx carrying
-        # no broker error code (code is None: what a proxy answers while the
-        # broker behind it restarts). An answer with a code came from a broker
-        # that is still there, and keeps it.
+        # went away" forgets a confirmed scope AND the cached capability
+        # flags, because whatever answers next may be a different build:
+        # connection_error, and a non-2xx carrying no broker error code
+        # (code is None: what a proxy answers while the broker behind it
+        # restarts). An answer with a code came from a broker that is still
+        # there, and keeps them.
         try:
             r = self._client.request(method, self.base + path,
                                      json=json_body, timeout=timeout)
         except httpx.RequestError as exc:
-            self._scope_confirmed = False
+            self._forget_broker()
             raise BrowserlandError(
                 0, "connection_error",
                 f"Cannot reach the Browserland broker at {self.base}: {exc}",
@@ -170,7 +247,7 @@ class BrowserlandClient:
             self._raise_for_status(r)
         except BrowserlandError as exc:
             if exc.code is None:
-                self._scope_confirmed = False
+                self._forget_broker()
             raise
         return r.json()
 
@@ -220,6 +297,27 @@ class BrowserlandClient:
     def _post(self, path: str, body: Dict[str, Any],
               timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
         return self._request("POST", path, json_body=body, timeout=timeout)
+
+    def capabilities(self, refresh: bool = False) -> Dict[str, bool]:
+        """This host's MCP capability flags, cached from one lazy
+        ``/mcp/info`` fetch: ``admin`` (this client's credential is an admin
+        credential there), ``window_edit`` (``POST /mcp/window`` exists,
+        #243) and ``allow_desktop`` (the desktop relay is on, #244). An
+        absent flag reads False — a broker without the key predates the
+        feature, and every consumer FAILS CLOSED on a missing capability.
+        The cache is forgotten by the same rules as the scope confirmation
+        (see :meth:`_send`); pass ``refresh=True`` to re-read it after
+        anything that can change the broker's knobs."""
+        if refresh or self._caps is None:
+            info = self._request("GET", "/mcp/info")
+            caps = {"admin": False, "window_edit": False,
+                    "allow_desktop": False}
+            if isinstance(info, dict):
+                caps["admin"] = info.get("admin") is True
+                caps["window_edit"] = info.get("window_edit") is True
+                caps["allow_desktop"] = info.get("allow_desktop") is True
+            self._caps = caps
+        return dict(self._caps)
 
     # --- one method per endpoint; each maps 1:1 to an MCP tool ------------
     def info(self) -> Dict[str, Any]:
@@ -357,12 +455,45 @@ class BrowserlandClient:
                         mode: Optional[str] = None) -> Dict[str, Any]:
         """Spawn a new terminal from a profile. Requires ``allow_launch``.
         ``mode`` (off/read/readwrite, sent only when given) is the new
-        window's MCP mode: a scoped launch comes up in it, or readwrite
-        without it; an unscoped launch ignores a valid one (an invalid value
-        is still refused: 400 bad_mode)."""
+        window's MCP mode: every launch, scoped or not, comes up in it, or
+        in readwrite when it is omitted (an invalid value is still refused:
+        400 bad_mode). The answer carries the broker-minted ``handle`` for
+        this launch."""
         body: Dict[str, Any] = {"cols": cols, "rows": rows}
         for k, v in (("profile", profile), ("title", title), ("cwd", cwd),
                      ("mode", mode)):
             if v is not None:
                 body[k] = v
         return self._post("/mcp/launch", body)
+
+    def set_window(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/window`` (#243): set — or, with explicit nulls, clear —
+        the scope and/or MCP mode of one window. ``body`` is the
+        caller-composed ``{id, handle?, scope?, mode?}``: a key left out
+        leaves the field alone and an explicit null clears it, so composing
+        keep|set|clear is the caller's job (the tool layer does it)."""
+        return self._post("/mcp/window", body)
+
+    def set_knobs(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/knobs`` (#245, admin): change the broker-wide MCP
+        knobs — ``default_mode``, ``allow_launch``, ``allow_desktop``. The
+        tool layer composes the body; the broker validates strictly (real
+        booleans) and refuses credential/enabled keys."""
+        return self._post("/mcp/knobs", body)
+
+    def get_desktop(self) -> Dict[str, Any]:
+        """``GET /mcp/desktop`` (#244): the lease-holding browser's desktop
+        snapshot — windows with their layout attributes, the viewport, and
+        the workspaces when the mod is on. Geometry is floating pixel
+        geometry AS THAT BROWSER SEES IT (per-browser state); ``home`` says
+        whether that browser's home is this broker (workspace ops answer
+        ``not_home`` otherwise)."""
+        return self._get("/mcp/desktop")
+
+    def desktop_op(self, op: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /mcp/desktop`` (#244): one op relayed to the lease-holding
+        browser. ``args`` is op-specific (broker-local integer window ids);
+        the broker re-checks visibility for every id the args name before
+        relaying, and maps the browser's answer to HTTP (409 no_active_browser
+        / lost_lease / needs_confirm, 504 desktop_timeout, ...)."""
+        return self._post("/mcp/desktop", {"op": op, "args": args})

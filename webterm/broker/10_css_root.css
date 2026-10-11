@@ -316,6 +316,32 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        /* #245: the window's MCP admin provenance (an admin credential
+           launched it or last set its scope/mode). The .ti-scope skin in
+           amber, so it never reads as the scope's blue or the workspace
+           badge's neutral. */
+        .taskbar-item .ti-admin {
+            font-size: 9px;
+            opacity: 0.75;
+            margin-left: 3px;
+            padding: 0 3px;
+            border-radius: 3px;
+            background: rgba(255,176,64,0.25);
+            flex: 0 0 auto;
+            max-width: 8ch;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* A chip can carry admin WITHOUT scope, and a 16-digit id + host +
+           two badges must let the id ellipsize in the 280px chip (the same
+           #123 exception as above). */
+        .taskbar-item:has(> .ti-admin) .ti-id {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         body.hide-ids .ti-id,
         body.hide-ids .ti-id-badge { display: none; }
 

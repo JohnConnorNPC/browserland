@@ -71,6 +71,14 @@ SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 #: reads it in exactly one place, app.py's ``_mcp_scope``.
 SCOPE_HEADER = "X-Browserland-Scope"
 
+#: The request header carrying the MCP ADMIN credential (#245) — a second
+#: secret ADDITIONAL to the MCP token (never instead of it, and never the
+#: query string; app.py's ``_mcp_auth_error`` refuses both abuses). Lives here
+#: beside SCOPE_HEADER for the same reason: ``webterm.mcptool`` imports it
+#: without pulling in the broker. Deliberately a different header from #191's
+#: ``X-Webterm-Admin`` so the two credential classes never share one slot.
+MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
+
 
 # ---------------------------------------------------------------------------
 # Producer -> broker
@@ -467,6 +475,19 @@ def control_status_frame(active: bool,
         "active": bool(active),
         "activeClientId": active_client_id,
     })
+
+
+def desktop_rpc_frame(rid: int, op: str,
+                      args: Optional[Dict[str, Any]] = None) -> str:
+    """Broker -> lease-holding browser on /control (#244): one desktop op to
+    run against the layout. ``rid`` is unique per broker run; the browser
+    applies it exactly once and answers exactly one ``desktop_result`` with
+    the same rid (the frames' full contract lives in the broker's desktop
+    relay: design/broker.md ## Wire contract). ``args.visible`` carries the
+    caller's visible window ids (null for an admin) for the browser's own
+    visibility refusal."""
+    return json.dumps({"type": "desktop_rpc", "rid": int(rid),
+                       "op": str(op), "args": args or {}})
 
 
 # ---------------------------------------------------------------------------

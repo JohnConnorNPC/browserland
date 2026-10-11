@@ -16,6 +16,65 @@ story behind anything named below.
 
 ### Added
 
+- **MCP agents can read and arrange the desktop, and manage workspaces**
+  (#244). A new `allow_desktop` switch (Control Panel → MCP access, or an
+  admin's `set_mcp_knobs`; default off, master switch for the whole relay,
+  admin included) gates `GET`/`POST /mcp/desktop`: the broker relays each op
+  to the browser holding the control lease, which applies it through the
+  normal layout mutators and pushes `/state` before acknowledging, so other
+  viewers converge. New tools: `get_desktop` (snapshot incl. per-browser
+  floating geometry), `arrange_window` (focus / move column / set width /
+  tile / float / set geometry / tab into / split — with `move_column` to an
+  index expelling a shared window to its own column, like a drag) and
+  `workspaces` (list / add / rename / remove / switch / send-window).
+  A non-admin agent may arrange only the windows it can see — ops that would
+  reshape an invisible window answer the same `unknown_or_off` 404 as a
+  missing id, so nothing is probeable. Workspace management is admin-only;
+  with the mod off it answers `absent`/`inactive` rather than a silent no-op.
+  No active browser → `409 no_active_browser` (never queued); workspace ops
+  on a non-home relay → `409 not_home`; removing a non-empty workspace →
+  `409 needs_confirm` + the live window count, `force: true` moves its
+  windows to the adjacent workspace and **no dialog is ever shown in the
+  browser for an MCP op**; the last workspace is always refused.
+- **Launch handles: an MCP agent can set the scope and MCP mode of the
+  terminals it launched** (#243). Every `/mcp/launch`, scoped or not, mints an
+  opaque handle returned in the answer (only its SHA-256 hash is stored on
+  disk); the new `POST /mcp/window` accepts `{id, handle, scope?, mode?}` and
+  lets the owner retag its own window — including to `off` or a foreign scope,
+  and back — while a browser-side edit clears the stored owner (the human
+  wins). `list_terminals` marks handle-held windows `owned: true`; the MCP
+  server's new `set_window` tool uses keep/set/clear field semantics, keeps
+  handles in memory (lost on its restart — the admin credential or the browser
+  recovers the window), and fails closed on brokers without `window_edit`.
+  A launch whose id collides with a stored row retries once on a fresh id,
+  deleting the collided row only when it is a pre-spawn orphan or older than
+  the 7-day prune age — a row a reconnecting producer could still claim is
+  never touched.
+  **Behaviour change:** an unscoped `/mcp/launch` with no `mode` now comes up
+  in `readwrite` instead of inheriting `default_mode` — every MCP launch does,
+  scoped or not (a launched worker its launcher cannot drive is useless).
+- **An MCP admin credential: one designated agent can manage every window and
+  the broker-wide MCP knobs** (#245). A second, server-minted secret
+  (Control Panel → MCP access → admin token: generate/rotate/clear, or the
+  `WEB_TERMINAL_MCP_ADMIN_TOKEN` env pin) sent as the
+  `X-Browserland-Mcp-Admin` header **in addition to** the MCP token; a
+  credential in the URL query string is refused outright. The refusal ladder
+  gains `403 admin_required` after the scope check. An admin lists every
+  window (`off` and foreign-scope included — reads/typing still need the
+  window's own mode), sets any window's scope/mode without a launch handle,
+  arranges the desktop and manages workspaces (#244), and flips
+  `default_mode`/`allow_launch`/`allow_desktop` through `POST /mcp/knobs`
+  (strict booleans; `token`/`admin_token`/`enabled` are browser-only). An
+  admin that also declares a scope keeps full reach — the scope only tags its
+  own launches. Windows an admin launched or last retagged over MCP show an
+  amber **admin** badge on the taskbar chip (tooltip: *Set by an MCP admin
+  agent*), cleared by any browser-side edit. The MCP server takes a per-host
+  `admin_token` (flag/env/`--hosts` key), hides its admin-only tools unless
+  the broker's `/mcp/info` confirms `admin: true`, refuses them locally for
+  non-admin hosts, and fails loudly with the rotation remedy when a token is
+  rotated. Known limit: an agent running as the same OS user as the admin
+  agent can read its `.mcp.json`; the admin token separates well-behaved
+  agents, it is not a sandbox.
 - **MCP scopes: several MCP clients can share one broker without seeing each
   other's windows** (#237: #227–#236). A client declares a scope (`--scope`,
   `BROWSERLAND_MCP_SCOPE`, or a per-host `"scope"`; sent as the

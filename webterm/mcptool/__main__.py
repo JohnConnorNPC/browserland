@@ -30,6 +30,13 @@ HOSTS_ENV = "BROWSERLAND_MCP_HOSTS"
 # #232: the scope this server declares to every host (a --hosts entry's own
 # "scope" overrides it for that host). Empty = unscoped.
 SCOPE_ENV = "BROWSERLAND_MCP_SCOPE"
+# #245: the per-host MCP admin credential, sent as the
+# X-Browserland-Mcp-Admin header IN ADDITION to the MCP token. Applies to the
+# single-host --broker-url form; a --hosts entry admin credential is its own
+# "admin_token" (no process-wide inheritance: an admin credential applies to
+# one host only, by design).
+ADMIN_TOKEN_ENV = "BROWSERLAND_MCP_ADMIN_TOKEN"
+ADMIN_TOKEN_ENV_ALT = "WEB_TERMINAL_MCP_ADMIN_TOKEN"
 _SCOPE_RULE = ("1-64 characters of A-Z a-z 0-9 . _ -, starting with a letter "
                "or digit")
 
@@ -79,19 +86,36 @@ def _resolve_scope(args: argparse.Namespace) -> Optional[str]:
     return value
 
 
+def _resolve_admin_token(args: argparse.Namespace) -> Optional[str]:
+    """The single-host admin credential (#245): ``--admin-token`` >
+    ``$BROWSERLAND_MCP_ADMIN_TOKEN`` > ``$WEB_TERMINAL_MCP_ADMIN_TOKEN``;
+    empty/unset = no admin credential (admin-only tools stay hidden). Unlike
+    the scope there is NO process-wide default for ``--hosts`` entries: an
+    admin credential applies to one host only."""
+    if args.admin_token:
+        return args.admin_token
+    for env in (ADMIN_TOKEN_ENV, ADMIN_TOKEN_ENV_ALT):
+        val = os.environ.get(env)
+        if val:
+            return val
+    return None
+
+
 def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     """Parse the ``--hosts`` / ``$BROWSERLAND_MCP_HOSTS`` JSON into an ordered
-    list of ``(name, url, token, scope)`` host descriptors.
+    list of ``(name, url, token, scope, admin_token)`` host descriptors.
 
     An entry's optional ``"scope"`` (#232) is that host's declared scope; an
     empty or absent one inherits ``scope``, the process-wide value (None =
-    unscoped).
+    unscoped). An entry's optional ``"admin_token"`` (#245) is that host's own
+    admin credential; an empty or absent one means none (it never inherits a
+    process-wide value — one admin credential, one host).
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
     a JSON array, an empty array, a non-object entry, a missing/empty field, a
-    name containing ``':'`` (the namespaced-id separator), a duplicate name, or
-    a ``"scope"`` that is not a string or not a valid scope name (the message
-    names the host)."""
+    name containing ``':'`` (the namespaced-id separator), a duplicate name, a
+    ``"scope"`` that is not a string or not a valid scope name, or an
+    ``"admin_token"`` that is not a string (the message names the host)."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -121,19 +145,24 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
         host_scope = item.get("scope", "")
         if not isinstance(host_scope, str):
             raise ValueError(f"--hosts[{i}] ({name!r}) 'scope' must be a "
-                             "string (empty or absent inherits --scope)")
+                             "string")
         if host_scope and SCOPE_RE.fullmatch(host_scope) is None:
             raise ValueError(f"--hosts[{i}] ({name!r}) scope {host_scope!r} "
                              f"is not a valid scope name ({_SCOPE_RULE})")
-        hosts.append((name, url, token, host_scope or scope))
+        admin = item.get("admin_token", "")
+        if not isinstance(admin, str):
+            raise ValueError(f"--hosts[{i}] ({name!r}) 'admin_token' must be "
+                             "a string")
+        hosts.append((name, url, token, host_scope or scope, admin or None))
     return hosts
 
 
 def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
-    """Resolve the host map as ``(name, url, token, scope)`` tuples. With
-    ``--hosts``/env set, parse it (multi-host). Otherwise fall back to the
-    single-host ``--broker-url``/``--token`` shorthand under the name
-    ``"default"``. Every host inherits the process-wide ``--scope`` unless
+    """Resolve the host map as ``(name, url, token, scope, admin_token)``
+    tuples. With ``--hosts``/env set, parse it (multi-host). Otherwise fall
+    back to the single-host ``--broker-url``/``--token`` shorthand under the
+    name ``"default"``, carrying ``--admin-token``/env as that host's admin
+    credential (#245). Every host inherits the process-wide ``--scope`` unless
     its own entry names one. Returns ``None`` when single-host mode has no
     resolvable token (so the caller can print the token help and exit)."""
     scope = _resolve_scope(args)
@@ -142,7 +171,8 @@ def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
     token = _resolve_token(args)
     if not token:
         return None
-    return [("default", args.broker_url, token, scope)]
+    return [("default", args.broker_url, token, scope,
+             _resolve_admin_token(args))]
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -172,6 +202,14 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
              f"(default ${HOSTS_ENV}). When set, supersedes --broker-url/--token; "
              "window ids become namespaced '<host>:<int>'. An entry may add "
              '"scope" to declare its own scope for that host.',
+    )
+    p.add_argument(
+        "--admin-token", default="",
+        help=f"Per-host MCP admin token (#245), sent as the "
+             "X-Browserland-Mcp-Admin header in addition to the MCP token "
+             f"(overrides ${ADMIN_TOKEN_ENV} / ${ADMIN_TOKEN_ENV_ALT}). "
+             "Applies to the single-host --broker-url form; a --hosts entry "
+             "admin credential is its own \"admin_token\".",
     )
     p.add_argument(
         "--scope", default=os.environ.get(SCOPE_ENV, ""),

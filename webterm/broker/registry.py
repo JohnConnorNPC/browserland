@@ -156,6 +156,11 @@ class WindowEntry:
         # validates or defaults it (summary() reports it raw). Same ownership
         # and lifetime as mcp_mode above.
         self.mcp_scope: Optional[str] = None
+        # #245: the durable ADMIN badge's live half. The store row's
+        # ``admin_set`` re-applies it at register (mcp_windows.reapply) for
+        # the same producer a scope/mode row rides; everything else starts
+        # False. /sessions surfaces it as ``mcp_admin`` for the taskbar chip.
+        self.mcp_admin_launch = False
         # Per-terminal DEFAULT inter-key pacing for send_keys (#133): the ms an
         # MCP send_keys with no explicit delay_ms auto-paces at, so a frame-
         # polling raw-input TUI (e.g. Dwarf Fortress) auto-paces once an agent
@@ -234,6 +239,11 @@ class WindowEntry:
             "pace_ms": self.pace_ms,
             "mcp": self.mcp_mode or mcp_default,
             "mcp_scope": self.mcp_scope,
+            # #245: this window was launched (or, via #243's /mcp/window, set)
+            # by an admin agent — the taskbar chip paints the admin badge
+            # beside the scope badge so the owner can see at a glance which
+            # windows an admin is driving.
+            "mcp_admin": self.mcp_admin_launch,
             # #238: who is driving this terminal from outside, or None. A
             # page that boots or rebuilds mid-control re-enters the state
             # from here.

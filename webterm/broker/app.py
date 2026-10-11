@@ -58,6 +58,7 @@ import errno
 import functools
 import gzip
 import hashlib
+import itertools
 import inspect
 import json
 import logging
@@ -90,9 +91,14 @@ from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
 # the per-window store that validates them (#228), and so are the scope
 # grammar and the header a client declares a scope on (#230).
-from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
+from .mcp_windows import (MCP_MODES, PRUNE_AGE_S, SCOPE_HEADER, SCOPE_RE,
+                          McpWindowStore)
+# #245: the MCP admin credential's header (see protocol.py). Re-exported
+# through mcp_windows' neighbours for symmetry with SCOPE_HEADER, which the
+# mcp_windows module re-exports from protocol.
+from ..protocol import MCP_ADMIN_HEADER
 from .registry import (CONTROL_SEND_TIMEOUT, BrokerRegistry,
-                       run_producer_session)
+                       run_producer_session, same_producer)
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
 # desktop page or parse the wiki. These are the only production importers, so the
@@ -598,6 +604,13 @@ def _gate_view(enabled: bool, source: str) -> Dict[str, Any]:
 # event loop, so this is generous).
 RPC_TIMEOUT = 10.0
 
+# #244: ONE end-to-end deadline for a desktop relay call -- the send to
+# the lease holder's designated /control socket AND the reply wait --
+# so a backpressured or half-dead socket cannot stretch a call past the
+# advertised timeout. Injectable via app.ctx.desktop_rpc_timeout_s for
+# tests, like the store's flush interval.
+DESKTOP_RPC_TIMEOUT_S = 10.0
+
 # ---- AI-provider status proxy (#112) ---------------------------------------
 # The broker makes exactly two outbound HTTP requests via urllib: GET /status/fetch
 # (here, #112) and GET /update/check (the version check, #182 -- see _update_check
@@ -824,23 +837,31 @@ def _empty_state() -> Dict[str, Any]:
 
 
 def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the live MCP runtime config: ``{token, default_mode, allow_launch,
-    enabled}``.
+    """Build the live MCP runtime config: ``{token, admin_token, default_mode,
+    allow_launch, enabled}``.
 
     Seeded from config/env defaults, then overlaid by the persisted sidecar
     (``webterm_mcp.json``) — the sidecar is what the Control Panel writes, so it
     is the durable source of truth across restarts. One exception, mirroring
     resolve_token's "env wins so a unit file can override": if the env token
-    ``WEB_TERMINAL_MCP_TOKEN`` is set it pins the token even over the sidecar.
-    Every field self-heals, so a hand-edited/truncated sidecar can never break
-    startup. The per-window overrides themselves are in-memory only (they live
-    on WindowEntry and reset on restart); only these broker-wide knobs persist."""
+    ``WEB_TERMINAL_MCP_TOKEN`` is set it pins the token even over the sidecar,
+    and ``WEB_TERMINAL_MCP_ADMIN_TOKEN`` (#245) pins the admin token the same
+    way. Every field self-heals, so a hand-edited/truncated sidecar can never
+    break startup. The per-window overrides themselves are in-memory only (they
+    live on WindowEntry and reset on restart); only these broker-wide knobs
+    persist."""
     env_token = os.environ.get(auth.MCP_TOKEN_ENV)
+    env_admin = os.environ.get(auth.MCP_ADMIN_TOKEN_ENV)
     cfg = {
         "token": auth.resolve_mcp_token(config),
+        "admin_token": auth.resolve_mcp_admin_token(config),
         "default_mode": _norm_mcp_mode(config.get("mcp_default_mode"), "off"),
         "allow_launch": bool(config.get("mcp_allow_launch", False)),
         "enabled": bool(config.get("mcp_enabled", False)),
+        # #244: the desktop relay master switch (GET/POST /mcp/desktop),
+        # off out of the box; the Control Panel checkbox and the admin knob
+        # route both write it.
+        "allow_desktop": bool(config.get("mcp_allow_desktop", False)),
     }
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -851,6 +872,9 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         if "token" in data and not env_token:
             tok = data.get("token")
             cfg["token"] = tok if isinstance(tok, str) and tok else None
+        if "admin_token" in data and not env_admin:
+            atok = data.get("admin_token")
+            cfg["admin_token"] = atok if isinstance(atok, str) and atok else None
         if "default_mode" in data:
             cfg["default_mode"] = _norm_mcp_mode(
                 data.get("default_mode"), cfg["default_mode"])
@@ -858,6 +882,8 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
             cfg["allow_launch"] = bool(data.get("allow_launch"))
         if "enabled" in data:
             cfg["enabled"] = bool(data.get("enabled"))
+        if "allow_desktop" in data:
+            cfg["allow_desktop"] = bool(data.get("allow_desktop"))
     return cfg
 
 
@@ -4274,6 +4300,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.active_client_id = None
     app.ctx.control_clients = {}        # clientId -> set[ws]
     app.ctx.lease_lock = asyncio.Lock()
+    # #244: the desktop relay. lease_generation is read and written ONLY
+    # under lease_lock and bumps on every holder change, so a browser
+    # that lost the lease (even one that lost AND regained it -- a new
+    # generation) cannot resolve a call the broker made to the older
+    # generation. desktop_rpcs maps rid -> _DesktopCall; the rid counter
+    # is loop-confined like the rest of the relay state.
+    app.ctx.lease_generation = 0
+    app.ctx.desktop_rpcs = {}
+    app.ctx.desktop_rid = itertools.count(1)
+    app.ctx.desktop_rpc_timeout_s = DESKTOP_RPC_TIMEOUT_S
 
     async def _push_terminal_control(window_id, view):
         # #238: every /control socket hears every terminal's control change
@@ -4674,6 +4710,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _vary = response.headers["Vary"]
             if SCOPE_HEADER.lower() not in _vary.lower():
                 response.headers["Vary"] = _vary + ", " + SCOPE_HEADER
+            # #245: an /mcp/* body also depends on the admin header (the
+            # listing, /mcp/info's admin echo, 403 admin_required), so it
+            # rides Vary under the same ?token= reasoning as the scope.
+            _vary = response.headers["Vary"]
+            if MCP_ADMIN_HEADER.lower() not in _vary.lower():
+                response.headers["Vary"] = _vary + ", " + MCP_ADMIN_HEADER
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
@@ -4692,6 +4734,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _allow = "Authorization, Content-Type, " + SCOPE_HEADER
             if app.ctx.admin_token is not None:
                 _allow += ", " + ADMIN_HEADER
+            # MCP_ADMIN_HEADER (#245) is advertised UNCONDITIONALLY, and only
+            # on /mcp/* preflights — a deliberate divergence from #191's
+            # conditional rule above. #191's realm is boot-static config, so
+            # its conditional answer can never go stale; the MCP admin realm
+            # is RUNTIME-MUTABLE (minted/rotated/cleared from the Control
+            # Panel), and a cached conditional omission would keep a browser
+            # from sending the header for up to the 86400 Max-Age. The header
+            # NAME leaks nothing: /mcp/info's `admin` echo is token-gated.
+            if request.path.startswith("/mcp/"):
+                _allow += ", " + MCP_ADMIN_HEADER
             response.headers["Access-Control-Allow-Headers"] = _allow
             response.headers["Access-Control-Max-Age"] = "86400"
             # Chrome Private Network Access: a public-site page fetching a
@@ -4716,6 +4768,89 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             await ws.close(code=4401, reason="auth required")
             return
         await relay.handle_browser_ws(request, ws, app.ctx.registry, app.ctx)
+
+    class _DesktopLeaseLost(Exception):
+        """#244: the lease holder a desktop_rpc was sent to lost the lease
+        (a new generation bumped) before answering. Never surfaced raw:
+        _desktop_relay maps it to 409 lost_lease."""
+
+    class _DesktopCall:
+        """One in-flight desktop relay call: the resolved-with envelope (or
+        _DesktopLeaseLost) future, the clientId it was sent to, and the lease
+        GENERATION it was sent under."""
+
+        __slots__ = ("future", "client_id", "generation")
+
+        def __init__(self, future, client_id, generation):
+            self.future = future
+            self.client_id = client_id
+            self.generation = generation
+
+    def _fail_superseded_desktop_rpcs(generation: int) -> None:
+        """Fail every pending desktop rpc not of ``generation``. Called ONLY
+        with lease_lock held (every generation bump), so a browser's answer
+        that races the bump finds no future to resolve. set_exception, never
+        cancel(): CancelledError is not an Exception subclass on every
+        supported Python and would surface as HTTP cancellation instead of
+        the promised 409."""
+        for rid in list(app.ctx.desktop_rpcs):
+            call = app.ctx.desktop_rpcs.get(rid)
+            if call is not None and call.generation != generation:
+                app.ctx.desktop_rpcs.pop(rid, None)
+                if not call.future.done():
+                    call.future.set_exception(_DesktopLeaseLost())
+
+    def _desktop_result(client_id: str, data: Dict[str, Any]) -> None:
+        """A browser's desktop_result frame (#244). STRICT: the rid a real
+        positive int (bool excluded -- in Python True aliases key 1), ok a
+        real bool, the success/error union exact, and the answer accepted
+        only from the client and lease GENERATION the broker sent it to
+        (re-checked live, so a bump that raced the read still loses).
+        Anything malformed is dropped silently: a buggy browser's answer
+        surfaces to the agent as the 504 timeout, never a resolved call."""
+        rid = data.get("rid")
+        if isinstance(rid, bool) or not isinstance(rid, int) or rid <= 0:
+            return
+        ok = data.get("ok")
+        if not isinstance(ok, bool):
+            return
+        # The lease_generation read below is deliberately lock-free
+        # (round 1 A7): every writer -- the bump under lease_lock -- runs on
+        # this same single-threaded event loop, so the read can race only
+        # code that cannot interleave it; taking the lock here would put an
+        # await inside the /control receive loop for no gain.
+        call = app.ctx.desktop_rpcs.get(rid)
+        if (call is None or call.client_id != client_id
+                or call.generation != app.ctx.lease_generation
+                or call.future.done()):
+            return
+        # Round 1 A6: the union is ENFORCED, not just documented -- ok:true
+        # carries a value and NO error key; ok:false carries one of the
+        # closed error codes below. Anything else is a malformed answer and
+        # is dropped (the agent sees the timeout).
+        if ok:
+            if "error" in data or "value" not in data:
+                return
+            call.future.set_result({"ok": True, "value": data.get("value")})
+            return
+        code = data.get("error")
+        if code not in ("unknown_window", "bad_args", "not_home",
+                        "lost_lease", "needs_confirm", "last_workspace",
+                        "absent", "inactive", "bad_op", "error"):
+            return
+        detail = data.get("detail")
+        if code == "needs_confirm":
+            count = detail.get("count") if isinstance(detail, dict) else None
+            if (isinstance(count, bool) or not isinstance(count, int)
+                    or count < 0):
+                return
+            detail = count
+        call.future.set_result({"ok": False, "error": code, "detail": detail})
+
+    # #244: the in-process desktop cells need the closure-defined validator
+    # (a real /control socket only exists in the subprocess harness); this
+    # is a TEST seam, never called by the broker itself.
+    app.ctx._desktop_result_for_tests = _desktop_result
 
     async def _control_ws(request: Request, ws: Websocket):
         # Per-browser control channel for the single-active-browser lease.
@@ -4757,18 +4892,33 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 ctx.control_clients.setdefault(client_id, set()).add(ws)
                 if ctx.active_client_id is None:
                     ctx.active_client_id = client_id  # lone browser just works
+                    # #244: a fresh holder is a new lease generation.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
             await _send(ws, client_id)
 
             async for message in ws:
                 if not isinstance(message, str):
                     continue
                 data = protocol.parse(message)
-                if data is None or data.get("type") != "become_active":
+                if data is None:
+                    continue
+                if data.get("type") == "desktop_result":
+                    # #244: the relay's reply path; validated and
+                    # generation-gated in _desktop_result.
+                    _desktop_result(client_id, data)
+                    continue
+                if data.get("type") != "become_active":
                     continue
                 # ---- become_active: flip the lease, then (OUTSIDE the lock)
                 # cut every other client loose and broadcast live status.
                 async with ctx.lease_lock:
                     ctx.active_client_id = client_id
+                    # #244: the holder changed -- a new generation; pending
+                    # calls to any older one fail INSIDE the lock, before the
+                    # broadcast awaits can interleave a late answer.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
                     losers = {cid: list(socks)
                               for cid, socks in ctx.control_clients.items()
                               if cid != client_id}
@@ -4796,6 +4946,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                             and client_id not in ctx.control_clients)
                 if released:
                     ctx.active_client_id = None
+                    # #244: the holder went away with calls still pending:
+                    # they are lost_lease, not timeouts.
+                    ctx.lease_generation += 1
+                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
                     remaining = {cid: list(s)
                                  for cid, s in ctx.control_clients.items()}
                 else:
@@ -6553,7 +6707,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # shows: a write that REPLACES the row (always, for pid 0) must
             # not drop the other field. That value is the RAW override, so a
             # scope-only change never materialises the default mode.
+            # #245/#243: the write also clears the durable ADMIN badge AND
+            # the launch handle's owner — the browser edit means a HUMAN
+            # took the window back, so neither an agent's badge nor its
+            # handle may survive it.
             want = dict(fields)
+            want["admin_set"] = None
+            want["owner"] = None
             if not work.merges(wid, pid=pid, host=host):
                 want.setdefault("scope", entry.mcp_scope)
                 want.setdefault("mode", entry.mcp_mode)
@@ -6581,6 +6741,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not applied and live is entry:
             live.mcp_scope = scope
             live.mcp_mode = mode
+            # #245: the direct-set fallback (the row was deleted by this very
+            # write) clears the badge too — it must not outlive its row.
+            live.mcp_admin_launch = False
         return sanic_json({"ok": True, "id": wid, "mode": mode,
                            "scope": scope})
 
@@ -6677,8 +6840,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return value
 
     def _mcp_auth_error(request: Request):
-        # Order: mcp_disabled, then the token, then the scope, so a caller
-        # without the token cannot probe which scope names are valid.
+        # Order: mcp_disabled, then the token, then the scope, then the admin
+        # header (#245), so a caller without the token cannot probe which
+        # scope names are valid, and one without the MCP admin credential
+        # learns nothing about it either.
         cfg = app.ctx.mcp_cfg
         if not cfg.get("enabled") or not cfg.get("token"):
             return sanic_json({"error": "mcp_disabled"}, status=403)
@@ -6689,12 +6854,68 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             _mcp_scope(request)
         except ValueError:
             return sanic_json({"error": "bad_scope"}, status=400)
+        return _mcp_admin_error(request)
+
+    def _mcp_admin_error(request: Request):
+        """#245: step 4 of the /mcp refusal ladder, run by _mcp_auth_error on
+        every token route. The MCP admin credential travels ONLY in the
+        X-Browserland-Mcp-Admin header, ADDITIONAL to the MCP token: a request
+        carrying it in the query string is refused outright (keys as well as
+        values — the #191 _admin_auth_error rule, because a token in a URL is
+        a credential in every access log and Referer downstream), and a
+        header PRESENT but not matching the configured token is 403
+        admin_required. Three states, exactly: absent = a plain non-admin
+        caller (never an error here; admin-only ops 403 at their route),
+        present + matching = admin, present + wrong = 403. With NO admin
+        token configured this returns None before touching the request —
+        today's wire, byte for byte — and /mcp/info answers admin: false so a
+        client fails closed. Log lines name the route and the peer, never
+        the header or query value."""
+        admin = app.ctx.mcp_cfg["admin_token"]
+        if admin is None:
+            return None
+        for _key, val in request.query_args:
+            if (auth.token_matches(val, admin)
+                    or auth.token_matches(_key, admin)):
+                LOGGER.warning("rejected admin token in query string on %s "
+                               "from %s (header-only transport)",
+                               request.path, request.ip)
+                return sanic_json({"error": "admin_token_in_url"}, status=400)
+        # Round 1 A5: a REPEATED admin header is refused like _mcp_scope
+        # refuses a repeated scope header -- Sanic's headers.get would
+        # silently pick the first, and "right, junk" authenticating while
+        # "junk, right" 403s is a transport we never want to teach.
+        if len(request.headers.getall(MCP_ADMIN_HEADER, None) or []) > 1:
+            LOGGER.warning("rejected repeated %s header on %s from %s",
+                           MCP_ADMIN_HEADER, request.path, request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
+        provided = request.headers.get(MCP_ADMIN_HEADER)
+        if provided is not None and not auth.token_matches(provided, admin):
+            LOGGER.warning("rejected non-admin /mcp call from %s", request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
         return None
+
+    def _mcp_is_admin(request: Request) -> bool:
+        # #245: this caller presented the configured MCP admin credential.
+        # _mcp_admin_error already refused a present-but-wrong header, so here
+        # the header is absent (plain caller) or right; constant-time compare
+        # either way, like every gate.
+        admin = app.ctx.mcp_cfg["admin_token"]
+        return admin is not None and auth.token_matches(
+            request.headers.get(MCP_ADMIN_HEADER), admin)
 
     def _mcp_effective_mode(entry) -> str:
         # Per-window override OR the live broker default, so flipping the
         # default live-updates every non-overridden window.
         return entry.mcp_mode or app.ctx.mcp_cfg["default_mode"]
+
+    def _mcp_unknown_or_off():
+        """#230/#243/#244: the ONE 404 every hidden-window refusal answers.
+        Missing, off and out-of-scope must stay byte-identical so the answer
+        cannot be used as an existence probe; /mcp/window's handle path and
+        the desktop routes answer these exact bytes too, which is why the
+        construction lives here instead of being repeated per route."""
+        return sanic_json({"error": "unknown_or_off"}, status=404)
 
     def _mcp_entry(request: Request):
         """Resolve {id} to a live entry whose effective mode != off and, when
@@ -6717,11 +6938,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return None, None, sanic_json({"error": "bad_id"}, status=400)
         entry = app.ctx.registry.get(sid)
         mode = _mcp_effective_mode(entry) if entry is not None else "off"
-        scope = _mcp_scope(request)
+        # #245: an admin's declared scope is ignored for reach (owner
+        # decision: it only tags the terminals the admin LAUNCHES), so the
+        # chokepoint runs unscoped for it. The off filter STAYS: mode gates
+        # terminal I/O, so to drive an off window the admin must first set
+        # it read/readwrite (#243's /mcp/window) — a deliberate, visible
+        # step, not a silent bypass.
+        scope = None if _mcp_is_admin(request) else _mcp_scope(request)
         if (entry is None or mode == "off"
                 or (scope is not None and entry.mcp_scope != scope)):
-            return None, None, sanic_json({"error": "unknown_or_off"},
-                                          status=404)
+            return None, None, _mcp_unknown_or_off()
         return entry, mode, None
 
     async def _mcp_info(request: Request):
@@ -6739,7 +6965,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            # scopes, or a proxy that dropped the header,
                            # answers without it or with null, and would
                            # otherwise hand it the unscoped view silently.
-                           "scope": _mcp_scope(request)})
+                           "scope": _mcp_scope(request),
+                           # #245: whether THIS caller holds the admin
+                           # credential. A broker predating admin answers
+                           # without the key, and a client must take absence
+                           # as false (the scope echo pattern).
+                           "admin": _mcp_is_admin(request),
+                           # #243: the window-edit route exists. A broker
+                           # without the flag does not accept handles; a
+                           # client fails closed on absence.
+                           "window_edit": True,
+                           # #244: the desktop relay master switch. A broker
+                           # without the flag does not relay; a client fails
+                           # closed on absence.
+                           "allow_desktop": bool(cfg["allow_desktop"])})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
@@ -6750,13 +6989,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #230: a caller that declared a scope sees only the windows tagged
         # with it; an unscoped caller sees every window, as before. The mode
         # still applies either way: an off window is never listed.
+        # #245: an ADMIN sees every window whatever its scope, off windows
+        # included — its declared scope is ignored for visibility (it only
+        # tags the admin's own launches). Reads and input still honor each
+        # window's mode, so the off rows are visible, not yet drivable.
         scope = _mcp_scope(request)
+        admin = _mcp_is_admin(request)
         out = []
         for s in app.ctx.registry.session_summaries(default_mode):
             mode = s.get("mcp", "off")
-            if mode == "off":
+            if mode == "off" and not admin:
                 continue
-            if scope is not None and s["mcp_scope"] != scope:
+            if (scope is not None and not admin
+                    and s["mcp_scope"] != scope):
                 continue
             version = s.get("version", "") or ""
             entry_out = {"id": s["id"], "title": s["title"], "host": s["host"],
@@ -7069,35 +7314,48 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         })
 
     async def _mcp_launch(request: Request):
-        """POST /mcp/launch. An UNSCOPED launch is the launcher's answer as
-        is: no per-window row, and the window inherits default_mode (a
-        valid body ``mode`` is ignored; an invalid one is still 400).
-
-        A SCOPED launch (#231) tags the window before it exists: the
-        launcher's pre_spawn hook writes the row {scope, mode, pid null,
-        host null} through the shared writer before anything is spawned, and
-        the agent's first hello claims it (McpWindowStore.apply), so the
-        window registers already scoped, including after a 202 whose hello
-        lands on a restarted broker. ``mode`` defaults to readwrite, not
-        default_mode: a worker its launcher cannot drive is useless, and
-        allow_launch is already its own opt-in. A LaunchError after the row
-        landed deletes it again while it is still unclaimed; a failing
-        rollback is logged and the launcher's error is still the answer.
-        Success adds ``scope`` and ``mode`` to the launcher's payload.
+        """POST /mcp/launch. EVERY launch, scoped or not (#243), tags the
+        window before it exists and mints an ownership HANDLE: the
+        launcher's pre_spawn hook writes the row {scope (null when
+        unscoped), mode, owner: sha256(handle), pid null, host null} through
+        the shared writer before anything is spawned, and the agent's first
+        hello claims it (McpWindowStore.apply), so the window registers
+        already tagged, including after a 202 whose hello lands on a
+        restarted broker. ``mode`` defaults to readwrite, not default_mode,
+        for scoped AND unscoped launches alike (owner decision on #243: a
+        worker its launcher cannot drive is useless, and allow_launch is
+        already its own opt-in; this CHANGED the unscoped wire, which used
+        to inherit default_mode and ignore a valid body mode). Only the
+        sha256 hexdigest is stored; the plaintext handle lives in the launch
+        response alone. A LaunchError after the row landed deletes it again
+        while it is still unclaimed; a failing rollback is logged and the
+        launcher's error is still the answer. Success adds ``scope``,
+        ``mode`` and ``handle`` to the launcher's payload.
 
         The pre-spawn write REFUSES an id that already has a row (the hook
-        raises, so prespawn_failed; the client's retry rolls a new id). The
+        raises, so prespawn_failed; the collision is recorded first). The
         id is fresh (never live or pending), but a row can outlive its
-        window for 7 days, and prune cannot drop it here because a pending
-        id counts as live. Replacing it would hand a claimed row's id to a
-        pre-spawn row, and a hello from that row's old producer landing
-        during the write would then claim the NEW row (the hazard
-        McpWindowStore.reapply names). So that replacement never happens.
+        window for 7 days. Replacing it in place would hand a claimed row's
+        id to a pre-spawn row, and a hello from that row's old producer
+        landing during the write would then claim the NEW row (the hazard
+        McpWindowStore.reapply names). So that replacement never happens; instead (#243, reshaped in
+        review round 1 A1) the launch is retried ONCE on a FRESH id
+        whatever the collided row is (the launcher allocates a new
+        random id; the collided one is simply not ours), and the row
+        itself is deleted -- by ONE extra writer pass that touches
+        nothing else -- ONLY when it cannot still be claimed usefully:
+        a pre-spawn ORPHAN (pid and host both null: nothing was ever
+        spawned on it) or a row PRUNE_AGE_S stale (prune's own age
+        would drop it anyway). A row with its producer identity set and
+        a fresh seen SURVIVES untouched even with no live entry: the
+        7-day lifetime exists precisely so a DISCONNECTED producer can
+        reconnect to its off/scope policy, and a random id collision
+        must not take it away.
 
         A client that disconnects during the shielded pre-spawn write can
         leave an unclaimed row on an id nothing was spawned for: it tags no
         window, it is pruned after 7 days, and a launch that rolls its id
-        meanwhile is refused as above."""
+        meanwhile takes the dead-row path above."""
         err = _mcp_auth_error(request)
         if err is not None:
             return err
@@ -7109,31 +7367,77 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         launch_kwargs = {"cols": params["cols"], "rows": params["rows"],
                          "title": params["title"], "cwd": params["cwd"]}
         scope = _mcp_scope(request)
-        if scope is None:
-            try:
-                status, payload = await app.ctx.launcher.launch(
-                    params["profile"], **launch_kwargs)
-            except LaunchError as exc:
-                return sanic_json(exc.payload, status=exc.status)
-            return sanic_json(payload, status=status)
         mode = params["mode"] or "readwrite"
+        handle = secrets.token_urlsafe(32)
+        owner = hashlib.sha256(handle.encode()).hexdigest()
         tagged: List[int] = []
+        collided: List[int] = []
 
         async def _tag(wid: int) -> None:
             def _write(work):
                 if work.get(wid) is not None:
+                    collided.append(wid)
                     raise RuntimeError(f"window {wid} already has a stored "
                                        "MCP row; not replacing it")
-                work.set(wid, scope=scope, mode=mode, now=work.clock())
+                # #245: an admin-authenticated launch stamps the row (True),
+                # so the badge survives a broker restart and a reconnect
+                # (reapply copies it onto the live entry). A non-admin launch
+                # leaves the key unset (None): the sidecar carries the badge
+                # only where it is true.
+                stamp = {"admin_set": True} if _mcp_is_admin(request) else {}
+                work.set(wid, scope=scope, mode=mode, owner=owner,
+                         now=work.clock(), **stamp)
             await app.ctx.persist_mcp_windows(_write)
             tagged.append(wid)
+
+        def _collided_row_droppable(work, wid: int) -> bool:
+            # Review round 1 A1: a collided row may be deleted ONLY when
+            # nothing can still claim it usefully -- a pre-spawn ORPHAN
+            # (pid and host both null) or a row older than PRUNE_AGE_S
+            # (prune's own rule would drop it anyway). A row whose
+            # producer identity is set and whose seen is fresh SURVIVES:
+            # the disconnected producer's reconnect must find its
+            # off/scope policy. Read inside the writer (get()/clock() are
+            # sync), so the answer is linearized with the delete.
+            row = work.get(wid)
+            if row is None:
+                return False
+            if row["pid"] is None and row["host"] is None:
+                return True
+            return work.clock() - row["seen"] > PRUNE_AGE_S
+
+        async def _drop_collided_row(wid: int) -> None:
+            # ONE writer pass that deletes the collided row ONLY when it
+            # is droppable (an orphan or stale). Never an in-place
+            # replacement: the retry that follows launches on a fresh id
+            # whether or not this deleted anything.
+            def _write(work):
+                row = work.get(wid)
+                if row is not None and _collided_row_droppable(work, wid):
+                    work.set(wid, scope=None, mode=None, owner=None,
+                             admin_set=None, pid=row["pid"], host=row["host"],
+                             now=work.clock())
+                    return True
+                return False
+            try:
+                await app.ctx.persist_mcp_windows(_write)
+            except Exception:
+                LOGGER.exception("/mcp/launch: dropping window %d's "
+                                 "collided MCP row failed; the launch "
+                                 "still retries on a fresh id and the "
+                                 "row stays", wid)
 
         async def _untag(wid: int) -> None:
             def _write(work):
                 row = work.get(wid)
                 if (row is not None and row["pid"] is None
                         and row["host"] is None):
-                    work.set(wid, scope=None, mode=None, now=work.clock())
+                    # P2 (broker audit): the rollback clears EVERY
+                    # ownership fact in the ONE set() -- owner (B2) and
+                    # the admin badge -- so nothing survives for an id
+                    # nothing was spawned on.
+                    work.set(wid, scope=None, mode=None, owner=None,
+                             admin_set=None, now=work.clock())
             try:
                 await app.ctx.persist_mcp_windows(_write)
             except Exception:
@@ -7141,15 +7445,540 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                  "pre-spawn MCP row after a failed launch "
                                  "failed; prune drops it after 7 days", wid)
 
+        async def _attempt():
+            try:
+                return await app.ctx.launcher.launch(
+                    params["profile"], pre_spawn=_tag, **launch_kwargs)
+            except LaunchError:
+                # #243 round 1 A1: a COLLISION is retried exactly once, on
+                # a fresh id, whatever the row -- a random id collision
+                # must not fail the agent's launch, and the collided row
+                # is dropped only when it is an orphan or stale. Anything
+                # else (a store-write or spawn failure) is the launcher's
+                # own answer; and a second collision on the retry is too.
+                if collided:
+                    await _drop_collided_row(collided[0])
+                    collided.clear()
+                    return await app.ctx.launcher.launch(
+                        params["profile"], pre_spawn=_tag, **launch_kwargs)
+                raise
+
         try:
-            status, payload = await app.ctx.launcher.launch(
-                params["profile"], pre_spawn=_tag, **launch_kwargs)
+            status, payload = await _attempt()
         except LaunchError as exc:
             if tagged:
                 await _untag(tagged[0])
             return sanic_json(exc.payload, status=exc.status)
-        return sanic_json(dict(payload, scope=scope, mode=mode),
-                          status=status)
+        return sanic_json(dict(payload, scope=scope, mode=mode,
+                               handle=handle), status=status)
+
+    async def _mcp_window(request: Request):
+        """POST /mcp/window (#243): set a window's scope and/or RAW mode
+        from the MCP side — the missing other half of allow_launch, so an
+        agent that launched a worker can also choose how it is exposed
+        afterwards. Body {id, handle?, scope?, mode?}: an absent key leaves
+        that field alone, an explicit null clears it (mode null = inherit
+        the default), exactly as /session/mcp reads its body.
+
+        Two paths, decided by the handle (a PRESENT handle is preferred for
+        everyone, admin included — an admin client editing its own launched
+        window keeps the owner, so the handle stays truthful):
+
+        * HANDLE: the row must carry an ``owner`` that is the sha256 of the
+          handle (constant-time compare), and when a live entry holds the id
+          the row must still be that producer's (same_producer) — a recycled
+          id under a different producer invalidates the handle. With no live
+          entry the row alone suffices: a pre-spawn edit, or an owner
+          editing while its producer reconnects. The handle bypasses the
+          scope/off filter ON PURPOSE: an owner that set its window off, or
+          into a scope it does not hold, must be able to undo it. A wrong or
+          missing handle, an unknown id, an unowned row and a foreign
+          producer all answer the ONE 404 unknown_or_off, so the route
+          cannot be used to probe which ids exist.
+        * NO handle: admin only (#245). Any window with a live entry or a
+          stored row; the write displaces the old owner (owner=None, so a
+          stale agent handle cannot undo an admin decision) and stamps
+          admin_set (the badge is "an admin agent is driving this window").
+
+        The authorization runs INSIDE the one shared writer's critical
+        section (against the working copy), so an admin's owner-clear or a
+        same-id producer swap cannot interleave between the check and the
+        write; a refusal detected there aborts with nothing written. The
+        write itself is ONE set() like /session/mcp's, carrying the live
+        entry's pid/host when there is one (the admin path on a recycled id
+        stamps the LIVE window's row, never the old row's) and the row's own
+        otherwise (a pre-spawn row keeps its wildcards). After the writer,
+        reapply() refreshes whatever entry holds the id, with the same
+        direct-set fallback as /session/mcp for a row that cannot re-apply
+        (a pid-0 producer)."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        try:
+            wid = int(body.get("id"))
+        except (TypeError, ValueError):
+            return sanic_json({"error": "bad_id"}, status=400)
+        # Validation order mirrors /session/mcp: neither key, then a bad
+        # mode, then a bad scope — all BEFORE any write.
+        if "mode" not in body and "scope" not in body:
+            return sanic_json({"error": "bad_mode"}, status=400)
+        fields: Dict[str, Any] = {}
+        if "mode" in body:
+            if body["mode"] is not None and body["mode"] not in MCP_MODES:
+                return sanic_json({"error": "bad_mode"}, status=400)
+            fields["mode"] = body["mode"]
+        if "scope" in body:
+            scope = body["scope"]
+            if scope is not None and not (isinstance(scope, str)
+                                          and SCOPE_RE.fullmatch(scope)):
+                return sanic_json({"error": "bad_scope"}, status=400)
+            fields["scope"] = scope or None
+        handle = body.get("handle")
+        admin = _mcp_is_admin(request)
+        store = app.ctx.mcp_windows
+        entry_now = app.ctx.registry.get(wid)
+
+        class _Refuse(Exception):
+            """The one refusal: answer the shared 404, write nothing."""
+
+        def _authorize(work):
+            """(pid, host, admin_stamp) for the write, or _Refuse. Runs
+            inside the writer against the working copy, so the decision is
+            linearized with the write."""
+            row = work.get(wid)
+            if isinstance(handle, str) and handle:
+                want = hashlib.sha256(handle.encode()).hexdigest()
+                if (row is None or row.get("owner") is None
+                        or not auth.token_matches(row["owner"], want)):
+                    raise _Refuse()
+                live = app.ctx.registry.get(wid)
+                if live is not None and not same_producer(row, live):
+                    raise _Refuse()
+                return row["pid"], row["host"], None
+            if not admin:
+                raise _Refuse()
+            live = app.ctx.registry.get(wid)
+            if row is None and live is None:
+                raise _Refuse()
+            if live is not None:
+                return live.pid, live.host, True
+            return row["pid"], row["host"], True
+
+        def _write(work):
+            pid, host, admin_stamp = _authorize(work)
+            want = dict(fields)
+            if admin_stamp is True:
+                want["owner"] = None
+                want["admin_set"] = True
+                if not work.merges(wid, pid=pid, host=host):
+                    # A REPLACING write must not drop the fields the body
+                    # left out: they come from the live entry (what
+                    # /sessions shows), exactly as /session/mcp does.
+                    if entry_now is not None:
+                        want.setdefault("scope", entry_now.mcp_scope)
+                        want.setdefault("mode", entry_now.mcp_mode)
+            work.set(wid, pid=pid, host=host, now=work.clock(), **want)
+            row = work.get(wid)
+            return ((row["scope"], row["mode"], bool(admin_stamp))
+                    if row is not None else (None, None, False))
+
+        try:
+            scope_out, mode_out, stamped = (
+                await app.ctx.persist_mcp_windows(_write))
+        except _Refuse:
+            return _mcp_unknown_or_off()
+        # Only now does the live entry change, re-applied from the row on
+        # whatever entry holds the id NOW (a hello that landed mid-write got
+        # the pre-write row; the writer's inflight mirror re-applies it
+        # there). The direct-set fallback covers the row a pid-0 producer
+        # can never re-apply.
+        live = app.ctx.registry.get(wid)
+        applied = live is not None and store.reapply(live)
+        if not applied and live is entry_now and entry_now is not None:
+            live.mcp_scope = scope_out
+            live.mcp_mode = mode_out
+            live.mcp_admin_launch = stamped
+        return sanic_json({"ok": True, "id": wid, "mode": mode_out,
+                           "scope": scope_out})
+
+    # ---- desktop relay (#244) ---------------------------------------------
+    # GET/POST /mcp/desktop relay ops to the browser that holds THIS broker's
+    # /control lease over its /control socket, as desktop_rpc/desktop_result
+    # frames (protocol.py). The broker owns auth, the flag, the op allowlist
+    # and the visibility filter; the browser owns layout truth. Design refs:
+    # design/broker.md ## Wire contract.
+
+    #: Core window ops the browser handles natively; workspace ops forward to
+    #: the workspaces mod's ctx.commands (absent/inactive pass through as a
+    #: 200 {ok: false, reason} -- never a silent no-op).
+    _DESKTOP_WINDOW_OPS = frozenset((
+        "get", "focus", "move_column", "set_width", "tile", "float",
+        "set_geometry", "tab_into", "split"))
+    _DESKTOP_WORKSPACE_OPS = frozenset((
+        "workspaces:list", "workspaces:add", "workspaces:rename",
+        "workspaces:remove", "workspaces:switch", "workspaces:send-window"))
+    _DESKTOP_OPS = _DESKTOP_WINDOW_OPS | _DESKTOP_WORKSPACE_OPS
+    #: Which args keys name broker window ids, per op -- every one of them is
+    #: visibility-checked broker-side (tab_into/split name two: a scoped
+    #: caller must not probe or move a foreign window through the second id).
+    _DESKTOP_OP_IDS = {
+        "focus": ("id",), "move_column": ("id",), "set_width": ("id",),
+        "tile": ("id",), "float": ("id",), "set_geometry": ("id",),
+        "tab_into": ("id", "target"), "split": ("id", "target"),
+        "workspaces:send-window": ("win",),
+    }
+    #: The layout attributes the broker passes through from the browser's
+    #: snapshot row. Identity (id/title) NEVER comes from the browser -- the
+    #: registry is authoritative -- and unknown-to-the-broker extras pass
+    #: through verbatim only within this whitelist.
+    _DESKTOP_LAYOUT_KEYS = ("tiled", "column", "row", "width_preset",
+                            "geometry", "workspace", "kind", "minimized",
+                            "tabIndex", "tabbed", "split", "widthFrac")
+
+    def _snap_int(value):
+        # A REAL int (bool excluded -- True aliases 1), or None.
+        return (value if not isinstance(value, bool)
+                and isinstance(value, int) else None)
+
+    def _snap_str(value, cap):
+        return value if isinstance(value, str) and len(value) <= cap \
+            else None
+
+    #: Per-key type discipline for the per-window layout extras (round 1
+    #: A2): bools/ints/short strs (plus finite numbers for widthFrac and an
+    #: all-int dict for geometry). A value of the wrong type drops the KEY,
+    #: never the row: a lying browser can misreport only its own layout.
+    _DESKTOP_LAYOUT_TYPES = {
+        "tiled": "bool", "minimized": "bool", "tabbed": "bool",
+        "column": "int", "row": "int", "tabIndex": "int", "workspace": "int",
+        "width_preset": "str32", "kind": "str32", "split": "str32",
+        "widthFrac": "num", "geometry": "geom",
+    }
+    _LAYOUT_SKIP = object()
+
+    def _snap_layout_value(key, value):
+        kind = _DESKTOP_LAYOUT_TYPES[key]
+        if kind == "bool":
+            return value if isinstance(value, bool) else _LAYOUT_SKIP
+        if kind == "int":
+            value = _snap_int(value)
+            return _LAYOUT_SKIP if value is None else value
+        if kind == "str32":
+            value = _snap_str(value, 32)
+            return _LAYOUT_SKIP if value is None else value
+        if kind == "num":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return _LAYOUT_SKIP
+            return value if math.isfinite(value) else _LAYOUT_SKIP
+        # geom: an all-int {x, y, w, h} dict
+        if not isinstance(value, dict):
+            return _LAYOUT_SKIP
+        out = {}
+        for part in ("x", "y", "w", "h"):
+            part_v = _snap_int(value.get(part))
+            if part_v is None:
+                return _LAYOUT_SKIP
+            out[part] = part_v
+        return out
+
+    def _snap_rebuild_top(snap):
+        """Round 1 A2: EVERY top-level snapshot field is REBUILT with a
+        type discipline, never passed through -- a compromised browser must
+        not be able to reach the MCP caller (or exhaust it) through a field
+        the visibility filter never checks. Wrong-typed fields are dropped
+        or nulled; workspaces entries are reduced to {index, id, name} with
+        an int index and bounded strings, at most 64 of them."""
+        out = {"ok": True}
+        viewport = snap.get("viewport")
+        if isinstance(viewport, dict):
+            vw = _snap_int(viewport.get("w"))
+            vh = _snap_int(viewport.get("h"))
+            if vw is not None and vh is not None:
+                out["viewport"] = {"w": vw, "h": vh}
+        mode = _snap_str(snap.get("mode"), 32)
+        if mode is not None:
+            out["mode"] = mode
+        for key in ("focused_column", "active_workspace"):
+            value = snap.get(key)
+            if value is None:
+                out[key] = None
+            else:
+                value = _snap_int(value)
+                if value is not None:
+                    out[key] = value
+        home = snap.get("home")
+        if isinstance(home, bool):
+            out["home"] = home
+        workspaces = snap.get("workspaces")
+        if workspaces is None:
+            out["workspaces"] = None
+        elif isinstance(workspaces, list):
+            items = []
+            for entry in workspaces[:64]:
+                if not isinstance(entry, dict):
+                    continue
+                index = _snap_int(entry.get("index"))
+                ident = _snap_str(entry.get("id"), 64)
+                if index is None or ident is None:
+                    continue
+                # Round 2: a null/ABSENT name is the UNNAMED workspace (the
+                # mod's default label mode) and stays null; only a PRESENT
+                # name that is not a str<=64 drops the entry.
+                name = entry.get("name")
+                if name is not None:
+                    name = _snap_str(name, 64)
+                    if name is None:
+                        continue
+                items.append({"index": index, "id": ident, "name": name})
+            out["workspaces"] = items
+        return out
+
+    def _desktop_visible_ids(request: Request):
+        """#244 [M1]: the ids THIS caller can see -- every live window whose
+        effective mode is not off and, when it declared a scope, whose tag
+        matches. Rides every relayed frame as args.visible (an admin's frame
+        carries null: no browser-side visibility check). The browser refuses
+        with unknown_window unless every window an op affects is in it --
+        move_column/set_width move a whole COLUMN and tab_into/split reshape
+        one, which can carry windows this caller cannot see, so the
+        per-named-id check alone is not enough."""
+        if _mcp_is_admin(request):
+            return None
+        scope = _mcp_scope(request)
+        out = []
+        for entry in app.ctx.registry.entries():
+            if _mcp_effective_mode(entry) == "off":
+                continue
+            if scope is not None and entry.mcp_scope != scope:
+                continue
+            out.append(entry.id)
+        return out
+
+    def _desktop_check_named_ids(request: Request, op: str, args):
+        """The belt: broker-side visibility pre-check of every id the op
+        names, answering the shared 404 (byte-identical to the chokepoint's)
+        before any relay round-trip. An admin names any window, off ones
+        included (#245)."""
+        if _mcp_is_admin(request):
+            return None
+        scope = _mcp_scope(request)
+        for key in _DESKTOP_OP_IDS.get(op, ()):
+            wid = args.get(key)
+            if isinstance(wid, bool) or not isinstance(wid, int):
+                return sanic_json({"error": "bad_args"}, status=400)
+            entry = app.ctx.registry.get(wid)
+            if (entry is None or _mcp_effective_mode(entry) == "off"
+                    or (scope is not None and entry.mcp_scope != scope)):
+                return _mcp_unknown_or_off()
+        return None
+
+    async def _desktop_relay(request: Request, op: str, args, visible):
+        """Send one desktop_rpc to exactly ONE /control socket of the lease
+        holder -- the pick among the client's sockets is arbitrary (a set
+        has no insertion order) but SINGLE, with failover to a sibling
+        socket when the chosen send raises; the client's other sockets never
+        see the frame, so nothing can apply it twice -- and
+        await its desktop_result under ONE end-to-end deadline. Refusals the
+        browser never sees: no holder 409 no_active_browser (owner ruling:
+        fail, never queue), every-send-failed 409 lost_lease, deadline
+        exceeded 504 desktop_timeout. Returns the outcome envelope (the
+        route maps it), never raises for protocol outcomes."""
+        ctxd = app.ctx
+        async with ctxd.lease_lock:
+            holder = ctxd.active_client_id
+            generation = ctxd.lease_generation
+            sockets = (list(ctxd.control_clients.get(holder, ()))
+                       if holder is not None else [])
+        if holder is None:
+            return {"http": sanic_json({"error": "no_active_browser"},
+                                       status=409)}
+        rid = next(ctxd.desktop_rid)
+        # Round 1 A3: ONE end-to-end deadline shared by the send loop and
+        # the reply wait, so N stalled sockets cost at most ONE timeout --
+        # not (N+1) x it.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + ctxd.desktop_rpc_timeout_s
+        # INVARIANT (round 1 A7): there is NO await between the lease
+        # snapshot above and the registration below -- an await here opens a
+        # window where a deposed holder is sent the call.
+        frame = protocol.desktop_rpc_frame(rid, op, dict(args,
+                                                         visible=visible))
+        future = loop.create_future()
+        ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
+        try:
+            sent = False
+            stalled = False
+            for sock in sockets:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    stalled = True
+                    break
+                try:
+                    await asyncio.wait_for(sock.send(frame), remaining)
+                    sent = True
+                    break
+                except asyncio.TimeoutError:
+                    stalled = True   # this socket stalled: try the next
+                    continue
+                except Exception:
+                    continue       # a dead socket: try the next
+            if not sent:
+                # A STALLED send (or an exhausted deadline) is the timeout;
+                # only sockets that failed instantly mean the holder is
+                # gone.
+                if stalled:
+                    return {"http": sanic_json(
+                        {"error": "desktop_timeout"}, status=504)}
+                return {"http": sanic_json({"error": "lost_lease"},
+                                           status=409)}
+            try:
+                return await asyncio.wait_for(
+                    future, max(0.0, deadline - loop.time()))
+            except _DesktopLeaseLost:
+                return {"http": sanic_json({"error": "lost_lease"},
+                                           status=409)}
+            except asyncio.TimeoutError:
+                return {"http": sanic_json({"error": "desktop_timeout"},
+                                           status=504)}
+        finally:
+            ctxd.desktop_rpcs.pop(rid, None)
+
+    def _desktop_outcome_response(outcome):
+        """Map a resolved desktop_result envelope to its HTTP answer. The
+        browser's unknown_window answers the byte-identical shared 404 (a
+        scoped caller must not learn which ids exist from the BROWSER
+        either); absent/inactive answer 200 {ok: false, reason} (the mod is
+        off/disabled -- the issue's "no silent no-op"); everything else is
+        the wire contract's table."""
+        if "http" in outcome:
+            return outcome["http"]
+        if outcome["ok"]:
+            return sanic_json({"ok": True, "value": outcome.get("value")})
+        code = outcome["error"]
+        if code == "unknown_window":
+            return _mcp_unknown_or_off()
+        if code == "bad_args":
+            return sanic_json({"error": "bad_args",
+                               "detail": outcome.get("detail")}, status=400)
+        if code == "not_home" or code == "lost_lease":
+            return sanic_json({"error": code}, status=409)
+        if code == "needs_confirm":
+            # The wire contract's detail is {count: int}; the HTTP answer is
+            # flat. Normalized HERE as well as in _desktop_result so the
+            # shape holds whichever path resolved the call.
+            count = outcome.get("detail")
+            if isinstance(count, dict):
+                count = count.get("count")
+            if isinstance(count, bool) or not isinstance(count, int):
+                count = 0
+            return sanic_json({"error": "needs_confirm", "count": count},
+                              status=409)
+        if code == "last_workspace":
+            return sanic_json({"error": "last_workspace"}, status=409)
+        if code in ("absent", "inactive"):
+            return sanic_json({"ok": False, "reason": code})
+        if code == "bad_op":
+            return sanic_json({"error": "bad_op"}, status=400)
+        return sanic_json({"error": "desktop_op_failed",
+                           "detail": outcome.get("detail")}, status=502)
+
+    async def _desktop_snapshot_answer(request: Request):
+        """op `get`: relay, then rebuild the snapshot broker-side. The
+        registry is AUTHORITATIVE for identity -- a browser row survives
+        only with an int id that is live in THIS registry and not already
+        taken (duplicates: first wins), the title comes from the registry,
+        and only the whitelisted layout attributes pass through -- so a
+        lying or buggy browser can misreport only its own desktop's layout,
+        never another window's title or existence. Then the caller's
+        visibility rule drops the rows it may not see."""
+        outcome = await _desktop_relay(request, "get", {},
+                                       _desktop_visible_ids(request))
+        if not outcome.get("ok"):
+            return _desktop_outcome_response(outcome)
+        snap = outcome.get("value")
+        snap = snap if isinstance(snap, dict) else {}
+        admin = _mcp_is_admin(request)
+        scope = None if admin else _mcp_scope(request)
+        seen = set()
+        windows = []
+        for brow in snap.get("windows") or []:
+            if not isinstance(brow, dict):
+                continue
+            wid = brow.get("id")
+            if isinstance(wid, bool) or not isinstance(wid, int):
+                continue
+            if wid in seen:
+                continue
+            entry = app.ctx.registry.get(wid)
+            if entry is None:
+                continue
+            seen.add(wid)
+            if not admin:
+                if _mcp_effective_mode(entry) == "off":
+                    continue
+                if scope is not None and entry.mcp_scope != scope:
+                    continue
+            row = {"id": wid, "title": entry.title}
+            for key in _DESKTOP_LAYOUT_KEYS:
+                if key not in brow:
+                    continue
+                value = _snap_layout_value(key, brow[key])
+                if value is not _LAYOUT_SKIP:
+                    row[key] = value
+            windows.append(row)
+        out = _snap_rebuild_top(snap)
+        out["windows"] = windows
+        return sanic_json(out)
+
+    async def _mcp_desktop_post(request: Request):
+        """POST /mcp/desktop {op, args} (#244). The ladder: the shared /mcp
+        gate, then allow_desktop (403 desktop_disabled), then the op
+        allowlist (400 bad_op), then -- for a workspace op -- the admin
+        credential (403 admin_required, owner ruling: workspace management
+        and any cross-scope action are admin-only, and the refusal fires
+        BEFORE any relay so the browser never sees a non-admin's workspace
+        op), then the per-named-id visibility belt, then the relay."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not app.ctx.mcp_cfg["allow_desktop"]:
+            return sanic_json({"error": "desktop_disabled"}, status=403)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        op = body.get("op")
+        args = body.get("args")
+        if args is None:
+            args = {}
+        if not isinstance(op, str) or op not in _DESKTOP_OPS:
+            return sanic_json({"error": "bad_op"}, status=400)
+        if not isinstance(args, dict):
+            return sanic_json({"error": "bad_args"}, status=400)
+        if not _mcp_is_admin(request) and op in _DESKTOP_WORKSPACE_OPS:
+            LOGGER.warning("refused non-admin desktop op %s from %s", op,
+                           request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
+        err = _desktop_check_named_ids(request, op, args)
+        if err is not None:
+            return err
+        if op == "get":
+            return await _desktop_snapshot_answer(request)
+        outcome = await _desktop_relay(request, op, args,
+                                       _desktop_visible_ids(request))
+        return _desktop_outcome_response(outcome)
+
+    async def _mcp_desktop_get(request: Request):
+        """GET /mcp/desktop (#244): the snapshot, through the same ladder
+        and the same relay as op `get`."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not app.ctx.mcp_cfg["allow_desktop"]:
+            return sanic_json({"error": "desktop_disabled"}, status=403)
+        return await _desktop_snapshot_answer(request)
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
@@ -7161,6 +7990,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # file can override"). When set, the UI must not be able to change the
         # live token — it would drift from what the env pins on next restart.
         return bool(os.environ.get(auth.MCP_TOKEN_ENV))
+
+    def _mcp_admin_env_pinned() -> bool:
+        # #245: the same rule for the MCP ADMIN token. When set, the Control
+        # Panel can neither mint/rotate nor clear it.
+        return bool(os.environ.get(auth.MCP_ADMIN_TOKEN_ENV))
 
     def _mcp_cfg_public(cfg: Dict[str, Any],
                         request: Request) -> Dict[str, Any]:
@@ -7187,8 +8021,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # not on app.ctx), the port the worker binds.
         return {"ok": True, "enabled": bool(cfg["enabled"]),
                 "token": cfg["token"] or "",
+                # #245: the live MCP ADMIN secret, same exposure rules as the
+                # token above (browser realm — the root of trust that mints
+                # it), "" when unset, and whether the env pins it.
+                "admin_token": cfg["admin_token"] or "",
+                "admin_token_env_pinned": _mcp_admin_env_pinned(),
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
+                # #244: the desktop relay master switch, its own Control
+                # Panel checkbox beside allow_launch.
+                "allow_desktop": bool(cfg["allow_desktop"]),
                 "token_env_pinned": _mcp_token_env_pinned(),
                 "known_scopes": app.ctx.mcp_windows.known_scopes(
                     app.ctx.registry.entries()),
@@ -7201,6 +8043,42 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if err is not None:
             return err
         return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg, request))
+
+    async def _mcp_cfg_locked_write(apply):
+        """The ONE locked sidecar writer shared by POST /mcp/config (browser
+        realm) and POST /mcp/knobs (#245, MCP admin realm): apply a caller's
+        already-validated changes to a COPY of the live cfg inside the
+        shielded mcp_lock region, persist the EXPLICIT to_persist schema
+        (never the whole dict, so a future internal field can't accidentally
+        land in the sidecar; a credential its env pins persists as None,
+        keeping the env secret off disk), then swap the live cfg. Returns the
+        error response on an OSError, else None — the caller answers its own
+        view of the new cfg. ``apply(cfg)`` is sync and mutates the copy in
+        place; the shielded write means an unshielded cancel in the executor
+        hop can never leave disk ahead of memory (see _shielded_region)."""
+        async def _locked_write():
+            cfg = dict(app.ctx.mcp_cfg)
+            apply(cfg)
+            to_persist = {
+                "token": None if _mcp_token_env_pinned() else cfg["token"],
+                "admin_token": (None if _mcp_admin_env_pinned()
+                                else cfg["admin_token"]),
+                "default_mode": cfg["default_mode"],
+                "allow_launch": bool(cfg["allow_launch"]),
+                "enabled": bool(cfg["enabled"]),
+                "allow_desktop": bool(cfg["allow_desktop"]),
+            }
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.mcp_state_path,
+                    to_persist)
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
+            app.ctx.mcp_cfg = cfg
+            return None
+
+        return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 
     async def _mcp_config_post(request: Request):
         err = _gated_auth_error(request, "/mcp/config")
@@ -7217,13 +8095,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if ("token" in body and body.get("token") is not None
                 and not isinstance(body.get("token"), str)):
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
+        # #245: admin_token clears with null/"" and mints with
+        # admin_generate — a client-chosen secret is never accepted, so a
+        # non-string non-null value is a bad_token like above.
+        if ("admin_token" in body and body.get("admin_token") is not None
+                and not isinstance(body.get("admin_token"), str)):
+            return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         env_pinned = _mcp_token_env_pinned()
-        # Shielded: the sidecar write awaits and the live ctx swap lands AFTER
-        # it, so an unshielded cancel in that hop leaves disk ahead of memory —
-        # the running broker keeps the old token/mode while a restart silently
-        # adopts the abandoned one. See _shielded_region.
-        async def _locked_write():
-            cfg = dict(app.ctx.mcp_cfg)
+        admin_env_pinned = _mcp_admin_env_pinned()
+
+        def _apply(cfg):
             # Token edits are honored only when env is NOT pinning it (else
             # the live token would diverge from the env value restart
             # restores).
@@ -7234,38 +8115,81 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 elif "token" in body:
                     tok = (body.get("token") or "").strip()
                     cfg["token"] = tok or None
+            # #245: the admin credential rides the same rules — mint/rotate
+            # with admin_generate, clear with null or "" — and the same env
+            # pin discipline (a pinned admin token ignores UI edits). It is
+            # deliberately NOT nested under the token's pin: the two pins
+            # are independent.
+            if not admin_env_pinned:
+                if body.get("admin_generate"):
+                    cfg["admin_token"] = secrets.token_urlsafe(32)
+                elif "admin_token" in body:
+                    atok = (body.get("admin_token") or "").strip()
+                    cfg["admin_token"] = atok or None
             if "default_mode" in body:
                 cfg["default_mode"] = body["default_mode"]
             if "allow_launch" in body:
                 cfg["allow_launch"] = bool(body.get("allow_launch"))
             if "enabled" in body:
                 cfg["enabled"] = bool(body.get("enabled"))
-            # Persist an EXPLICIT schema (never the whole dict) so a future
-            # internal field can't accidentally land in the sidecar. When env
-            # pins the token, write None: _load_mcp_cfg ignores the sidecar
-            # token under an env pin anyway, and this keeps the env secret off
-            # disk.
-            to_persist = {
-                "token": None if env_pinned else cfg["token"],
-                "default_mode": cfg["default_mode"],
-                "allow_launch": bool(cfg["allow_launch"]),
-                "enabled": bool(cfg["enabled"]),
-            }
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _write_state_atomic, app.ctx.mcp_state_path,
-                    to_persist)
-            except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)},
-                                  status=500)
-            app.ctx.mcp_cfg = cfg
-            # Built inside the mcp_lock region, which is safe:
-            # known_scopes() and registry.entries() are sync and lock-free,
-            # and the per-window store has a lock of its own this never
-            # touches.
-            return sanic_json(_mcp_cfg_public(cfg, request))
+            if "allow_desktop" in body:
+                cfg["allow_desktop"] = bool(body.get("allow_desktop"))
 
-        return await _shielded_region(app.ctx.mcp_lock, _locked_write)
+        err = await _mcp_cfg_locked_write(_apply)
+        if err is not None:
+            return err
+        # Built inside the mcp_lock region, which is safe:
+        # known_scopes() and registry.entries() are sync and lock-free,
+        # and the per-window store has a lock of its own this never
+        # touches.
+        return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg, request))
+
+    async def _mcp_knobs(request: Request):
+        """POST /mcp/knobs (#245): the admin MCP agent's broker-wide knobs —
+        ``{default_mode?, allow_launch?, allow_desktop?}`` (allow_desktop
+        arrives with #244). Gated by the full /mcp ladder and then the admin
+        credential; an admin may flip the knobs but NEVER the secrets or
+        ``enabled`` (rotating a credential or disabling MCP could lock out
+        every agent, the admin included — the browser stays the root of
+        trust), so those keys are 400 bad_key before any write. Booleans must
+        be REAL JSON booleans: the browser realm's /mcp/config keeps its
+        historical ``bool(...)`` coercion as pinned wire, but this admin API
+        refuses ``"false"``-as-truthy junk outright."""
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        if not _mcp_is_admin(request):
+            LOGGER.warning("refused non-admin /mcp/knobs from %s", request.ip)
+            return sanic_json({"error": "admin_required"}, status=403)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"error": "bad_json"}, status=400)
+        allowed = ("default_mode", "allow_launch", "allow_desktop")
+        unknown = sorted(k for k in body if k not in allowed)
+        if unknown:
+            return sanic_json({"error": "bad_key"}, status=400)
+        if "default_mode" in body and body["default_mode"] not in MCP_MODES:
+            return sanic_json({"error": "bad_mode"}, status=400)
+        for knob in ("allow_launch", "allow_desktop"):
+            if knob in body and not isinstance(body[knob], bool):
+                return sanic_json({"error": "bad_value"}, status=400)
+
+        def _apply(cfg):
+            if "default_mode" in body:
+                cfg["default_mode"] = body["default_mode"]
+            if "allow_launch" in body:
+                cfg["allow_launch"] = body["allow_launch"]
+            if "allow_desktop" in body:
+                cfg["allow_desktop"] = body["allow_desktop"]
+
+        err = await _mcp_cfg_locked_write(_apply)
+        if err is not None:
+            return err
+        cfg = app.ctx.mcp_cfg
+        return sanic_json({"ok": True, "default_mode": cfg["default_mode"],
+                           "allow_launch": bool(cfg["allow_launch"]),
+                           "allow_desktop": bool(cfg["allow_desktop"])})
+
 
     # ---- launch profiles config (browser-facing, #70) --------------------
     # The Control Panel reads/writes the FULL profile objects here. Gated by the
@@ -9812,8 +10736,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_pace, "/mcp/pace", methods=["POST"])
     app.add_route(_mcp_profiles, "/mcp/profiles", methods=["GET"])
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
+    app.add_route(_mcp_window, "/mcp/window", methods=["POST"])
+    app.add_route(_mcp_desktop_get, "/mcp/desktop", methods=["GET"])
+    app.add_route(_mcp_desktop_post, "/mcp/desktop", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
     app.add_route(_mcp_config_post, "/mcp/config", methods=["POST"])
+    app.add_route(_mcp_knobs, "/mcp/knobs", methods=["POST"])
     # Launch-profile editor (browser realm; #70). Full objects, never the MCP
     # realm — /profiles + /mcp/profiles stay names-only.
     app.add_route(_profiles_config_get, "/profiles/config", methods=["GET"])
@@ -9876,7 +10804,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/pace", "preflight_mcp_pace"),
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
+    ("/mcp/window", "preflight_mcp_window"),
+    ("/mcp/desktop", "preflight_mcp_desktop"),
                              ("/mcp/config", "preflight_mcp_config"),
+    ("/mcp/knobs", "preflight_mcp_knobs"),
                              ("/profiles/config", "preflight_profiles_config"),
                              ("/profiles/detect", "preflight_profiles_detect")):
         app.add_route(_preflight, path, methods=["OPTIONS"], name=route_name)
