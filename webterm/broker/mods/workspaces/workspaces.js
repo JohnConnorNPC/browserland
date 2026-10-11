@@ -951,13 +951,25 @@
             // count. Clamp it to what is actually on screen (an out-of-range value
             // focuses nothing at all), then mirror it into the active workspace
             // entry so switching away and back returns to the right column.
+            // Both live in the SYNCED layout, so a real change is saved (#246:
+            // an unsaved write left the tab dirty with no push queued). It is a
+            // pure function of the synced layout, so a peer tab adopting the
+            // result recomputes the same values and saves nothing back.
             function syncFocusedCol() {
                 const L = getLayout();
                 const n = visibleColumns().length;
                 const clamped = Math.max(0, Math.min(L.focusedCol | 0, Math.max(0, n - 1)));
-                if (L.focusedCol !== clamped) L.focusedCol = clamped;
+                let changed = false;
+                if (L.focusedCol !== clamped) { L.focusedCol = clamped; changed = true; }
                 const entry = activeWorkspaceEntry();
-                if (entry) entry.focusedCol = clamped;
+                if (entry && entry.focusedCol !== clamped) {
+                    entry.focusedCol = clamped;
+                    changed = true;
+                }
+                // Same rule as adoptUnstampedColumns: a torn-down browser never
+                // writes shared state (the clamp above still keeps it drawable).
+                if (changed && !leaseLost()) savePrefs();
+                return changed;
             }
             function switchWorkspace(index) {
                 const st = wsStore();
