@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 16
+EXPECTED_ASSERTS = 17
 
 _HARNESS = r"""
 'use strict';
@@ -94,16 +94,18 @@ function mkDocument() {
 }
 
 // ---- the shared broker ---------------------------------------------------------
-// Two workspaces; W1 (active) shows c1..c3, W2 holds c4. The entry mirrors
-// L.focusedCol, so the seed is already in sync.
+// Three workspaces; W1 (active) shows c1..c3, W2 holds c4, W3 holds c5.
+// Column cN holds window local:N.
+function col(n, ws) {
+    return { id: 'c' + n, widthPreset: '1/2', wsId: ws,
+             rows: [ { height: 1, keys: ['local:' + n], mode: 'single' } ] };
+}
 const SEED = { mode: 'tiling', focusedCol: 2,
     mods: { workspaces: { version: 1, activeId: 'W1', list: [
-        { id: 'W1', focusedCol: 2 }, { id: 'W2', focusedCol: 0 } ] } },
-    columns: [
-        { id: 'c1', widthPreset: '1/2', wsId: 'W1', rows: [] },
-        { id: 'c2', widthPreset: '1/2', wsId: 'W1', rows: [] },
-        { id: 'c3', widthPreset: '1/2', wsId: 'W1', rows: [] },
-        { id: 'c4', widthPreset: '1/2', wsId: 'W2', rows: [] } ] };
+        { id: 'W1', focusedCol: 2 }, { id: 'W2', focusedCol: 0 },
+        { id: 'W3', focusedCol: 0 } ] } },
+    columns: [ col(1, 'W1'), col(2, 'W1'), col(3, 'W1'), col(4, 'W2'),
+               col(5, 'W3') ] };
 const server = { rev: 1, settings: {}, layout: clone(SEED) };
 const puts = [];
 async function hostFetch(host, path, opts) {
@@ -129,7 +131,7 @@ async function hostFetch(host, path, opts) {
 function mkTab(name, withMod) {
     // prefs as loadPrefs() leaves them: the localStorage cache of the seed.
     const t = { name: name, prefs: { _settings: {}, _layout: clone(SEED) }, timers: new Map(), nextTimer: 1,
-                renderQueued: false, localSaves: 0, render: null,
+                renderQueued: false, localSaves: 0, render: null, cmds: {},
                 filter: null, lease: null, deactivated: false };
     const syncEnv = {
         prefs: t.prefs,
@@ -164,6 +166,29 @@ function mkTab(name, withMod) {
         '}\nreturn __api;\n')(syncEnv);
 
     function getLayout() { return t.prefs._layout; }
+    t.windows = new Map();
+    for (let n = 1; n <= 5; n++) {
+        t.windows.set('local:' + n, { id: 'local:' + n, disposed: false,
+            tiled: true, dom: mkNode() });
+    }
+    function columnKeys(c) {
+        const out = [];
+        for (const r of (c.rows || [])) for (const k of r.keys) out.push(k);
+        return out;
+    }
+    function findKeyInLayout(key) {
+        const L = getLayout();
+        for (let ci = 0; ci < L.columns.length; ci++) {
+            const c = L.columns[ci];
+            for (let ri = 0; ri < c.rows.length; ri++) {
+                const ti = c.rows[ri].keys.indexOf(String(key));
+                if (ti !== -1) return { desktop: L, col: c, colIndex: ci,
+                    row: c.rows[ri], rowIndex: ri, cell: null, cellIndex: -1,
+                    tabIndex: ti };
+            }
+        }
+        return null;
+    }
     function visibleColumns() {
         const L = getLayout();
         return t.filter ? L.columns.filter(function (c) { return !!t.filter(c, L); })
@@ -191,7 +216,8 @@ function mkTab(name, withMod) {
         onUnload: function () {},
         popover: { anchor: function () { return { close: function () {} }; } },
         prefs: { get: function (k, d) { return d; }, set: function () {} },
-        commands: { register: function () { return function () {}; },
+        commands: { register: function (id, spec) {
+                        t.cmds[id] = spec; return function () {}; },
                     execute: function () { return Promise.resolve({ ok: false }); } },
         registerWindowMenuItems: function () {},
         registerDesktopMenuItems: function () {},
@@ -203,9 +229,9 @@ function mkTab(name, withMod) {
         document: mkDocument(), prefs: t.prefs,
         getLayout: getLayout, savePrefs: t.sync.savePrefs,
         savePrefsLocal: function () { t.localSaves++; },
-        windows: new Map(), sessions: new Map(), frontId: null,
+        windows: t.windows, sessions: new Map(), frontId: null,
         relayoutStrip: function () {}, updateTaskbarActive: function () {},
-        findKeyInLayout: function () { return null; },
+        findKeyInLayout: findKeyInLayout,
         mintLayoutId: function () { return 'M' + (t.nextTimer++); },
         visibleColumns: visibleColumns,
         parkWindow: function () {}, isLiveKey: function () { return false; },
@@ -213,7 +239,7 @@ function mkTab(name, withMod) {
         rowKeys: function (row) { return (row && row.keys) ? row.keys.slice() : []; },
         colCurrentFrac: function () { return 0.5; },
         openConfirmDialog: function () { return Promise.resolve(false); },
-        columnKeys: function () { return []; },
+        columnKeys: columnKeys,
         openTextPrompt: function () { return Promise.resolve(null); },
         renderMenu: function () {}, expelToNewColumn: function () {},
         requestRelayout: function () { t.renderQueued = true; },
@@ -221,7 +247,8 @@ function mkTab(name, withMod) {
         visibleColIndex: function (col) { return visibleColumns().indexOf(col); },
         captureTiledFocusContext: function () { return null; },
         showNotice: function () {}, bringToFront: function () {},
-        firstLiveKeyInColumn: function () { return null; },
+        firstLiveKeyInColumn: function (c) {
+            const k = columnKeys(c); return k.length ? k[0] : null; },
         reorderTaskbarItems: function () {},
     };
     Object.defineProperty(modEnv, '_deactivated',
@@ -278,25 +305,36 @@ function mkTab(name, withMod) {
         && A.clean() && B.clean(),
         'F1b an unchanged render never saves');
 
-    // ---- the #246 shape: focus moved, the entry mirror is written on render --
-    A.L().focusedCol = 1;          // core's focus write (its own save elided)
-    A.frame();
-    ok(A.entry().focusedCol === 1, 'F2 render mirrors focusedCol into the entry');
-    ok(!!A.sync.st().timer, 'F2a the mirror write queued a push (savePrefs)');
+    // ---- A6: a peer that adopts a focus change saves nothing back ------------
+    // Core's bringToFront writes L.focusedCol and saves WITHOUT a relayout,
+    // so its push reaches peers with the workspace entry untouched. The peer
+    // must not "repair" anything there: its save would win the race and the
+    // source tab's next focus change would 409 and be reverted (#246 A6).
+    function coreFocus(tab, v) { tab.L().focusedCol = v; tab.sync.savePrefs(); }
+    coreFocus(A, 0);
     await A.firePush();
-    ok(puts.length === 1 && puts[0].layout.mods.workspaces.list[0].focusedCol === 1
-        && puts[0].layout.focusedCol === 1 && A.clean(),
-        'F2b the push carries the mirror and the tab is clean again');
-
-    // ---- no feedback loop: the peer adopts and saves nothing back ------------
-    const revAfterA = server.rev;
+    ok(puts.length === 1 && puts[0].layout.focusedCol === 0
+        && puts[0].layout.mods.workspaces.list[0].focusedCol === 2,
+        'F2 precondition: the focus push carries focusedCol 0, entry untouched');
     await B.tick();
-    ok(B.entry().focusedCol === 1 && B.L().focusedCol === 1,
-        'F3 the peer adopts the saved focus');
-    ok(B.clean() && !B.sync.st().timer, 'F3a the peer render after the adopt does not save');
+    ok(B.L().focusedCol === 0 && puts.length === 1 && B.clean() && !B.sync.st().timer,
+        'F2a the peer adopts the focus change and saves nothing back');
+    coreFocus(A, 1);                               // the next focus change
+    await A.firePush();
+    const last = puts[puts.length - 1];
+    ok(puts.length === 2 && last.baseRev === server.rev - 1
+        && server.layout.focusedCol === 1 && A.L().focusedCol === 1,
+        'F2b the source tab\'s next focus change lands (no 409) and sticks');
+    await B.tick();
+    ok(B.L().focusedCol === 1 && puts.length === 2, 'F2c the peer follows, still silent');
+
+    // ---- no feedback loop: renders on either tab save nothing ---------------
+    const revAfterA = server.rev;
+    A.frame();
+    ok(A.clean() && !A.sync.st().timer, 'F3a the source tab\'s own render does not save');
     for (let i = 0; i < 4; i++) { await A.tick(); await B.tick(); A.frame(); B.frame(); }
     await A.firePush(); await B.firePush();
-    ok(server.rev === revAfterA && puts.length === 1,
+    ok(server.rev === revAfterA && puts.length === 2,
         'F3b repeated poll/render rounds on both tabs settle: no PUT ping-pong');
 
     // ---- a mods-off peer's out-of-range index: clamped and saved ONCE -------
@@ -304,14 +342,12 @@ function mkTab(name, withMod) {
     // focusing c4 (on W2) writes 3 -- out of range for W1's three columns.
     const C = mkTab('C', false);
     await C.boot();
-    C.L().focusedCol = 3;
-    C.sync.savePrefs();            // core's focus write saves itself
+    coreFocus(C, 3);
     await C.firePush();
     ok(server.layout.focusedCol === 3, 'F4 precondition: the mods-off peer wrote index 3');
     const putsBefore = puts.length;
     await A.tick();
-    ok(A.L().focusedCol === 2 && A.entry().focusedCol === 2,
-        'F4 the adopted out-of-range index clamps to the visible columns');
+    ok(A.L().focusedCol === 2, 'F4 the adopted out-of-range index clamps to the visible columns');
     ok(puts.length === putsBefore + 1 && server.layout.focusedCol === 2,
         'F4a the clamp is saved once');
     const revAfterClamp = server.rev;
@@ -319,23 +355,34 @@ function mkTab(name, withMod) {
     ok(server.rev === revAfterClamp && B.L().focusedCol === 2
         && C.L().focusedCol === 2,
         'F4b both peers (mods on and off) adopt the clamp and nobody re-saves');
-    // Again, but the entry already says 2: only L.focusedCol is out of range.
-    C.L().focusedCol = 3;
-    C.sync.savePrefs();
-    await C.firePush();
-    const revOOR = server.rev;
-    await A.tick();
-    ok(A.entry().focusedCol === 2 && server.layout.focusedCol === 2
-        && server.rev === revOOR + 1,
-        'F4c an out-of-range focusedCol alone (entry in sync) is still saved');
 
-    // ---- focus churn inside one debounce window: one PUT, last value --------
-    const putsChurn = puts.length;
-    for (const v of [0, 1, 0, 2, 1]) { A.L().focusedCol = v; A.frame(); }
+    // ---- focus churn: only core's own saves, one debounced PUT --------------
+    const putsChurn = puts.length, savesChurn = A.localSaves;
+    for (const v of [0, 1, 0, 2, 1]) { coreFocus(A, v); A.frame(); }
     await A.firePush();
-    ok(puts.length === putsChurn + 1
-        && puts[puts.length - 1].layout.mods.workspaces.list[0].focusedCol === 1,
-        'F5 five focus moves in one debounce window cost ONE PUT carrying the last');
+    ok(puts.length === putsChurn + 1 && puts[puts.length - 1].layout.focusedCol === 1
+        && A.localSaves === savesChurn + 5,
+        'F5 five focus moves cost ONE PUT and the renders add no saves');
+    await B.tick(); await C.tick();
+
+    // ---- the entry is recorded where it is read ------------------------------
+    // Switching away and back still returns to the column you left.
+    A.cmds['switch'].run({ index: 1 });            // W1 (focus 1) -> W2
+    A.frame();
+    A.cmds['switch'].run({ index: 0 });            // and back
+    A.frame();
+    ok(A.L().focusedCol === 1, 'F7 switching away and back returns to the focused column');
+    await A.firePush();
+    await B.tick(); await C.tick();
+    // A send-window between two OTHER workspaces keeps the current focus: the
+    // active entry (recorded at the last switch, 1) must not rewind it.
+    coreFocus(A, 2);
+    await A.firePush();
+    A.cmds['send-window'].run({ key: 'local:5', target: 1 });   // W3 -> W2
+    ok(A.L().focusedCol === 2
+        && A.L().columns.find(function (c) { return c.id === 'c5'; }).wsId === 'W2',
+        'F8 a send-window elsewhere keeps the active focus (no rewind to the entry)');
+    await A.firePush();
 
     // ---- a torn-down tab never writes shared state ---------------------------
     A.lease({ active: false });
@@ -408,31 +455,38 @@ def test_in_sync_renders_never_save(scenario_run):
     _ok(scenario_run, "F1b an unchanged render never saves")
 
 
-def test_the_focus_mirror_is_saved(scenario_run):
-    # #246: the mirror write used to leave the tab dirty with no push queued.
-    _ok(scenario_run, "F2 render mirrors focusedCol into the entry")
-    _ok(scenario_run, "F2a the mirror write queued a push (savePrefs)")
-    _ok(scenario_run, "F2b the push carries the mirror and the tab is clean again")
+def test_a_peer_adopting_a_focus_change_saves_nothing_back(scenario_run):
+    # #246 review A6: core's bringToFront saves focusedCol without a
+    # relayout; a peer that "repaired" the workspace entry on adopt saved, won,
+    # and reverted the source tab's next focus change through a 409.
+    _ok(scenario_run, "F2 precondition: the focus push carries focusedCol 0, entry untouched")
+    _ok(scenario_run, "F2a the peer adopts the focus change and saves nothing back")
+    _ok(scenario_run, "F2b the source tab's next focus change lands (no 409) and sticks")
+    _ok(scenario_run, "F2c the peer follows, still silent")
 
 
 def test_no_feedback_loop_between_tabs(scenario_run):
-    _ok(scenario_run, "F3 the peer adopts the saved focus")
-    _ok(scenario_run, "F3a the peer render after the adopt does not save")
+    _ok(scenario_run, "F3a the source tab's own render does not save")
     _ok(scenario_run, "F3b repeated poll/render rounds on both tabs settle: no PUT ping-pong")
 
 
 def test_out_of_range_index_is_clamped_and_saved_once(scenario_run):
     # A mods-off browser's focusedCol indexes ALL columns; the mod clamps it
-    # to the visible ones and saves that ONCE, and no tab writes it back.
+    # to the visible ones and saves that ONCE (state genuinely invalid
+    # here), and no tab writes it back.
     _ok(scenario_run, "F4 precondition: the mods-off peer wrote index 3")
     _ok(scenario_run, "F4 the adopted out-of-range index clamps to the visible columns")
     _ok(scenario_run, "F4a the clamp is saved once")
     _ok(scenario_run, "F4b both peers (mods on and off) adopt the clamp and nobody re-saves")
-    _ok(scenario_run, "F4c an out-of-range focusedCol alone (entry in sync) is still saved")
 
 
 def test_focus_churn_is_one_push(scenario_run):
-    _ok(scenario_run, "F5 five focus moves in one debounce window cost ONE PUT carrying the last")
+    _ok(scenario_run, "F5 five focus moves cost ONE PUT and the renders add no saves")
+
+
+def test_the_workspace_entry_is_recorded_where_it_is_read(scenario_run):
+    _ok(scenario_run, "F7 switching away and back returns to the focused column")
+    _ok(scenario_run, "F8 a send-window elsewhere keeps the active focus (no rewind to the entry)")
 
 
 def test_lease_lost_never_saves(scenario_run):
