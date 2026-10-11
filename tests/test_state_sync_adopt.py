@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 54
+EXPECTED_ASSERTS = 61
 
 _HARNESS = r"""
 'use strict';
@@ -445,6 +445,53 @@ function mkWorld() {
     await w.api.pullState(false);                  // same rev 2
     ok(J(w.prefs._layout) === J(L1), 'P3a a later poll adopts the 409 winner');
 
+    // ---- S: an owed edit retries once the broker answers (SHOULD-1 (a)) --
+    // S1: a pull that skips only for the failed push's debt re-arms it.
+    w = await failedEdit('500');
+    w.otherTabWrites(L1);
+    ok(!w.api.st().timer, 'S1 precondition: the failed push left nothing queued');
+    await w.api.pullState(false);                  // skips for the debt alone
+    await w.firePush();                            // no user save in between
+    ok(w.puts.length === 2 && w.puts[1].baseRev === 2
+        && w.server.rev === 3 && w.server.layout.columns.length === 4,
+        'S1a the owed edit retries on the rebased rev without waiting for a save');
+    // S2: a broker that keeps refusing costs at most one PUT per poll tick.
+    w = await failedEdit('500');
+    w.otherTabWrites(L1);
+    w.putFail = '500';
+    for (let i = 0; i < 4; i++) { await w.api.pullState(false); await w.firePush(); }
+    ok(w.puts.length === 1 + 4, 'S2 a failing retry repeats once per poll, never more');
+    const before3 = w.puts.length;
+    await w.api.pullState(false);
+    await w.api.pullState(false);
+    await w.api.pullState(false);
+    await w.firePush();
+    ok(w.puts.length === before3 + 1, 'S2a three polls inside one debounce cost one PUT');
+    w.putFail = null;
+    ok(keptEdit(w), 'S2b throughout, the owed edit is kept (no adopt)');
+    // S3: while a push is already queued or in flight, a poll arms nothing.
+    w = await failedEdit('500');
+    w.otherTabWrites(L1);
+    w.prefs._layout.focusedCol = 1;
+    w.api.savePrefs();
+    let releaseS3;
+    w.gate = { promise: new Promise(function (r) { releaseS3 = r; }) };
+    w.putFail = '500';
+    await w.firePush();                            // in flight, will fail
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);                  // skips: in flight
+    releaseS3();
+    await flush();
+    w.gate = null;
+    const beforeS3 = w.puts.length;
+    await w.firePush();
+    ok(beforeS3 === 2 && w.puts.length === beforeS3,
+        'S3 a poll during a queued push arms no second retry');
+    await w.api.pullState(false);
+    await w.firePush();
+    ok(w.puts.length === beforeS3 + 1, 'S3a the next poll tick retries once');
+    w.putFail = null;
+
     // ---- D: the unchanged paths ------------------------------------------
     w = mkWorld();
     await w.boot();
@@ -584,6 +631,18 @@ def test_a_skipped_rev_is_reconsidered_when_its_push_sends_nothing(scenario_run)
         _ok(scenario_run, f"P2b ({mode}) the next unrelated save keeps the peer layout")
     _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused")
     _ok(scenario_run, "P3a a later poll adopts the 409 winner")
+
+
+def test_an_owed_edit_retries_once_the_broker_answers(scenario_run):
+    # Review SHOULD-1 (a), owner-approved: retry the failed push's debt as
+    # soon as a pull proves the broker reachable, bounded by the poll tick.
+    _ok(scenario_run, "S1 precondition: the failed push left nothing queued")
+    _ok(scenario_run, "S1a the owed edit retries on the rebased rev without waiting for a save")
+    _ok(scenario_run, "S2 a failing retry repeats once per poll, never more")
+    _ok(scenario_run, "S2a three polls inside one debounce cost one PUT")
+    _ok(scenario_run, "S2b throughout, the owed edit is kept (no adopt)")
+    _ok(scenario_run, "S3 a poll during a queued push arms no second retry")
+    _ok(scenario_run, "S3a the next poll tick retries once")
 
 
 def test_unchanged_paths(scenario_run):

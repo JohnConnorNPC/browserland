@@ -263,6 +263,13 @@
             if (!initial && _statePushPending()
                 && _stateSerialize() !== _stateLastSerialized) {
                 _stateRevSkipped = true;         // reconsidered by later polls
+                // Skipped ONLY for a failed push's debt: the broker just
+                // answered, so retry it now rather than at some unrelated
+                // later save (owner's call on #246). One debounced retry per
+                // such poll: a PUT that keeps failing costs at most one
+                // request per poll tick, and the rev stays marked so the
+                // next tick retries again.
+                if (_statePushFailed && !_statePushQueued()) schedulePush();
                 return;
             }
             _applyServerState(srv);
@@ -272,7 +279,11 @@
         // (the next save retries it). pullState's dirty skip is honoured only
         // while this is true (#246).
         function _statePushPending() {
+            return _statePushQueued() || _statePushFailed;
+        }
+        // The same minus the failed-push debt: something will send by itself.
+        function _statePushQueued() {
             return !!(_statePushTimer || _statePushInFlight
-                || _statePushAgain || _statePendingPush || _statePushFailed);
+                || _statePushAgain || _statePendingPush);
         }
 
