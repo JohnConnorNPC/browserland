@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 17
+EXPECTED_ASSERTS = 43
 
 _HARNESS = r"""
 'use strict';
@@ -84,6 +84,14 @@ function mkWorld() {
         const body = JSON.parse(opts.body);
         w.puts.push(body);
         if (w.gate) await w.gate.promise;
+        if (w.putFail === 'throw') throw new Error('offline');
+        if (w.putFail === '409null') {
+            return { ok: false, status: 409, json: async function () { return null; } };
+        }
+        if (/^\d+$/.test(w.putFail || '')) {     // 500, 401, 400, 413 ...
+            const st = Number(w.putFail);
+            return { ok: false, status: st, json: async function () { return {}; } };
+        }
         if (body.baseRev !== w.server.rev) {
             const snap = clone(w.server);
             return { ok: false, status: 409, json: async function () { return snap; } };
@@ -92,6 +100,8 @@ function mkWorld() {
         w.server.settings = clone(body.settings);
         w.server.layout = clone(body.layout);
         const rev = w.server.rev;
+        // The PUT landed but its response never arrives (connection dropped).
+        if (w.putFail === 'commitThrow') throw new Error('response lost');
         return { ok: true, status: 200, json: async function () { return { rev: rev }; } };
     }
     const env = {
@@ -121,6 +131,7 @@ function mkWorld() {
         'with (env) {\n' + sync + '\n' + savePrefsSrc + '\n' +
         'var __api = { pullState: pullState, savePrefs: savePrefs,\n' +
         '  setReady: function (v) { _stateReady = v; },\n' +
+        '  bumpEpoch: function () { _viewEpoch++; },\n' +
         '  st: function () { return { rev: _stateRev, timer: _statePushTimer,\n' +
         '    inFlight: _statePushInFlight, again: _statePushAgain,\n' +
         '    pending: _statePendingPush, last: _stateLastSerialized }; } };\n' +
@@ -235,6 +246,136 @@ function mkWorld() {
         && w.prefs._layout.columns[0].id === 'c1',
         'B3a a held pre-ready push keeps the local edit (no adopt)');
 
+    // ---- E: a FAILED push still owes the edit ("next save retries") -----
+    // A helper world: boot, make a real edit, save, and let its push fail.
+    async function failedEdit(mode) {
+        const fw = mkWorld();
+        await fw.boot();
+        fw.prefs._layout.columns.push({ id: 'c4', rows: [] });
+        fw.api.savePrefs();
+        fw.putFail = mode;
+        await fw.firePush();
+        fw.putFail = null;
+        return fw;
+    }
+    function keptEdit(fw) {
+        return fw.prefs._layout.columns.length === 4
+            && fw.prefs._layout.columns[0].id === 'c1';
+    }
+    for (const mode of ['500', '401', 'throw']) {
+        w = await failedEdit(mode);
+        const s4 = w.api.st();
+        ok(w.puts.length === 1 && !s4.timer && !s4.inFlight && !s4.again
+            && !s4.pending && w.server.rev === 1,
+            'E0 precondition (' + mode + '): the push failed, nothing re-queued');
+        w.otherTabWrites(L1);
+        await w.api.pullState(false);
+        ok(keptEdit(w), 'E1 (' + mode + ') a failed push keeps the local edit (no adopt)');
+        w.api.savePrefs();
+        await w.firePush();
+        ok(w.puts.length === 2 && w.puts[1].baseRev === 2
+            && w.puts[1].layout.columns.length === 4 && w.server.rev === 3,
+            'E2 (' + mode + ') the next save retries the failed edit on the rebased rev');
+    }
+    w.prefs._layout.focusedCol = 1;                // dirty, nothing pending
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1),
+        'E2b once the retry lands, unsaved dirt adopts again');
+    // An adopt supersedes the failed edit: the owed flag clears with it.
+    w = await failedEdit('500');
+    await w.api.pullState(true);                   // a rebuild's re-adopt
+    w.prefs._layout.focusedCol = 1;                // dirty, nothing pending
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1),
+        'E3 after an adopt supersedes a failed edit, unsaved dirt adopts again');
+
+    // ---- G: the owed flag never outlives what it owes (codex round 2) -----
+    // G1: the PUT landed, its response was lost. The next pull finds the
+    // server holding exactly this tab's state: acknowledged, nothing owed.
+    w = await failedEdit('commitThrow');
+    ok(w.server.rev === 2 && w.server.layout.columns.length === 4,
+        'G1 precondition: the PUT landed although the client saw it fail');
+    await w.api.pullState(false);
+    ok(J({ settings: w.prefs._settings, layout: w.prefs._layout })
+        === w.api.st().last && w.api.st().rev === 2,
+        'G1a a pull finding the server equal to the tab records it as the baseline');
+    w.prefs._layout.focusedCol = 1;
+    const L1c4 = clone(L1);
+    L1c4.columns.push({ id: 'c4', rows: [] });
+    w.otherTabWrites(L1c4);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1c4),
+        'G1b after the lost-response PUT is acknowledged, unsaved dirt adopts again');
+    // G2: the failed edit is undone and saved: the push finds nothing to send.
+    w = await failedEdit('500');
+    w.prefs._layout.columns.pop();
+    w.api.savePrefs();
+    await w.firePush();
+    ok(w.puts.length === 1, 'G2 precondition: the undo sends no PUT');
+    w.prefs._layout.focusedCol = 1;
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1), 'G2a an undone failed edit owes nothing (adopts again)');
+    // G3: a PUT that outlives its view (teardown -> rebuild) never sets it.
+    for (const mode of ['500', 'throw']) {
+        w = mkWorld();
+        await w.boot();
+        w.prefs._layout.columns.push({ id: 'c4', rows: [] });
+        w.api.savePrefs();
+        let releaseG3;
+        w.gate = { promise: new Promise(function (r) { releaseG3 = r; }) };
+        w.putFail = mode;
+        await w.firePush();
+        w.api.bumpEpoch();                         // the lease flip
+        await w.api.pullState(true);               // the rebuild's re-adopt
+        releaseG3();
+        await flush();
+        w.gate = null; w.putFail = null;
+        ok(w.prefs._layout.columns.length === 3 && !w.api.st().inFlight,
+            'G3 precondition (' + mode + '): the rebuild adopted and the stale PUT has failed');
+        w.prefs._layout.focusedCol = 1;
+        w.otherTabWrites(L1);
+        await w.api.pullState(false);
+        ok(J(w.prefs._layout) === J(L1),
+            'G3a (' + mode + ') a failed PUT from a superseded view owes nothing');
+    }
+    // G4: a 400/413 is a verdict on the payload: it can never land.
+    for (const mode of ['400', '413']) {
+        w = await failedEdit(mode);
+        w.otherTabWrites(L1);
+        await w.api.pullState(false);
+        ok(J(w.prefs._layout) === J(L1),
+            'G4 (' + mode + ') an edit the broker refuses outright is not owed');
+    }
+    // G5: a 409 whose body is unusable neither adopts nor re-queues: owed.
+    w = await failedEdit('409null');
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(keptEdit(w), 'G5 an unusable 409 body keeps the edit owed (no adopt)');
+
+    // G6: an older failure, then a retry the broker refuses outright: the
+    // refusal settles the debt too (codex round 3).
+    w = await failedEdit('500');
+    w.api.savePrefs();
+    w.putFail = '413';
+    await w.firePush();
+    w.putFail = null;
+    ok(w.puts.length === 2, 'G6 precondition: the retry was refused with 413');
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1), 'G6a a refused retry clears the older debt');
+    // G7: the failed edit is undone WITHOUT a save; a poll sees the tab back
+    // at its baseline and drops the debt before any later unsaved dirt.
+    w = await failedEdit('500');
+    w.prefs._layout.columns.pop();
+    await w.api.pullState(false);                  // same rev: a quiet poll
+    w.prefs._layout.focusedCol = 1;                // later dirt, never saved
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);
+    ok(J(w.prefs._layout) === J(L1), 'G7 an unsaved undo owes nothing once a poll sees it');
+
     // ---- D: the unchanged paths ------------------------------------------
     w = mkWorld();
     await w.boot();
@@ -329,6 +470,36 @@ def test_a_pending_push_still_wins(scenario_run):
     _ok(scenario_run, "B2a a push in flight keeps the local edit (no adopt)")
     _ok(scenario_run, "B3 precondition: only _statePendingPush is set")
     _ok(scenario_run, "B3a a held pre-ready push keeps the local edit (no adopt)")
+
+
+def test_a_failed_push_still_owes_the_edit(scenario_run):
+    # Codex review: "next save retries" is the failure contract, so a failed
+    # push must not turn a real edit into adoptable dirt.
+    for mode in ("500", "401", "throw"):
+        _ok(scenario_run, f"E0 precondition ({mode}): the push failed, nothing re-queued")
+        _ok(scenario_run, f"E1 ({mode}) a failed push keeps the local edit (no adopt)")
+        _ok(scenario_run, f"E2 ({mode}) the next save retries the failed edit on the rebased rev")
+    _ok(scenario_run, "E2b once the retry lands, unsaved dirt adopts again")
+    _ok(scenario_run, "E3 after an adopt supersedes a failed edit, unsaved dirt adopts again")
+
+
+def test_the_owed_flag_never_outlives_what_it_owes(scenario_run):
+    # Codex review round 2: each way the flag could stay set with nothing
+    # owed would recreate the #246 freeze.
+    _ok(scenario_run, "G1 precondition: the PUT landed although the client saw it fail")
+    _ok(scenario_run, "G1a a pull finding the server equal to the tab records it as the baseline")
+    _ok(scenario_run, "G1b after the lost-response PUT is acknowledged, unsaved dirt adopts again")
+    _ok(scenario_run, "G2 precondition: the undo sends no PUT")
+    _ok(scenario_run, "G2a an undone failed edit owes nothing (adopts again)")
+    for mode in ("500", "throw"):
+        _ok(scenario_run, f"G3 precondition ({mode}): the rebuild adopted and the stale PUT has failed")
+        _ok(scenario_run, f"G3a ({mode}) a failed PUT from a superseded view owes nothing")
+    for mode in ("400", "413"):
+        _ok(scenario_run, f"G4 ({mode}) an edit the broker refuses outright is not owed")
+    _ok(scenario_run, "G5 an unusable 409 body keeps the edit owed (no adopt)")
+    _ok(scenario_run, "G6 precondition: the retry was refused with 413")
+    _ok(scenario_run, "G6a a refused retry clears the older debt")
+    _ok(scenario_run, "G7 an unsaved undo owes nothing once a poll sees it")
 
 
 def test_unchanged_paths(scenario_run):

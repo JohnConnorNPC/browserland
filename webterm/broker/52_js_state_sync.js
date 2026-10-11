@@ -32,6 +32,14 @@
         let _statePushTimer = null;
         let _statePushInFlight = false;
         let _statePushAgain = false;
+        // #246: the last push of a real edit failed (5xx, 401, offline, an
+        // unusable 409) and nothing re-queued it. "Next save retries" -- so
+        // the edit still counts as pending and a pull must not adopt it away.
+        // A 400/413 is a verdict on the payload, which can never land, so it
+        // clears it. Also cleared by a landed push, by any adopt, by a push or
+        // pull that finds nothing left to send, and never set by a PUT that
+        // outlived its view (_viewEpoch).
+        let _statePushFailed = false;
         let _stateApplying = false;    // suppress echo while applying server state
         let _stateLastSerialized = null;
         let _lastStatePoll = 0;        // throttle /state polling to the slow tick
@@ -65,7 +73,11 @@
             if (isDetachedSurface()) return;     // #226: one writer, the desktop
             if (_statePushInFlight) { _statePushAgain = true; return; }
             const serialized = _stateSerialize();
-            if (serialized === _stateLastSerialized) return;  // nothing changed
+            if (serialized === _stateLastSerialized) {        // nothing changed
+                _statePushFailed = false;        // (an undone edit owes nothing)
+                return;
+            }
+            const epoch = _viewEpoch;
             _statePushInFlight = true;
             try {
                 const blob = _stateBlob();
@@ -100,16 +112,28 @@
                         } else {
                             _stateLastSerialized = null;     // keep local; force the re-push
                         }
+                    } else if (epoch === _viewEpoch) {
+                        _statePushFailed = true;     // unusable body: still owed
                     }
                 } else if (r.ok) {
                     const resp = await r.json();
                     if (resp && typeof resp.rev === 'number') _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
+                    _statePushFailed = false;
+                } else if (r.status === 400 || r.status === 413) {
+                    // A verdict on this payload (which carries any older
+                    // failed edit too): it can never land, so nothing is owed.
+                    _statePushFailed = false;
+                } else if (epoch === _viewEpoch) {
+                    // 401 (local broker needs auth) / other: keep localStorage;
+                    // the existing /sessions auth flow handles login, next
+                    // save retries.
+                    _statePushFailed = true;
                 }
-                // 401 (local broker needs auth) / other: keep localStorage; the
-                // existing /sessions auth flow handles login, next save retries.
             } catch (e) {
                 // Offline — localStorage already holds it; retry on next save.
+                // (The PUT may still have landed: pullState acknowledges that.)
+                if (epoch === _viewEpoch) _statePushFailed = true;
             } finally {
                 _statePushInFlight = false;
                 if (_statePushAgain) { _statePushAgain = false; schedulePush(); }
@@ -133,6 +157,7 @@
                 getLayout();                    // reconcile the adopted layout
                 savePrefsLocal();               // cache, do NOT push
                 _stateLastSerialized = _stateSerialize();
+                _statePushFailed = false;       // the adopted state supersedes it
                 document.body.classList.toggle('size-locked', isSizeLocked());
                 applyDisplaySettings();
                 // An adopted layout can change what belongs where, so a mod's
@@ -178,6 +203,11 @@
                 clearTimeout(timer);
             }
             if (!srv || typeof srv !== 'object') return;
+            // A tab back at its baseline (a failed edit undone without a
+            // save) owes nothing, whatever the server's rev says.
+            if (_statePushFailed && _stateSerialize() === _stateLastSerialized) {
+                _statePushFailed = false;
+            }
             const srvRev = (typeof srv.rev === 'number') ? srv.rev : 0;
             if (srvRev === 0) {
                 if (initial) {
@@ -196,6 +226,14 @@
                 settings: srv.settings || {}, layout: srv.layout || {} });
             _stateRev = srvRev;                  // take the new rev either way
             if (!initial && srvSerialized === _stateLastSerialized) return;
+            // The server already holds exactly what this tab has: a PUT whose
+            // response was lost DID land, or two writers converged. Nothing
+            // is owed and nothing needs adopting -- record it as the baseline.
+            if (!initial && srvSerialized === _stateSerialize()) {
+                _stateLastSerialized = srvSerialized;
+                _statePushFailed = false;
+                return;
+            }
             // A background pull must NOT clobber an in-progress local edit
             // (Codex lost-update case). With unpushed local changes AND a push
             // on its way, keep them: _stateRev now points at the server's rev,
@@ -212,11 +250,11 @@
             _applyServerState(srv);
         }
         // A push is on its way: debounced, in flight, queued behind the
-        // in-flight one, or held until the initial pull. pullState's dirty
-        // skip is honoured only while this is true (#246).
+        // in-flight one, held until the initial pull, or owed by a failed one
+        // (the next save retries it). pullState's dirty skip is honoured only
+        // while this is true (#246).
         function _statePushPending() {
             return !!(_statePushTimer || _statePushInFlight
-                || _statePushAgain || _statePendingPush);
+                || _statePushAgain || _statePendingPush || _statePushFailed);
         }
-
 
