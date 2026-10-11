@@ -7424,7 +7424,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             except Exception:
                 LOGGER.exception("/mcp/launch: dropping window %d's "
                                  "collided MCP row failed; the launch "
-                                 "refuses as before", wid)
+                                 "still retries on a fresh id and the "
+                                 "row stays", wid)
 
         async def _untag(wid: int) -> None:
             def _write(work):
