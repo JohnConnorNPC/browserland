@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 43
+EXPECTED_ASSERTS = 54
 
 _HARNESS = r"""
 'use strict';
@@ -376,6 +376,75 @@ function mkWorld() {
     await w.api.pullState(false);
     ok(J(w.prefs._layout) === J(L1), 'G7 an unsaved undo owes nothing once a poll sees it');
 
+    // ---- P: a skipped rev whose push then sends nothing (review MUST-1) --
+    // The pull takes the rev and skips for the pending push; if that push
+    // evaporates, later polls must reconsider the rev, not call it unchanged.
+    // P1: the edit is undone inside the debounce (the push finds nothing).
+    w = mkWorld();
+    await w.boot();
+    w.prefs._layout.columns.push({ id: 'c4', rows: [] });
+    w.api.savePrefs();
+    w.otherTabWrites(L1);
+    await w.api.pullState(false);                  // takes rev 2, skips
+    w.prefs._layout.columns.pop();                 // undone, saved again
+    w.api.savePrefs();
+    await w.firePush();
+    ok(w.puts.length === 0 && keptEdit(w) === false
+        && w.prefs._layout.columns[0].id === 'c1',
+        'P1 precondition: skipped at rev 2, then the push sent nothing');
+    await w.api.pullState(false);                  // same rev 2
+    ok(J(w.prefs._layout) === J(L1), 'P1a a later poll adopts the skipped rev');
+    w.prefs._settings.theme = 'dusk';
+    w.api.savePrefs();
+    await w.firePush();
+    ok(w.puts.length === 1 && J(w.server.layout) === J(L1),
+        'P1b the next unrelated save keeps the peer layout on /state');
+    // P2: the pending push is refused outright (400/413): the same freeze.
+    for (const mode of ['400', '413']) {
+        w = mkWorld();
+        await w.boot();
+        w.prefs._layout.columns.push({ id: 'c4', rows: [] });
+        w.api.savePrefs();
+        w.otherTabWrites(L1);
+        await w.api.pullState(false);              // takes rev 2, skips
+        w.putFail = mode;
+        await w.firePush();
+        w.putFail = null;
+        ok(w.puts.length === 1 && keptEdit(w),
+            'P2 precondition (' + mode + '): skipped, then the push was refused');
+        await w.api.pullState(false);
+        ok(J(w.prefs._layout) === J(L1),
+            'P2a (' + mode + ') a later poll adopts the skipped rev');
+        w.prefs._settings.theme = 'dusk';
+        w.api.savePrefs();
+        await w.firePush();
+        ok(J(w.server.layout) === J(L1),
+            'P2b (' + mode + ') the next unrelated save keeps the peer layout');
+    }
+    // P3: a 409 that kept the local edit took the winner's rev too; its
+    // re-push is then refused, so that rev must be reconsidered as well.
+    w = mkWorld();
+    await w.boot();
+    w.prefs._layout.columns.push({ id: 'c4', rows: [] });
+    w.api.savePrefs();
+    let releaseP3;
+    w.gate = { promise: new Promise(function (r) { releaseP3 = r; }) };
+    await w.firePush();                            // PUT in flight on rev 1
+    w.otherTabWrites(L1);                          // the peer wins rev 2
+    w.prefs._layout.columns.push({ id: 'c5', rows: [] });
+    w.api.savePrefs();                             // edited during the flight
+    releaseP3();
+    await flush();
+    w.gate = null;
+    w.putFail = '413';
+    await w.firePush();                            // the re-push is refused
+    w.putFail = null;
+    ok(w.puts.length === 2 && w.api.st().rev === 2
+        && w.prefs._layout.columns.length === 5,
+        'P3 precondition: 409 kept the edit at rev 2, its re-push was refused');
+    await w.api.pullState(false);                  // same rev 2
+    ok(J(w.prefs._layout) === J(L1), 'P3a a later poll adopts the 409 winner');
+
     // ---- D: the unchanged paths ------------------------------------------
     w = mkWorld();
     await w.boot();
@@ -500,6 +569,21 @@ def test_the_owed_flag_never_outlives_what_it_owes(scenario_run):
     _ok(scenario_run, "G6 precondition: the retry was refused with 413")
     _ok(scenario_run, "G6a a refused retry clears the older debt")
     _ok(scenario_run, "G7 an unsaved undo owes nothing once a poll sees it")
+
+
+def test_a_skipped_rev_is_reconsidered_when_its_push_sends_nothing(scenario_run):
+    # Review MUST-1: the skip took the rev; a push that then evaporates
+    # (undo inside the debounce, 400/413, a 409 whose re-push is refused)
+    # must not leave every later poll reading "unchanged".
+    _ok(scenario_run, "P1 precondition: skipped at rev 2, then the push sent nothing")
+    _ok(scenario_run, "P1a a later poll adopts the skipped rev")
+    _ok(scenario_run, "P1b the next unrelated save keeps the peer layout on /state")
+    for mode in ("400", "413"):
+        _ok(scenario_run, f"P2 precondition ({mode}): skipped, then the push was refused")
+        _ok(scenario_run, f"P2a ({mode}) a later poll adopts the skipped rev")
+        _ok(scenario_run, f"P2b ({mode}) the next unrelated save keeps the peer layout")
+    _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused")
+    _ok(scenario_run, "P3a a later poll adopts the 409 winner")
 
 
 def test_unchanged_paths(scenario_run):

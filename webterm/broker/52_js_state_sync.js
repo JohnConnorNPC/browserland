@@ -40,6 +40,13 @@
         // pull that finds nothing left to send, and never set by a PUT that
         // outlived its view (_viewEpoch).
         let _statePushFailed = false;
+        // #246 review: a rev was taken WITHOUT adopting its state (a pull
+        // skipped for a pending push, or a 409 kept the local edit). If that
+        // push then sends nothing (the edit undone inside the debounce, a
+        // 400/413), the rev must be reconsidered: polls keep evaluating it
+        // instead of returning "unchanged". Cleared once this tab and the
+        // server agree (an adopt, a landed PUT, an acknowledgement).
+        let _stateRevSkipped = false;
         let _stateApplying = false;    // suppress echo while applying server state
         let _stateLastSerialized = null;
         let _lastStatePoll = 0;        // throttle /state polling to the slow tick
@@ -111,6 +118,7 @@
                             _applyServerState(cur);          // no local edit pending — yield
                         } else {
                             _stateLastSerialized = null;     // keep local; force the re-push
+                            _stateRevSkipped = true;         // took cur.rev, did not adopt it
                         }
                     } else if (epoch === _viewEpoch) {
                         _statePushFailed = true;     // unusable body: still owed
@@ -120,6 +128,7 @@
                     if (resp && typeof resp.rev === 'number') _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
                     _statePushFailed = false;
+                    _stateRevSkipped = false;
                 } else if (r.status === 400 || r.status === 413) {
                     // A verdict on this payload (which carries any older
                     // failed edit too): it can never land, so nothing is owed.
@@ -158,6 +167,7 @@
                 savePrefsLocal();               // cache, do NOT push
                 _stateLastSerialized = _stateSerialize();
                 _statePushFailed = false;       // the adopted state supersedes it
+                _stateRevSkipped = false;
                 document.body.classList.toggle('size-locked', isSizeLocked());
                 applyDisplaySettings();
                 // An adopted layout can change what belongs where, so a mod's
@@ -221,17 +231,22 @@
                 }
                 return;
             }
-            if (!initial && srvRev === _stateRev) return;   // unchanged
+            // "unchanged" -- unless this rev was taken without adopting it.
+            if (!initial && srvRev === _stateRev && !_stateRevSkipped) return;
             const srvSerialized = JSON.stringify({
                 settings: srv.settings || {}, layout: srv.layout || {} });
             _stateRev = srvRev;                  // take the new rev either way
-            if (!initial && srvSerialized === _stateLastSerialized) return;
+            if (!initial && srvSerialized === _stateLastSerialized) {
+                _stateRevSkipped = false;        // the server is our baseline
+                return;
+            }
             // The server already holds exactly what this tab has: a PUT whose
             // response was lost DID land, or two writers converged. Nothing
             // is owed and nothing needs adopting -- record it as the baseline.
             if (!initial && srvSerialized === _stateSerialize()) {
                 _stateLastSerialized = srvSerialized;
                 _statePushFailed = false;
+                _stateRevSkipped = false;
                 return;
             }
             // A background pull must NOT clobber an in-progress local edit
@@ -246,7 +261,10 @@
             // taken, so no later pull retries, and the next unrelated save
             // pushes this stale layout over the newer one. Adopt instead.
             if (!initial && _statePushPending()
-                && _stateSerialize() !== _stateLastSerialized) return;
+                && _stateSerialize() !== _stateLastSerialized) {
+                _stateRevSkipped = true;         // reconsidered by later polls
+                return;
+            }
             _applyServerState(srv);
         }
         // A push is on its way: debounced, in flight, queued behind the
