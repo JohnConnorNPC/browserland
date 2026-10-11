@@ -97,6 +97,26 @@ _ERROR_MESSAGES = {
 }
 
 
+def _error_detail(body: Optional[Dict[str, Any]]) -> str:
+    """The small extra fields of a broker error body, as text for the
+    message (e.g. needs_confirm's window ``count``). Only short scalars are
+    kept; bool is skipped."""
+    if not body:
+        return ""
+    parts = []
+    for key, val in body.items():
+        if key == "error" or isinstance(val, bool):
+            continue
+        if isinstance(val, int):
+            parts.append(f"{key}={val}")
+        elif isinstance(val, str) and len(val) <= 120:
+            parts.append(f"{key}={val}")
+    if isinstance(body.get("count"), int) and not isinstance(body["count"], bool):
+        return (f"{body['count']} windows affected; "
+                + ", ".join(p for p in parts if not p.startswith("count=")))            .rstrip("; ").rstrip(", ")
+    return ", ".join(parts)
+
+
 class BrowserlandError(RuntimeError):
     """A broker ``/mcp/*`` call failed.
 
@@ -104,10 +124,13 @@ class BrowserlandError(RuntimeError):
     (e.g. ``"read_only"``), or ``None`` when the body had no parseable error.
     """
 
-    def __init__(self, status: int, code: Optional[str], message: str):
+    def __init__(self, status: int, code: Optional[str], message: str,
+                 body: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.status = status
         self.code = code
+        #: The parsed error body when the broker sent one, else None.
+        self.body = body
 
 
 class BrowserlandClient:
@@ -167,18 +190,23 @@ class BrowserlandClient:
         if r.is_success:
             return
         code: Optional[str] = None
+        parsed: Optional[Dict[str, Any]] = None
         try:
             body = r.json()
             if isinstance(body, dict) and isinstance(body.get("error"), str):
                 code = body["error"]
+                parsed = body
         except ValueError:
             pass
         if code is not None:
             message = _ERROR_MESSAGES.get(code, f"Broker error: {code}")
             message = f"{message} (HTTP {r.status_code})"
+            extra = _error_detail(parsed)
+            if extra:
+                message = f"{message} [{extra}]"
         else:
             message = f"Broker returned HTTP {r.status_code} with no error code."
-        raise BrowserlandError(r.status_code, code, message)
+        raise BrowserlandError(r.status_code, code, message, parsed)
 
     def _request(self, method: str, path: str, *, json_body: Any = None,
                  timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
