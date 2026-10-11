@@ -197,12 +197,26 @@
             _stateRev = srvRev;                  // take the new rev either way
             if (!initial && srvSerialized === _stateLastSerialized) return;
             // A background pull must NOT clobber an in-progress local edit
-            // (Codex lost-update case). With unpushed local changes, keep them:
-            // _stateRev now points at the server's rev, so the pending debounced
-            // push rebases onto it and wins (active editor wins; convergence
-            // happens once this browser goes idle and a later pull finds it
-            // clean). Never skips on the initial boot sync.
-            if (!initial && _stateSerialize() !== _stateLastSerialized) return;
+            // (Codex lost-update case). With unpushed local changes AND a push
+            // on its way, keep them: _stateRev now points at the server's rev,
+            // so that push rebases onto it and wins (active editor wins;
+            // convergence happens once this browser goes idle and a later pull
+            // finds it clean). Never skips on the initial boot sync.
+            // #246: dirty with NOTHING queued is not an edit in progress -- it
+            // is a write nobody called savePrefs() for (a derived mirror the
+            // render made). Skipping then is permanent: the rev was just
+            // taken, so no later pull retries, and the next unrelated save
+            // pushes this stale layout over the newer one. Adopt instead.
+            if (!initial && _statePushPending()
+                && _stateSerialize() !== _stateLastSerialized) return;
             _applyServerState(srv);
         }
+        // A push is on its way: debounced, in flight, queued behind the
+        // in-flight one, or held until the initial pull. pullState's dirty
+        // skip is honoured only while this is true (#246).
+        function _statePushPending() {
+            return !!(_statePushTimer || _statePushInFlight
+                || _statePushAgain || _statePendingPush);
+        }
+
 
