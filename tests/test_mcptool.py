@@ -2739,7 +2739,41 @@ def test_get_desktop_returns_the_snapshot():
         out = server.get_desktop("h")
     finally:
         _reset_server()
-    assert out == snapshot
+    assert out == {**snapshot, "windows": [
+        {"id": "h:7", "title": "t", "tiled": True}]}
+
+
+def test_get_desktop_namespaces_ids_in_both_forms():
+    """#244: window ids come back as "<host>:<int>" (the list_terminals
+    form) for the named-host and the aggregate form; a null id stays null."""
+    snapshot = {"ok": True, "home": True, "windows": [
+        {"id": 7, "title": "a"}, {"id": None, "title": "b"}]}
+    broker = _ToolBroker(responses={"/mcp/desktop": lambda req: httpx.Response(
+        200, json=snapshot)})
+    server = _install({"h": broker})
+    try:
+        named = server.get_desktop("h")
+        agg = server.get_desktop()
+    finally:
+        _reset_server()
+    for out in (named, agg["h"]):
+        assert [r["id"] for r in out["windows"]] == ["h:7", None]
+
+
+def test_needs_confirm_error_carries_the_count():
+    """#245: the 409 needs_confirm count reaches the agent in the message
+    and on the exception body."""
+    broker = _ToolBroker(responses={
+        "/mcp/desktop": lambda req: httpx.Response(
+            409, json={"error": "needs_confirm", "count": 3})})
+    server = _install({"h": broker})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.arrange_window("h:7", "focus")
+    finally:
+        _reset_server()
+    assert "3 windows" in str(ei.value)
+    assert ei.value.body == {"error": "needs_confirm", "count": 3}
 
 
 def test_arrange_window_builds_op_args_and_routes_id():

@@ -989,11 +989,31 @@ def _require_desktop(client: BrowserlandClient, host: str) -> None:
             "desktop tools are refused without sending.")
 
 
+def _namespace_snapshot(name: str, snap: Any) -> Any:
+    """Rewrite each window row's integer `id` to the namespaced
+    "<host>:<int>" form list_terminals uses; null ids stay null."""
+    if not isinstance(snap, dict) or not isinstance(snap.get("windows"), list):
+        return snap
+    rows = []
+    for row in snap["windows"]:
+        if (isinstance(row, dict) and isinstance(row.get("id"), int)
+                and not isinstance(row["id"], bool)):
+            row = dict(row)
+            row["id"] = f"{name}:{row['id']}"
+        rows.append(row)
+    snap = dict(snap)
+    snap["windows"] = rows
+    return snap
+
+
 @mcp.tool()
 def get_desktop(host: str = "") -> Dict[str, Any]:
     """Read a browser's desktop (#244): every window with its layout
     (tiled column/row/width preset, or floating x/y/w/h), the viewport, the
-    focused column, and the workspaces when the workspaces mod is on. The
+    focused column, and the workspaces when the workspaces mod is on. Each
+    window's `id` is the namespaced "<host>:<int>" form (the one
+    list_terminals, arrange_window and workspaces use); a window with no
+    broker id keeps `id` null. The
     snapshot comes from the browser holding the control lease; `home` says
     whether that browser's home is this broker, and floating geometry is
     AS THAT BROWSER SEES IT (per-browser state, not stored on the broker).
@@ -1006,13 +1026,13 @@ def get_desktop(host: str = "") -> Dict[str, Any]:
     if host:
         client = _named_client(host)
         _require_desktop(client, host)
-        return client.get_desktop()
+        return _namespace_snapshot(host, client.get_desktop())
     out: Dict[str, Any] = {}
     for name in _host_configs:
         try:
             client = _get_client(name)
             _require_desktop(client, name)
-            out[name] = client.get_desktop()
+            out[name] = _namespace_snapshot(name, client.get_desktop())
         except Exception as exc:
             out[name] = {"ok": False, "error": str(exc)}
     return out

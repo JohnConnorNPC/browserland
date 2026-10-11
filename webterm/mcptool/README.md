@@ -190,7 +190,7 @@ three fail closed per host (`desktop_unsupported`, no request) while
 `/mcp/info` lacks `allow_desktop: true`; a capability flip via
 `set_mcp_knobs` is picked up on the next call.
 
-- `get_desktop` is the read side: layout as that browser sees it (floating
+- `get_desktop` is the read side: window ids namespaced `<host>:<int>` like `list_terminals`; layout as that browser sees it (floating
   geometry is per-browser state), plus the workspaces when the mod is on and
   a `home` flag telling you which desktop you are looking at. Omit `host` to
   get one entry per configured host — a snapshot, or an `{"ok": false}`
