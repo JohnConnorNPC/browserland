@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 61
+EXPECTED_ASSERTS = 64
 
 _HARNESS = r"""
 'use strict';
@@ -491,6 +491,27 @@ function mkWorld() {
     await w.firePush();
     ok(w.puts.length === beforeS3 + 1, 'S3a the next poll tick retries once');
     w.putFail = null;
+    // S4: no peer wrote at all (same rev): the answering poll still retries.
+    w = await failedEdit('500');
+    await w.api.pullState(false);
+    await w.firePush();
+    ok(w.puts.length === 2 && w.server.rev === 2
+        && w.server.layout.columns.length === 4,
+        'S4 with no peer write, the next answering poll retries the owed edit');
+    // S5: a peer wrote our baseline back (new rev, server == baseline).
+    w = await failedEdit('500');
+    w.otherTabWrites(L0);
+    await w.api.pullState(false);
+    await w.firePush();
+    ok(w.puts.length === 2 && w.puts[1].baseRev === 2 && w.server.rev === 3
+        && w.server.layout.columns.length === 4,
+        'S5 a peer rewriting our baseline does not strand the owed edit');
+    // S6: the edit was undone (no save): the debt is gone, nothing retries.
+    w = await failedEdit('500');
+    w.prefs._layout.columns.pop();
+    await w.api.pullState(false);
+    await w.firePush();
+    ok(w.puts.length === 1, 'S6 an undone owed edit is never retried');
 
     // ---- D: the unchanged paths ------------------------------------------
     w = mkWorld();
@@ -643,6 +664,9 @@ def test_an_owed_edit_retries_once_the_broker_answers(scenario_run):
     _ok(scenario_run, "S2b throughout, the owed edit is kept (no adopt)")
     _ok(scenario_run, "S3 a poll during a queued push arms no second retry")
     _ok(scenario_run, "S3a the next poll tick retries once")
+    _ok(scenario_run, "S4 with no peer write, the next answering poll retries the owed edit")
+    _ok(scenario_run, "S5 a peer rewriting our baseline does not strand the owed edit")
+    _ok(scenario_run, "S6 an undone owed edit is never retried")
 
 
 def test_unchanged_paths(scenario_run):

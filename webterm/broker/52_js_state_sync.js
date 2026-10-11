@@ -232,12 +232,16 @@
                 return;
             }
             // "unchanged" -- unless this rev was taken without adopting it.
-            if (!initial && srvRev === _stateRev && !_stateRevSkipped) return;
+            if (!initial && srvRev === _stateRev && !_stateRevSkipped) {
+                _retryOwedPush();
+                return;
+            }
             const srvSerialized = JSON.stringify({
                 settings: srv.settings || {}, layout: srv.layout || {} });
             _stateRev = srvRev;                  // take the new rev either way
             if (!initial && srvSerialized === _stateLastSerialized) {
                 _stateRevSkipped = false;        // the server is our baseline
+                _retryOwedPush();
                 return;
             }
             // The server already holds exactly what this tab has: a PUT whose
@@ -263,13 +267,7 @@
             if (!initial && _statePushPending()
                 && _stateSerialize() !== _stateLastSerialized) {
                 _stateRevSkipped = true;         // reconsidered by later polls
-                // Skipped ONLY for a failed push's debt: the broker just
-                // answered, so retry it now rather than at some unrelated
-                // later save (owner's call on #246). One debounced retry per
-                // such poll: a PUT that keeps failing costs at most one
-                // request per poll tick, and the rev stays marked so the
-                // next tick retries again.
-                if (_statePushFailed && !_statePushQueued()) schedulePush();
+                _retryOwedPush();
                 return;
             }
             _applyServerState(srv);
@@ -280,6 +278,17 @@
         // while this is true (#246).
         function _statePushPending() {
             return _statePushQueued() || _statePushFailed;
+        }
+        // A background pull that KEEPS the local state because of a failed
+        // push's debt (rev unchanged, server == our baseline, or the dirty
+        // skip): the broker just answered, so retry the debt now rather than
+        // at some unrelated later save (owner's call on #246). One debounced
+        // retry per such poll, so a PUT that keeps failing costs at most one
+        // request per poll tick. Never from a pull that adopts or
+        // acknowledges (that settles the debt), and an undone edit has
+        // already cleared it at the top of pullState.
+        function _retryOwedPush() {
+            if (_statePushFailed && !_statePushQueued()) schedulePush();
         }
         // The same minus the failed-push debt: something will send by itself.
         function _statePushQueued() {
