@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 21
+EXPECTED_ASSERTS = 26
 
 _HARNESS = r"""
 'use strict';
@@ -134,7 +134,8 @@ function mkWorld() {
         '    else if (_statePushTimer) { clearTimeout(_statePushTimer); _statePushTimer = null; } },\n' +
         '  rebuildStart: function () { _deactivated = false; _viewEpoch++; },\n' +
         '  flushOwed: function () { return (typeof _stateFlushOwed === "function") ? _stateFlushOwed() : Promise.resolve(false); },\n' +
-        '  bumpEpoch: function () { _viewEpoch++; } };\n' +
+        '  bumpEpoch: function () { _viewEpoch++; },\n' +
+        '  deactivate: function () { _deactivated = true; } };\n' +
         '}\nreturn __api;\n');
     w.api = factory(env);
     w.firePush = async function () {
@@ -296,6 +297,49 @@ function mkWorld() {
     ok(sentBefore === 0 && w.puts.length === 1 && w.srv() === J(['G']),
         'E6 a hung GET body holds the channel only until its deadline');
 
+    // ---- 247-2: a pull that outlives its view applies nothing --------------
+    // P1 (the issue): a superseded rebuild pull never overwrites the newer view.
+    w = mkWorld(); await w.boot();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['A2'] } };
+    w.api.teardown(); w.api.rebuildStart();
+    w.holdGet = true; const r1 = w.api.pullState(true); await flush(); w.holdGet = false;
+    w.api.teardown(); w.api.rebuildStart();
+    w.server = { rev: 3, settings: {}, layout: { cols: ['B'] } };
+    const r2 = w.api.pullState(true); await flush();
+    await w.release(); await r1; await r2; await flush();
+    w.edit(['C']); await w.firePush(); await flush();
+    ok(w.log.indexOf('ADOPT:["A2"]') === -1 && w.srv() === J(['C']) && w.cols() === J(['C']),
+        'P1 a superseded rebuild pull is dropped; the newer view and the next edit stand');
+    // P2: a background pull answered after a teardown applies nothing.
+    w = mkWorld(); await w.boot();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['LATE'] } };
+    w.holdGet = true; const p2 = w.api.pullState(false); await flush(); w.holdGet = false;
+    w.api.teardown();
+    const a2b = w.adopts;
+    await w.release(); await p2; await flush();
+    ok(w.adopts === a2b && w.api.rev() === 1, 'P2 a background pull answered after a teardown applies nothing');
+    // P3: the load pull, superseded by the boot's re-pull, is dropped.
+    w = mkWorld();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['OLD'] } };
+    w.holdGet = true; const lp = w.api.pullState(true); await flush(); w.holdGet = false;   // 85's load pull
+    w.api.rebuildStart();                                              // the first boot bumps the epoch
+    w.server = { rev: 3, settings: {}, layout: { cols: ['NEW'] } };
+    const bp = w.api.pullState(true); await flush();                   // B3's boot re-pull (waits)
+    await w.release(); await lp; await bp; await flush();
+    ok(w.log.indexOf('ADOPT:["OLD"]') === -1 && w.cols() === J(['NEW']) && w.api.rev() === 3,
+        'P3 a load pull superseded by a lifecycle pull is dropped; the newer one adopts');
+    // P3b: an epoch bump alone (no lifecycle pull sent yet) does not drop the load pull.
+    w = mkWorld();
+    w.holdGet = true; const lp2 = w.api.pullState(true); await flush(); w.holdGet = false;
+    w.api.rebuildStart();
+    await w.release(); await lp2; await flush();
+    ok(w.cols() === J(['A']) && w.api.rev() === 1, 'P3b the load pull still applies across the first epoch bump');
+    // P4: an inactive (never booted) page's load pull applies.
+    w = mkWorld();
+    w.api.deactivate();
+    await w.api.pullState(true); await flush();
+    ok(w.cols() === J(['A']) && w.api.rev() === 1, 'P4 an inactive page still adopts its load pull');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -376,6 +420,17 @@ def test_247_1_reorder_cell_ran(run):
     "E6 a hung GET body holds the channel only until its deadline",
 ])
 def test_247_6_deadline_and_epoch_gates(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "P1 a superseded rebuild pull is dropped; the newer view and the next edit stand",
+    "P2 a background pull answered after a teardown applies nothing",
+    "P3 a load pull superseded by a lifecycle pull is dropped; the newer one adopts",
+    "P3b the load pull still applies across the first epoch bump",
+    "P4 an inactive page still adopts its load pull",
+])
+def test_247_2_pull_epoch_gate(run, label):
     _ok(run, label)
 
 

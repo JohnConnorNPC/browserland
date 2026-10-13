@@ -82,6 +82,18 @@
         // and another requester may take it in that tick):
         //   do { await _stateWaitChannel(); } while (_stateChannel);
         // then claim it synchronously. Only the owner releases it.
+        // #247 item 2: a pull that outlives its view applies nothing -- except
+        // 85's LOAD pull, which may be answered after the first boot has
+        // already bumped _viewEpoch. The load pull is always the FIRST initial
+        // pull (bootActiveView waits on _stateReadyPromise, which that pull
+        // resolves; only a booted page rebuilds), so 52 recognises it without
+        // a token from 85. Its exemption ends the moment any later
+        // (lifecycle) initial pull is SENT: from then on that pull is newer.
+        // If the load pull is dropped that way and the lifecycle pull fails,
+        // _stateRev stays unseeded (0) and the first push 409s and adopts
+        // the server state: safe.
+        let _stateLoadPullSent = false;
+        let _stateLoadRevoked = false;
         let _stateChannel = null;
         async function _stateWaitChannel() {
             while (_stateChannel) { try { await _stateChannel; } catch (_) {} }
@@ -293,6 +305,12 @@
             // #247 single-flight: a background poll never queues behind a busy
             // channel (the next tick asks again); an initial pull waits for it.
             if (!initial && (_stateChannel || _statePushInFlight)) return;
+            const load = initial && !_stateLoadPullSent;
+            if (initial) {
+                if (_stateLoadPullSent) _stateLoadRevoked = true;
+                _stateLoadPullSent = true;
+            }
+            const epoch = _viewEpoch;
             if (initial) { do { await _stateWaitChannel(); } while (_stateChannel); }
             let release;
             const mine = new Promise(r => { release = r; });
@@ -312,6 +330,8 @@
                 if (_stateChannel === mine) _stateChannel = null;
                 release();
             }
+            // #247 item 2: superseded by a newer view -- drop it (see above).
+            if (epoch !== _viewEpoch && !(load && !_stateLoadRevoked)) return;
             if (!_stateBodyOk(srv)) return;         // #247 N1
             // A tab back at its baseline (a failed edit undone without a
             // save) owes nothing, whatever the server's rev says.
