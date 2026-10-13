@@ -86,6 +86,23 @@
         async function _stateWaitChannel() {
             while (_stateChannel) { try { await _stateChannel; } catch (_) {} }
         }
+        // #247 S3: ONE deadline for a whole /state exchange, connect THROUGH
+        // body, for GETs and PUTs alike. A broker that answers and then stalls
+        // its body would otherwise hang the await forever -- for a pull, with
+        // the boot gate behind it, a blank desktop; for a push, every later
+        // push queued behind it for the life of the page. hostFetch's own
+        // deadline is disarmed at the HEADERS, so these sites pass timeoutMs
+        // 0. An expired PUT is an ambiguous failure (it may have landed).
+        function _stateDeadline(work, ctrl) {
+            let timer = null;
+            const dl = new Promise((_, rej) => {
+                timer = setTimeout(() => {
+                    try { ctrl.abort(); } catch (_) {}
+                    rej(new Error('state deadline'));
+                }, FETCH_TIMEOUT_MS);
+            });
+            return Promise.race([work, dl]).finally(() => clearTimeout(timer));
+        }
 
         function schedulePush() {
             if (_deactivated) return;            // torn down — never push state
@@ -120,20 +137,24 @@
                 mine = new Promise(r => { release = r; });
                 _stateChannel = mine;
                 let out = null;
+                const ctrl = new AbortController();
                 try {
-                    const blob = _stateBlob();
-                    const r = await hostFetch(localHost(), '/state', {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            baseRev: _stateRev,
-                            settings: blob.settings,
-                            layout: blob.layout,
-                            clientId: CLIENT_ID,   // lease: only the active browser
-                        }),                        // may write (else 409 not_active)
-                    });
-                    const body = (r.status === 409 || r.ok) ? await r.json() : null;
-                    out = { status: r.status, ok: r.ok, body: body };
+                    out = await _stateDeadline((async () => {
+                        const blob = _stateBlob();
+                        const r = await hostFetch(localHost(), '/state', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                baseRev: _stateRev,
+                                settings: blob.settings,
+                                layout: blob.layout,
+                                clientId: CLIENT_ID,   // lease: only the active browser
+                            }),                        // may write (else 409 not_active)
+                            signal: ctrl.signal, timeoutMs: 0,
+                        });
+                        const body = (r.status === 409 || r.ok) ? await r.json() : null;
+                        return { status: r.status, ok: r.ok, body: body };
+                    })(), ctrl);
                 } catch (e) {
                     out = null;
                 } finally {
@@ -144,15 +165,12 @@
                 // Everything below runs synchronously: a request waiting on the
                 // channel resumes only after this response has been processed.
                 if (!out) {
-                    // Offline — localStorage already holds it; retry on next save.
-                    // (The PUT may still have landed: pullState acknowledges that.)
+                    // Offline / lost response / the deadline — localStorage
+                    // already holds it; retry. (The PUT may still have landed:
+                    // pullState acknowledges that.)
                     if (epoch === _viewEpoch) _statePushFailed = true;
                     return;
                 }
-                // Torn down while this PUT was in flight (lost the lease): drop
-                // the result so a 409 not_active never re-renders into the
-                // overlay the teardown just put up.
-                if (_deactivated) return;
                 if (out.status === 409) {
                     // Another browser won the race — its state is inlined so we
                     // converge in one round trip (no second GET). Adopt it ONLY
@@ -170,6 +188,12 @@
                             && typeof probeControl === 'function') {
                         probeControl(homeHostId());
                     }
+                    // #247 item 6: torn down while this PUT was in flight (lost
+                    // the lease), or a newer view since: drop it, so a 409 never
+                    // re-renders into the overlay the teardown just put up or
+                    // into a view that has adopted since. (The probe above runs
+                    // first: probing after a teardown is harmless.)
+                    if (_deactivated || epoch !== _viewEpoch) return;
                     if (_stateBodyOk(cur)) {
                         _stateRev = cur.rev;
                         if (!_statePushAgain && _stateSerialize() === serialized) {
@@ -190,6 +214,9 @@
                         if (epoch === _viewEpoch) _statePushFailed = true;
                         return;
                     }
+                    // Our write landed. That fact holds across a teardown (the
+                    // next view must not 409 against it), and single-flight
+                    // guarantees no newer response has been processed since.
                     _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
                     _statePushFailed = false;
@@ -207,7 +234,10 @@
             } finally {
                 _statePushInFlight = false;
                 if (release) { if (_stateChannel === mine) _stateChannel = null; release(); }
-                if (_statePushAgain) { _statePushAgain = false; schedulePush(); }
+                if (_statePushAgain) {
+                    _statePushAgain = false;
+                    if (epoch === _viewEpoch) schedulePush();   // never into a newer view
+                }
             }
         }
 
@@ -253,14 +283,13 @@
         // (another browser wrote) — our own pushes advance _stateRev so they
         // never re-trigger.
         async function pullState(initial) {
-            // ONE deadline for the whole exchange, connect THROUGH body, which
-            // is why this site opts out of hostFetch's built-in one
-            // (timeoutMs: 0): that one is disarmed as soon as the response
-            // HEADERS arrive, and a broker that answers and then stalls its
-            // body would hang this await forever — with the boot gate
-            // (_markStateReady) behind it, that is a permanently blank desktop.
-            // Same shape as pollHost: the json() read lives INSIDE the try, and
-            // the timer is cleared in the outer finally.
+            // ONE deadline for the whole exchange, connect THROUGH body
+            // (_stateDeadline, #247 S3), which is why this site opts out of
+            // hostFetch's built-in one (timeoutMs: 0): that one is disarmed as
+            // soon as the response HEADERS arrive, and a broker that answers
+            // and then stalls its body would hang this await forever — with
+            // the boot gate (_markStateReady) behind it, that is a permanently
+            // blank desktop.
             // #247 single-flight: a background poll never queues behind a busy
             // channel (the next tick asks again); an initial pull waits for it.
             if (!initial && (_stateChannel || _statePushInFlight)) return;
@@ -270,16 +299,16 @@
             _stateChannel = mine;
             let srv;
             const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
             try {
-                const r = await hostFetch(localHost(), '/state',
-                    { cache: 'no-store', signal: ctrl.signal, timeoutMs: 0 });
-                if (!r.ok) return;               // 401/5xx — handled elsewhere
-                srv = await r.json();
-            } catch (e) {                        // offline — keep localStorage
+                srv = await _stateDeadline((async () => {
+                    const r = await hostFetch(localHost(), '/state',
+                        { cache: 'no-store', signal: ctrl.signal, timeoutMs: 0 });
+                    if (!r.ok) return null;          // 401/5xx — handled elsewhere
+                    return await r.json();
+                })(), ctrl);
+            } catch (e) {                        // offline / deadline — keep local
                 return;
             } finally {
-                clearTimeout(timer);
                 if (_stateChannel === mine) _stateChannel = null;
                 release();
             }

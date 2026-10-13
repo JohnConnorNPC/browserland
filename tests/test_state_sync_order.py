@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 15
+EXPECTED_ASSERTS = 21
 
 _HARNESS = r"""
 'use strict';
@@ -70,6 +70,7 @@ function mkWorld() {
             w.gets++;
             w.log.push('GET');
             if (w.getMode === 'revonly') return { ok: true, status: 200, json: async () => ({ rev: 7 }) };
+            if (w.getMode === 'hangBody') return { ok: true, status: 200, json: () => new Promise(() => {}) };
             if (w.holdGetLate) {
                 const d = deferred(); w.held.push(d); await d.p;
                 const s2 = clone(w.server);
@@ -246,6 +247,55 @@ function mkWorld() {
     await w.release(); await ip; await flush(); await w.release();
     ok(w.srv() === J(['K']), 'O5 ...and the other one follows once it is answered');
 
+    // ---- 247-6: our 200 is recorded; one deadline; epoch gates -------------
+    // E1 (item 6): a PUT that landed before a teardown, answered after it.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['A8']); await w.firePush(); w.holdPut = false;
+    w.api.teardown(); w.api.rebuildStart();
+    w.server.layout = { cols: ['S'] }; w.server.rev = 3;            // the new holder wrote
+    const e1 = w.api.pullState(true); await flush();               // the rebuild's pull waits
+    await w.release(); await e1; await flush();
+    w.edit(['D']); await w.firePush(); await flush();
+    ok(w.srv() === J(['D']) && w.cols() === J(['D']),
+        'E1 a stale 200 never sets the rebuilt view back: a fresh edit lands');
+    // E2: a 409 that arrives while torn down adopts nothing.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.server.rev = 2; w.server.layout = { cols: ['PEER'] };
+    w.edit(['MINE']); await w.firePush(); w.holdPut = false;
+    w.api.teardown();
+    const a2 = w.adopts;
+    await w.release(); await flush();
+    ok(w.adopts === a2 && w.cols() === J(['MINE']), 'E2 a 409 after a teardown adopts nothing');
+    // E3: our 200 is recorded even while torn down.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['L']); await w.firePush(); w.holdPut = false;
+    w.api.teardown();
+    await w.release(); await flush();
+    ok(w.api.rev() === 2, 'E3 our 200 is recorded across a teardown (rev 2)');
+    // E4: a push asked for during the flight never re-arms into a newer view.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['P1']); await w.firePush();
+    w.edit(['P2']); await w.firePush();                              // _statePushAgain
+    w.holdPut = false;
+    w.api.teardown(); w.api.rebuildStart();
+    await w.release(); await flush();
+    ok(!Array.from(w.timers.values()).some(t => t.ms === 600), 'E4 no requeue across an epoch');
+    // E5 (S3): a PUT whose body never arrives does not wedge later pushes.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'hangBody'; w.edit(['H']); await w.firePush(); w.putMode = null;
+    await w.fireDeadlines();
+    await w.api.pullState(false); await flush();                      // the next poll
+    w.edit(['H2']); await w.firePush(); await flush();
+    ok(w.puts.length === 2 && w.srv() === J(['H2']), 'E5 a hung PUT body hits the deadline; the next edit is sent');
+    // E6 (S3): a GET whose body never arrives frees the channel at the deadline.
+    w = mkWorld(); await w.boot();
+    w.getMode = 'hangBody'; const e6 = w.api.pullState(false); await flush(); w.getMode = null;
+    w.edit(['G']); await w.firePush();
+    const sentBefore = w.puts.length;
+    await w.fireDeadlines(); await e6; await flush();
+    ok(sentBefore === 0 && w.puts.length === 1 && w.srv() === J(['G']),
+        'E6 a hung GET body holds the channel only until its deadline');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -315,6 +365,18 @@ def test_247_1_single_flight(run, label):
 def test_247_1_reorder_cell_ran(run):
     assert any(k.startswith("O3 a reordered capture never lowers the rev") and v
                for k, v in run["results"].items()), run["stdout"]
+
+
+@pytest.mark.parametrize("label", [
+    "E1 a stale 200 never sets the rebuilt view back: a fresh edit lands",
+    "E2 a 409 after a teardown adopts nothing",
+    "E3 our 200 is recorded across a teardown (rev 2)",
+    "E4 no requeue across an epoch",
+    "E5 a hung PUT body hits the deadline; the next edit is sent",
+    "E6 a hung GET body holds the channel only until its deadline",
+])
+def test_247_6_deadline_and_epoch_gates(run, label):
+    _ok(run, label)
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):
