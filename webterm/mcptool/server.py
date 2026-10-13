@@ -436,9 +436,11 @@ def _keys_to_text(keys: List[str], app_cursor: bool = False) -> str:
 
 @mcp.tool()
 def mcp_info(host: Optional[str] = None) -> Dict[str, Any]:
-    """Get Browserland broker MCP feature flags (allow_launch, default_mode),
-    plus `scope`: the scope this server declared to that host, as the broker
-    saw it (null when unscoped).
+    """Get Browserland broker MCP feature flags (allow_launch, default_mode,
+    terminals), plus `scope`: the scope this server declared to that host, as
+    the broker saw it (null when unscoped). `terminals: false` means that
+    broker hosts no terminals and refuses every launch, whatever allow_launch
+    says; a broker predating it omits the key.
 
     With `host` set, returns that one host's flags. Omit `host` (or pass "") to
     get a dict keyed by host name — each value is that host's flags, or
@@ -817,8 +819,10 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
                     cwd: Optional[str] = None,
                     host: Optional[str] = None,
                     mode: Optional[str] = None) -> Dict[str, Any]:
-    """Spawn a new terminal from a profile. The broker must have 'allow_launch'
-    enabled. With multiple hosts configured, `host` is required to choose which
+    """Spawn a new terminal from a profile. The broker must host terminals
+    (refused with terminals_disabled when its config says `terminals: false`,
+    checked first) and have 'allow_launch' enabled (else launch_disabled).
+    With multiple hosts configured, `host` is required to choose which
     broker; with a single host it's optional. The returned `id` is namespaced
     ("<host>:<int>") so it can be passed straight to the other tools.
 

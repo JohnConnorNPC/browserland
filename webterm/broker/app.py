@@ -1779,6 +1779,24 @@ def _refuse_if_quiescing(app, what: str):
                       status=503)
 
 
+def _refuse_if_no_terminals(app):
+    """A 403 ``terminals_disabled`` when this broker hosts no terminals
+    (``terminals: false``, #253), else None.
+
+    Consulted by the four routes that start or shape a NEW terminal:
+    ``POST /launch``, ``POST /mcp/launch``, ``POST /profiles/config`` and
+    ``GET /profiles/detect`` (the scan that seeds the editor it cannot save).
+    Every caller runs it AFTER its auth gate, so an unauthenticated caller
+    still learns nothing, and BEFORE parsing a body. Sessions that already
+    exist, the profile reads and the ``/browserland`` producer socket never
+    consult it: an agent launched before the flag must still reconnect.
+    The routes stay registered, so the refusal is a JSON error, not a 404."""
+    if app.ctx.terminals:
+        return None
+    return sanic_json({"ok": False, "error": "terminals_disabled"},
+                      status=403)
+
+
 def _lease_refusal(app, client_id: str, payload):
     """Single-active-client lease guard shared by the /state and /mod-store
     PUT handlers (#191 refactor — no behavior change): a non-active browser
@@ -5257,6 +5275,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _refuse_if_quiescing(app, "launch")
         if err is not None:
             return err
+        # #253: then the broker's own refusal, before the body is even parsed:
+        # a terminals-off broker answers terminals_disabled to any launch.
+        err = _refuse_if_no_terminals(app)
+        if err is not None:
+            return err
         params, err = await _parse_launch_body(request)
         if err is not None:
             return err
@@ -7088,6 +7111,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         cfg = app.ctx.mcp_cfg
         return sanic_json({"ok": True,
                            "allow_launch": bool(cfg["allow_launch"]),
+                           # #253: false = this broker refuses every launch
+                           # (terminals_disabled) whatever allow_launch says.
+                           "terminals": app.ctx.terminals,
                            "default_mode": cfg["default_mode"],
                            "version": app.ctx.version,
                            # #230: the scope this call declared, null when
@@ -7488,6 +7514,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         window, it is pruned after 7 days, and a launch that rolls its id
         meanwhile takes the dead-row path above."""
         err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        # #253: the broker refusing (terminals: false) is checked BEFORE the
+        # agent switch, so the two reasons stay distinct.
+        err = _refuse_if_no_terminals(app)
         if err is not None:
             return err
         if not app.ctx.mcp_cfg["allow_launch"]:
@@ -8453,6 +8484,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _gated_auth_error(request, "/profiles/config")
         if err is not None:
             return err
+        # #253: a broker that launches nothing has no profiles to edit. The
+        # GET stays, so a hub can still show what this broker offers.
+        err = _refuse_if_no_terminals(app)
+        if err is not None:
+            return err
         if request.body and len(request.body) > MAX_PROFILES_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=413)
         body = _json_object_body(request)
@@ -8518,6 +8554,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # allow-listed shells on POSIX). Browser realm, same gate as the editor.
         # The scan blocks (subprocess/FS), so run it off the event loop.
         err = _gated_auth_error(request, "/profiles/detect")
+        if err is not None:
+            return err
+        # #253: gated with the editor it seeds (R5).
+        err = _refuse_if_no_terminals(app)
         if err is not None:
             return err
         suggestions = await asyncio.get_running_loop().run_in_executor(

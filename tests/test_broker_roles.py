@@ -252,3 +252,224 @@ def test_boot_line_names_the_role(tmp_path, caplog, cfg, line):
     with caplog.at_level(logging.INFO, logger="webterm.broker.app"):
         _app(tmp_path, **cfg)
     assert line in [r.getMessage() for r in caplog.records]
+
+
+# ---- A2: the launch gates ----------------------------------------------------
+
+MCP_TOKEN = "roles-mcp-token"
+
+
+def _gate_app(tmp_path, monkeypatch, **cfg):
+    """A broker with MCP on, and a spy in place of the launcher so a launch
+    that gets past every gate is recorded instead of spawning a shell."""
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    monkeypatch.delenv("WEB_TERMINAL_MCP_TOKEN", raising=False)
+    base = {"mcp_state_path": str(tmp_path / "webterm_mcp.json"),
+            "mcp_enabled": True, "mcp_token": MCP_TOKEN,
+            "mcp_default_mode": "off"}
+    base.update(cfg)
+    app = _app(tmp_path, **base)
+    calls = []
+
+    async def _spy_launch(profile, **kw):
+        calls.append(profile)
+        return 200, {"ok": True, "id": 4242}
+
+    app.ctx.launcher.launch = _spy_launch
+    return app, calls
+
+
+def _mcp_headers(token=MCP_TOKEN):
+    return [("Authorization", f"Bearer {token}")]
+
+
+def test_launch_401_outranks_terminals_disabled(tmp_path, monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False)
+    # RAW client on purpose: no token.
+    _, r = app.test_client.post("/launch", json={})
+    assert r.status == 401
+    assert r.json["error"] == "auth_required"
+    assert calls == []
+
+
+def test_launch_quiesce_outranks_terminals_disabled(tmp_path, monkeypatch):
+    from webterm.broker import app as app_mod
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False)
+    app.ctx.lifecycle = app_mod.LIFECYCLE_QUIESCING
+    _, r = authed(app).post("/launch", json={})
+    assert r.status == 503
+    assert r.json["error"] == "restarting"
+    assert calls == []
+
+
+def test_launch_refused_when_terminals_off(tmp_path, monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False)
+    _, r = authed(app).post("/launch", json={})
+    assert r.status == 403
+    assert r.json == {"ok": False, "error": "terminals_disabled"}
+    # Before the body parse: a malformed body gets the same answer.
+    _, r = authed(app).post("/launch", data="{not json")
+    assert r.json["error"] == "terminals_disabled"
+    assert calls == []
+
+
+def test_launch_default_config_unchanged(tmp_path, monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/launch", json={})
+    assert r.status == 200, r.json
+    assert r.json["id"] == 4242
+    assert len(calls) == 1
+
+
+def test_mcp_launch_auth_outranks_terminals_disabled(tmp_path, monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False)
+    _, r = app.test_client.post("/mcp/launch", json={},
+                                headers=_mcp_headers("wrong"))
+    assert r.status == 401
+    assert r.json["error"] == "auth_required"
+    assert calls == []
+
+
+def test_mcp_launch_terminals_disabled_before_launch_disabled(tmp_path,
+                                                              monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False,
+                           mcp_allow_launch=False)
+    _, r = app.test_client.post("/mcp/launch", json={},
+                                headers=_mcp_headers())
+    assert r.status == 403
+    assert r.json["error"] == "terminals_disabled"
+    assert calls == []
+
+
+def test_mcp_launch_disabled_unchanged_when_terminals_on(tmp_path,
+                                                         monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, mcp_allow_launch=False)
+    _, r = app.test_client.post("/mcp/launch", json={},
+                                headers=_mcp_headers())
+    assert r.status == 403
+    assert r.json["error"] == "launch_disabled"
+    assert calls == []
+
+
+def test_mcp_launch_terminals_off_even_with_allow_launch(tmp_path,
+                                                         monkeypatch):
+    app, calls = _gate_app(tmp_path, monkeypatch, terminals=False,
+                           mcp_allow_launch=True)
+    _, r = app.test_client.post("/mcp/launch", json={},
+                                headers=_mcp_headers())
+    assert r.status == 403
+    assert r.json["error"] == "terminals_disabled"
+    assert calls == []
+
+
+@pytest.mark.parametrize("terminals", [True, False])
+def test_mcp_info_reports_terminals(tmp_path, monkeypatch, terminals):
+    app, _ = _gate_app(tmp_path, monkeypatch, terminals=terminals,
+                       mcp_allow_launch=True)
+    _, r = app.test_client.get("/mcp/info", headers=_mcp_headers())
+    assert r.status == 200
+    assert r.json["terminals"] is terminals
+    assert r.json["allow_launch"] is True          # unchanged beside it
+
+
+def test_profile_writes_and_detect_refused_reads_answer(tmp_path,
+                                                        monkeypatch):
+    app, _ = _gate_app(tmp_path, monkeypatch, terminals=False)
+    _, r = authed(app).post("/profiles/config", json={"profiles": {}})
+    assert r.status == 403
+    assert r.json["error"] == "terminals_disabled"
+    _, r = authed(app).get("/profiles/detect")
+    assert r.status == 403
+    assert r.json["error"] == "terminals_disabled"
+    # Reads stay: a hub can still show what this broker offers.
+    for path in ("/profiles", "/profiles/config", "/sessions"):
+        _, r = authed(app).get(path)
+        assert r.status == 200, (path, r.status)
+    # And the refusals still sit behind the auth gate.
+    _, r = app.test_client.get("/profiles/detect")
+    assert r.status == 401
+
+
+def test_profile_routes_unchanged_by_default(tmp_path, monkeypatch):
+    app, _ = _gate_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/profiles/detect")
+    assert r.status == 200 and r.json["ok"] is True
+
+
+def test_mcptool_names_terminals_disabled():
+    import httpx
+    from webterm.mcptool import client as mc
+    assert "terminals_disabled" in mc._ERROR_MESSAGES
+    resp = httpx.Response(
+        403, json={"ok": False, "error": "terminals_disabled"},
+        request=httpx.Request("POST", "http://broker/mcp/launch"))
+    with pytest.raises(mc.BrowserlandError) as exc:
+        mc.BrowserlandClient._raise_for_status(None, resp)
+    assert exc.value.code == "terminals_disabled"
+    assert "hosts no terminals" in str(exc.value)
+    assert "Broker error:" not in str(exc.value)
+
+
+def test_producer_hello_still_registers_on_a_terminals_off_broker(tmp_path):
+    """R4: terminals: false refuses NEW launches only. /browserland keeps
+    accepting agents -- one launched before the flag must reconnect."""
+    import asyncio
+    import time
+    import urllib.request
+
+    import websockets
+
+    cfg_path = tmp_path / "broker_config.json"
+    cfg_path.write_text(json.dumps({
+        "state_path": str(tmp_path / "webterm_state.json"),
+        "terminals": False}), encoding="utf-8")
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "webterm.broker", "--config", str(cfg_path),
+         "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(tmp_path), env=_env(),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+
+    def get(path):
+        with urllib.request.urlopen(f"{base}{path}?token={TEST_TOKEN}",
+                                    timeout=5) as r:
+            return json.loads(r.read())
+
+    try:
+        deadline = time.time() + 30
+        while True:
+            try:
+                info = get("/info")
+                break
+            except OSError:
+                pass
+            assert proc.poll() is None, f"broker exited: {proc.returncode}"
+            assert time.time() < deadline, "broker did not come up"
+            time.sleep(0.2)
+        assert info["terminals"] is False and info["role"] == "hub"
+
+        async def scenario():
+            ws = await websockets.connect(
+                f"ws://127.0.0.1:{port}/browserland?token={TEST_TOKEN}",
+                max_size=None)
+            try:
+                await ws.send(json.dumps({
+                    "type": "hello", "window_id": 553001, "pid": 1,
+                    "title": "pre-flag agent", "cols": 80, "rows": 24,
+                    "kind": "agent"}))
+                loop = asyncio.get_running_loop()
+                for _ in range(50):
+                    sessions = await loop.run_in_executor(
+                        None, get, "/sessions")
+                    if any(s["id"] == 553001 for s in sessions):
+                        return True
+                    await asyncio.sleep(0.1)
+                return False
+            finally:
+                await ws.close()
+
+        assert asyncio.run(scenario()), "hello did not register"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)

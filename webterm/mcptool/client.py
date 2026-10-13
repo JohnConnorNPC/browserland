@@ -47,6 +47,9 @@ _ERROR_MESSAGES = {
     "flush_failed": "The terminal's agent failed to flush its pending input.",
     "launch_disabled": "Launching is disabled on the broker "
                        "(enable 'allow_launch' in Control Panel → MCP access).",
+    "terminals_disabled": "This broker hosts no terminals (terminals: false "
+                          "in its config) and refuses every launch; launch "
+                          "on another host.",
     "unknown_profile": "No such launch profile (see list_profiles).",
     "bad_dims": "Invalid 'cols'/'rows'.",
     "bad_cwd": "Invalid 'cwd'.",
