@@ -2,8 +2,11 @@
 
 Until #252 this was a sentence ("the broker's ONLY outbound HTTP is
 /status/fetch") that was already wrong once /update/check landed. It is now an
-executable inventory over ``webterm/broker``: every call or import that can
-open an outbound connection is listed, and the list must be exactly
+executable inventory over ``webterm/broker``: every call or import of the
+network APIs this scan knows (the urllib openers, httpx, requests, aiohttp,
+urllib3, http.client, websockets, and the raw connect calls) is listed, and
+the list must be exactly the following. It pins those spellings; it cannot
+see a library it does not name, so a new egress library belongs in its sets.
 
 * ``/status/fetch``: app.py's ``_STATUS_OPENER`` (stdlib, no redirects, no
   env proxies), opened in ``_fetch_status_blocking``;

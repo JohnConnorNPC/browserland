@@ -38,6 +38,12 @@ PEER_TOKEN_HEADER = "X-Browserland-Peer-Token"
 #: page that has not seen a re-pointed origin cannot send B's token to it.
 PEER_ORIGIN_HEADER = "X-Browserland-Peer-Origin"
 
+#: Set on every refusal THIS broker writes for a /peer/* request, naming
+#: the error. It is not on the response allowlist, so a peer can never send
+#: it: the page acts on a pairing refusal only when this header says so, not
+#: on a body the peer could imitate.
+PEER_REFUSAL_HEADER = "X-Browserland-Peer-Refusal"
+
 #: Upstream connect timeout. Below the page's 3 s ``FETCH_TIMEOUT_MS`` so a
 #: down peer frees its dial slot before the page's own deadline fires.
 PEER_CONNECT_TIMEOUT_S = 2.5
@@ -103,7 +109,8 @@ def normalize_origin(raw: Any) -> Tuple[Optional[str], Optional[str]]:
         return None, "origin must not carry a query"
     if parts.fragment or "#" in raw:
         return None, "origin must not carry a fragment"
-    host = (parts.hostname or "").lower()
+    # A trailing dot is the same DNS name ("localhost." is localhost).
+    host = (parts.hostname or "").lower().rstrip(".")
     if not host:
         return None, "origin must name a host"
     if port is not None and not 1 <= port <= 65535:
@@ -280,7 +287,8 @@ def is_mcp_path(rest: str) -> bool:
 # Trailer, Transfer-Encoding, Upgrade) in both directions.
 
 #: Request headers forwarded as the client sent them.
-_UP_PLAIN = ("Content-Type", "Content-Length", "Accept")
+_UP_PLAIN = ("Content-Type", "Content-Length", "Content-Encoding",
+             "Accept")
 
 #: Response headers forwarded as B sent them. Content-Type is never in this
 #: list: it is forced (see :func:`forced_content_type`).
@@ -306,7 +314,8 @@ def upstream_headers(headers, *, gate: str, bearer: str,
     """The header list A sends to B. ``headers`` is the incoming multi-dict
     (``getall``); ``bearer`` is the credential for this gate (B's browser
     token, or B's MCP token on the MCP gate); ``admin_header`` is #191's
-    ``X-Webterm-Admin``, forwarded only when the caller supplied it.
+    ``X-Webterm-Admin``, forwarded only when the caller supplied it, and only
+    on the browser gate.
 
     Exactly one ``X-Browserland-Scope`` crosses: a repeat is refused here
     (B would 400 it too), never collapsed to one copy A picked."""
@@ -320,9 +329,12 @@ def upstream_headers(headers, *, gate: str, bearer: str,
         raise PolicyError(400, "bad_scope")
     if scopes:
         out.append((SCOPE_HEADER, scopes[0]))
-    for val in headers.getall(admin_header, None) or []:
-        out.append((admin_header, val))
-    if gate == GATE_MCP:
+    if gate == GATE_BROWSER:
+        # #191's admin header is a browser-realm credential: it never rides
+        # the MCP gate, whose only credentials are B's MCP ones.
+        for val in headers.getall(admin_header, None) or []:
+            out.append((admin_header, val))
+    else:
         # B's MCP admin header is B's credential, sent by the mcptool client
         # beside B's MCP token; on the browser gate it has no business.
         for val in headers.getall(MCP_ADMIN_HEADER, None) or []:

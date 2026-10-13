@@ -8740,8 +8740,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #   or stale one is 409 peer_origin_changed with no dial, so a re-pointed
     #   origin never receives a token that was entered for another machine;
     # * /mcp/*: B's MCP token as the bearer and nothing of A's, and only for a
-    #   peer whose entry sets mcp: true. Otherwise it is the same 404 as an
-    #   unknown peer, so the opt-in cannot be probed.
+    #   peer whose entry sets mcp: true. No bearer is a 401 before any lookup;
+    #   a peer without the opt-in is the same 404 as an unknown one.
     #
     # Every refusal happens before the dial. The peer's origin is read from
     # app.ctx.peers at dial time, never captured. Response hardening (the
@@ -8752,7 +8752,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     def _peer_refusal(gate_mcp: bool, status: int, error: str):
         body = {"error": error} if gate_mcp else {"ok": False, "error": error}
-        return sanic_json(body, status=status)
+        # The marker the page trusts (a relayed answer can never carry it).
+        return sanic_json(body, status=status,
+                          headers={peers.PEER_REFUSAL_HEADER: error})
 
     def _peer_bearer(request: Request) -> Optional[str]:
         header = request.headers.get("authorization") or ""
@@ -8764,9 +8766,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         gate_mcp = peers.is_mcp_path(rest)
         peer = app.ctx.peers.get(peer_id)
         if gate_mcp:
+            # The bearer is checked FIRST, so a caller holding nothing learns
+            # nothing about which peers exist or which opted in. (A caller
+            # with any bearer can still tell an opted-in peer by B's own
+            # answer; A cannot validate B's MCP token to hide that.)
+            bearer = _peer_bearer(request)
+            if not bearer:
+                LOGGER.warning("rejected unauthenticated /peer mcp from %s",
+                               request.ip)
+                return _peer_refusal(True, 401, "auth_required")
             if peer is None or not peer["mcp"]:
                 return _peer_refusal(True, 404, "unknown_peer")
-            bearer = _peer_bearer(request)
         else:
             if not auth.token_matches(_peer_bearer(request),
                                       app.ctx.auth_token):
@@ -8781,12 +8791,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if gate is None or (gate == peers.GATE_MCP) != gate_mcp:
             return _peer_refusal(gate_mcp, 404,
                                  path if gate is None else "not_relayed")
-        if gate_mcp:
-            if not bearer:
-                LOGGER.warning("rejected unauthenticated /peer mcp from %s",
-                               request.ip)
-                return _peer_refusal(True, 401, "auth_required")
-        else:
+        if not gate_mcp:
             bearer = request.headers.get(peers.PEER_TOKEN_HEADER) or ""
             if not bearer:
                 return _peer_refusal(False, 401, "auth_required")

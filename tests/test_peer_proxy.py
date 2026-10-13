@@ -405,3 +405,74 @@ async def test_no_log_record_names_the_upstream(live, upstream, caplog):
     for secret in (str(upstream.port), dead.rsplit(":", 1)[1], "secret-q",
                    B_TOKEN, TEST_TOKEN, "http://"):
         assert secret not in text, secret
+
+
+async def test_a_body_cut_short_upstream_never_arrives_complete(live,
+                                                               upstream):
+    # Chunked upstream, cut after the first piece with no terminating chunk:
+    # no length can reveal the cut, so only dropping the downstream
+    # connection keeps the client from reading a short body as complete.
+    blob = b"x" * (2 * 2**20)
+    upstream.routes["/recording"] = lambda s: Answer(
+        200, [("Content-Type", "application/octet-stream")],
+        blob, gate=threading.Event(), gate_timeout=0.5, chunked=True)
+    got = bytearray()
+    with pytest.raises(httpx.HTTPError):
+        async with _client() as c:
+            async with c.stream("GET", live.url + "/peer/b/recording?id=r",
+                                headers=browser(upstream.origin)) as r:
+                assert r.status_code == 200
+                async for chunk in r.aiter_raw():
+                    got += chunk
+    assert len(got) < len(blob)
+    # ...and the slot came back.
+    assert live.app.ctx.peer_cap._busy == {}
+
+
+async def test_without_a_bearer_the_mcp_prefix_reveals_nothing(live,
+                                                               upstream):
+    seen = []
+    for pid in ("m", "b", "zz"):       # opted in, opted out, unknown
+        r = await _get(live, f"/peer/{pid}/mcp/info")
+        seen.append((r.status_code, r.json(),
+                     r.headers.get(peers.PEER_REFUSAL_HEADER)))
+    assert seen == [(401, {"error": "auth_required"}, "auth_required")] * 3
+    assert upstream.seen == []
+
+
+async def test_the_refusal_marker_is_ours_alone(live, upstream):
+    r = await _get(live, "/peer/b/info", browser("http://elsewhere:1"))
+    assert r.status_code == 409
+    assert r.headers[peers.PEER_REFUSAL_HEADER] == "peer_origin_changed"
+    # B sending the same marker (and the same body) does not get it across.
+    upstream.routes["/sessions"] = lambda s: Answer(
+        409, [("Content-Type", "application/json"),
+              (peers.PEER_REFUSAL_HEADER, "peer_origin_changed")],
+        b'{"ok": false, "error": "peer_origin_changed"}')
+    r = await _get(live, "/peer/b/sessions", browser(upstream.origin))
+    assert r.status_code == 409
+    assert peers.PEER_REFUSAL_HEADER not in r.headers
+
+
+async def test_a_client_that_leaves_mid_body_frees_its_slot(live, upstream):
+    import asyncio
+    blob = b"y" * (4 * 2**20)
+    hold = threading.Event()
+    upstream.routes["/recording"] = lambda s: Answer(
+        200, [("Content-Type", "application/octet-stream")], blob,
+        gate=hold, gate_timeout=10, chunked=True)
+    try:
+        async with _client() as c:
+            async with c.stream("GET", live.url + "/peer/b/recording?id=r",
+                                headers=browser(upstream.origin)) as r:
+                async for _chunk in r.aiter_raw():
+                    break              # leave after the first piece
+        for _ in range(100):
+            if live.app.ctx.peer_cap._busy == {}:
+                break
+            await asyncio.sleep(0.05)
+        assert live.app.ctx.peer_cap._busy == {}
+    finally:
+        hold.set()
+    r = await _get(live, "/peer/b/info", browser(upstream.origin))
+    assert r.status_code == 200

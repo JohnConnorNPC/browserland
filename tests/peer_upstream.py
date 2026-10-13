@@ -58,6 +58,10 @@ class Answer:
     gate_timeout: float = 10.0
     #: When set, nothing is written until this event is set (dial-cap tests).
     hold: Optional[threading.Event] = None
+    #: Send the body with Transfer-Encoding: chunked. With ``gate`` set and
+    #: never opened, the writer stops after the first piece WITHOUT the
+    #: terminating chunk: a body cut short that no length can reveal.
+    chunked: bool = False
 
 
 def json_answer(obj, status=200, extra=()) -> Answer:
@@ -173,10 +177,29 @@ class FakeUpstream:
         names = {k.lower() for k, _ in answer.headers}
         for k, v in answer.headers:
             head.append(f"{k}: {v}")
-        if "content-length" not in names:
+        if answer.chunked:
+            head.append("Transfer-Encoding: chunked")
+        elif "content-length" not in names:
             head.append(f"Content-Length: {len(answer.body)}")
         head.append("Connection: close")
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode("latin-1"))
+        if answer.chunked:
+            first = answer.body[:CHUNK]
+            writer.write(b"%x\r\n%s\r\n" % (len(first), first))
+            await writer.drain()
+            if answer.gate is not None:
+                ok = await loop.run_in_executor(None, answer.gate.wait,
+                                                answer.gate_timeout)
+                if not ok:
+                    self.gate_timed_out = True
+                    return                  # cut: no terminating chunk
+            for i in range(CHUNK, len(answer.body), CHUNK):
+                piece = answer.body[i:i + CHUNK]
+                writer.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+                await writer.drain()
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+            return
         if answer.gate is None:
             writer.write(answer.body)
             await writer.drain()

@@ -131,11 +131,11 @@ def _names(pairs):
 def test_browser_gate_headers():
     out = peers.upstream_headers(
         _incoming((SCOPE_HEADER, "s1"), (ADMIN, "adm"),
-                  (MCP_ADMIN_HEADER, "madm")),
+                  (MCP_ADMIN_HEADER, "madm"), ("Content-Encoding", "gzip")),
         gate=peers.GATE_BROWSER, bearer=B_TOKEN, admin_header=ADMIN)
     assert sorted(_names(out)) == sorted(
-        ["content-type", "accept", SCOPE_HEADER.lower(), ADMIN.lower(),
-         "accept-encoding", "authorization"])
+        ["content-type", "content-encoding", "accept", SCOPE_HEADER.lower(),
+         ADMIN.lower(), "accept-encoding", "authorization"])
     assert ("Authorization", "Bearer " + B_TOKEN) in out
     assert not [v for _, v in out if A_TOKEN in v]
     assert (ADMIN, "adm") in out
@@ -143,10 +143,11 @@ def test_browser_gate_headers():
 
 def test_mcp_gate_forwards_the_mcp_admin_header():
     out = peers.upstream_headers(
-        _incoming((MCP_ADMIN_HEADER, "madm")),
+        _incoming((MCP_ADMIN_HEADER, "madm"), (ADMIN, "adm")),
         gate=peers.GATE_MCP, bearer=B_TOKEN, admin_header=ADMIN)
     assert (MCP_ADMIN_HEADER, "madm") in out
-    assert ADMIN.lower() not in _names(out)          # not sent, not invented
+    # #191's browser-realm admin credential never rides the MCP gate.
+    assert ADMIN.lower() not in _names(out)
     assert SCOPE_HEADER.lower() not in _names(out)
 
 
@@ -388,3 +389,22 @@ async def test_a_body_that_dies_midway_aborts_the_downstream(upstream):
     assert err is None
     assert sink.aborted is True and sink.ended is False
     assert logs and "broke mid-body" in logs[0]
+
+
+async def test_an_informational_status_is_never_relayed(upstream):
+    """A 101 to a request that asked for no upgrade is not a final answer:
+    nothing is relayed, and the dial reads as a broken peer."""
+    upstream.routes["/info"] = lambda s: Answer(
+        101, [("Upgrade", "evil"), ("Connection", "Upgrade")], b"post-upgrade")
+    err, sink = await _relay(upstream, "/info")
+    assert err == (502, "peer_unreachable")
+    assert sink.status is None and sink.chunks == []
+
+
+def test_a_trailing_dot_names_the_same_host():
+    assert peers.normalize_origin("http://LocalHost.:4445") == (
+        "http://localhost:4445", None)
+    out, why = peers.parse_peers({"b": {"origin": "http://localhost.:4445"}},
+                                 4445)
+    assert why == ("error: peer 'b': origin http://localhost:4445 is this "
+                   "broker")
