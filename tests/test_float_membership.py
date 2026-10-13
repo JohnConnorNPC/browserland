@@ -81,12 +81,15 @@ SLICES = {
     "rowKeys": ("57_js_tiling_model.js",
                 "        function rowKeys(row) {",
                 "        // Keyed mirror of normalizeRowWidths"),
+    "detach": ("62a_js_strip_and_layers.js",
+               "        function detachToFloat(win) {",
+               "        // removeFromStrip:"),
     "gc": ("75_js_taskbar_hosts.js",
            "            let layoutDropped = 0;",
            "            for (const k of Object.keys(prefs)) {"),
 }
 
-EXPECTED_ASSERTS = 19
+EXPECTED_ASSERTS = 21
 
 _HARNESS = r"""
 'use strict';
@@ -191,6 +194,7 @@ function mkWorld(o) {
     Object.assign(w, load(S.apply + S.roles + S.hooks + S.refit + S.resizable, env, a2));
     for (const n of a2) env[n] = w[n];
     w.adoptFloatWorkspace = load(S.wsAdopt, env, ['adoptFloatWorkspace']).adoptFloatWorkspace;
+    w.detachToFloat = load(S.detach, env, ['detachToFloat']).detachToFloat;
     w.adopt = (layout) => w._applyServerState({ settings: {}, layout: clone(layout) });
     return w;
 }
@@ -297,7 +301,7 @@ function mkWin(id, o) {
     w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
     ok(t1.tiled === false && !t1.dom.cls.has('tiled') && t1.dom.parent === 'desktop'
         && J(t1.geom) === J({ left: 1, top: 2, width: 300, height: 200 })
-        && w.env.getPref('h:1').tiled === false && w.saves === 0 && w.localSaves >= 1
+        && w.env.getPref('h:1').tiled === undefined && w.saves === 0 && w.localSaves >= 1
         && J(w.placed) === J([['h:1', { wsId: 'W1' }]]) && J(w.resizes) === J(['h:1'])
         && t1.dom.style.zIndex === '1' && w.env.frontId === null && w.fronted.length === 0,
         'F7 an adopt that drops a tiled window\'s column floats it here at its own box, pushes nothing and announces it once');
@@ -371,6 +375,31 @@ function mkWin(id, o) {
     w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
     ok(!f17.tiled && !f17.dom.cls.has('ws-hidden') && J(w.fronted) === J(['h:1']),
         'F17 the front window floated by an adopt stays front (focus restored)');
+    // F18 (audit F1): an adopt-float writes no local role. Floated by an
+    // adopt, tiled again by a later adopt (60's relayoutStrip sets win.tiled
+    // and writes no role), closed, then reopened here in tiling mode: TILED.
+    w = mkWorld(L0);
+    const r18 = tiledWin(w, 'h:1'); tiledWin(w, 'h:2');
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    const floated18 = r18.tiled === false;
+    w.adopt({ mode: 'tiling', columns: [col('h:1', 'W1'), col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    r18.tiled = true;
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:2'] });
+    w.env.windows.delete('h:1');
+    const kf18 = w.capture(mkWin('h:1'), 'h:1');
+    ok(floated18 && w.env.getPref('h:1').tiled === undefined && kf18 === false
+        && w.decideTiled('h:1', kf18) === true,
+        'F18 a window floated by an adopt, re-tiled by an adopt and closed reopens tiled in tiling mode');
+    // F19: this device's OWN float (detachToFloat) still records the role,
+    // and a later reopen honours it.
+    w = mkWorld(L0);
+    const u19 = tiledWin(w, 'h:1'); tiledWin(w, 'h:2');
+    w.detachToFloat(u19);
+    const saved19 = w.saves;
+    w.removeOpenTerm('h:1');                       // closed
+    ok(u19.tiled === false && w.env.getPref('h:1').tiled === false && saved19 >= 1
+        && !w.findKeyInLayout('h:1') && w.decideTiled('h:1', w.isKnownFloat('h:1')) === false,
+        'F19 a user float (detachToFloat) still records tiled=false, and a reopen honours it');
 })();
 
 console.log(pass + ' passed, ' + fail + ' failed');
@@ -454,6 +483,8 @@ def test_251_decide_tiled_reads_shared_membership(run, label):
     "F15 a controlled window floated by an adopt sends no resize",
     "F16 a tab of a tabbed row and a minimized pane of a split row float into their column's workspace",
     "F17 the front window floated by an adopt stays front (focus restored)",
+    "F18 a window floated by an adopt, re-tiled by an adopt and closed reopens tiled in tiling mode",
+    "F19 a user float (detachToFloat) still records tiled=false, and a reopen honours it",
 ])
 def test_251_adopt_floats_a_dropped_column_locally(run, label):
     _ok(run, label)
