@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 74
+EXPECTED_ASSERTS = 75
 
 _HARNESS = r"""
 'use strict';
@@ -655,8 +655,9 @@ function mkWorld() {
     w.putMode = 'throw'; w.edit(['MINE']); await w.firePush(); w.putMode = null;
     w.server = clone(PEERZ);
     await w.api.pullState(false); await flush();                       // takes rev 2, keeps the owed edit
+    let zn = w.putsLog().length;
     w.api.teardown(); await w.rebuild(); await w.firePush(); await flush();
-    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && J(w.putsLog().slice(zn)) === J(['PUT@1:["MINE"]']),
         'Z1 a thrown failure parked across a lease loss still retries on its original base and yields (Q2)');
     // Z2: S6 -- the ladder engaged, a peer writes, the lease is lost and regained.
     w = mkWorld(); await w.boot();
@@ -665,9 +666,10 @@ function mkWorld() {
     w.putMode = null;
     w.server = clone(PEERZ);
     await w.api.pullState(false); await flush();
+    zn = w.putsLog().length;
     w.api.teardown(); await w.rebuild();
     w.perf += 60000; await tick(w); await tick(w);
-    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && J(w.putsLog().slice(zn)) === J(['PUT@1:["MINE"]']),
         'Z2 a late retry parked across a lease loss still uses its original base and yields (S6)');
     // Z3: a Q2 retry IN FLIGHT at the teardown is parked with that PUT's base.
     w = mkWorld(); await w.boot();
@@ -678,8 +680,9 @@ function mkWorld() {
     w.holdPut = false;
     w.api.teardown();
     await w.release(); await flush(); w.putMode = null;
+    zn = w.putsLog().length;
     await w.rebuild(); await w.firePush(); await flush();
-    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && J(w.putsLog().slice(zn)) === J(['PUT@1:["MINE"]']),
         'Z3 a Q2 retry in flight at the teardown is parked with its base 1 and yields on regain');
     // Z3b: a parked edit whose flush failed, parked AGAIN by a second
     // teardown, keeps its first teardown-time base (not the rev of the moment).
@@ -687,8 +690,9 @@ function mkWorld() {
     w.edit(['MINE']); w.api.teardown();                                // parked on base 1
     w.server = clone(PEERZ);                                           // a peer writes meanwhile
     w.putMode = '500'; await w.rebuild(); w.putMode = null;            // flush fails; the pull takes rev 2
+    zn = w.putsLog().length;
     w.api.teardown(); await w.rebuild(); await w.firePush(); await flush();
-    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && J(w.putsLog().slice(zn)) === J(['PUT@1:["MINE"]']),
         'Z3b a parked edit parked again keeps its first base and yields to the peer');
 
     // ---- Z4 (w2 code audit): a superseded initial pull never claims ------
@@ -699,6 +703,10 @@ function mkWorld() {
     w.api.teardown(); w.api.rebuildStart();                            // ... and is superseded
     w.holdPut = false; await w.release(); await z4; await flush();
     ok(w.gets === z4g, 'Z4 an initial pull superseded while it waited for the channel sends no GET');
+    w.server = { rev: 9, settings: {}, layout: { cols: ['NEXT'] } };
+    await w.rebuild();
+    ok(w.gets === z4g + 1 && w.cols() === J(['NEXT']) && w.api.rev() === 9,
+        'Z4a ...and the view that superseded it still pulls and adopts');
     // Z4b: the load pull keeps its exemption while it waits (P3b's rule).
     w = mkWorld();
     w.holdPut = true; w.api.setReady(true); w.edit(['H']); await w.firePush();
@@ -913,6 +921,7 @@ def test_247_z1_park_keeps_the_original_base(run, label):
 
 @pytest.mark.parametrize("label", [
     "Z4 an initial pull superseded while it waited for the channel sends no GET",
+    "Z4a ...and the view that superseded it still pulls and adopts",
     "Z4b the load pull still sends after the first epoch bump while it waited",
 ])
 def test_247_z4_superseded_initial_pull(run, label):
