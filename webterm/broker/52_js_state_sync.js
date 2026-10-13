@@ -182,6 +182,25 @@
                 _stateSentGen = gen - 1;
             }
         }
+        // The base a PUT of `gen` carries, one rule for a send and for a park
+        // (#247 Z1): a parked gen keeps the base it was parked with (Q1); a
+        // thrown failure (Q2) or a late ladder retry (S6) keeps the debt's
+        // ORIGINAL base; anything else rebases on the last rev seen (#246
+        // policy a). A teardown that parked with the rev of the moment instead
+        // turned a retry that must yield to a peer write into an overwrite.
+        // (An in-flight PUT's base is this same value at the teardown: while
+        // it holds the channel nothing moves _stateRev, _stateFail or the park.)
+        function _stateSendBase(gen) {
+            if (_stateParked && _stateParkGen === gen && _stateParkBase !== null) {
+                return _stateParkBase;
+            }
+            const f = _stateFail;
+            if (f && f.gen === gen && ((f.thrown && STATE_THROWN_RETRY_YIELDS)
+                    || (STATE_LATE_RETRY_YIELDS && f.fails > STATE_RETRY_FAST))) {
+                return f.baseRev;
+            }
+            return _stateRev;
+        }
         // A failure of `gen`; a newer edit starts a fresh record.
         function _stateFailed(gen, baseRev, thrown) {
             const f = (_stateFail && _stateFail.gen === gen) ? _stateFail
@@ -285,15 +304,7 @@
                 _stateChannel = mine;
                 _stateSentGen = gen;
                 _stateNoteSend(serialized, gen);
-                let baseRev = _stateRev;
-                const f = _stateFail;
-                if (f && f.gen === gen && ((f.thrown && STATE_THROWN_RETRY_YIELDS)
-                        || (STATE_LATE_RETRY_YIELDS && f.fails > STATE_RETRY_FAST))) {
-                    baseRev = f.baseRev;          // Q2 / S6: its original base
-                }
-                if (_stateParked && _stateParkGen === gen && _stateParkBase !== null) {
-                    baseRev = _stateParkBase;     // Q1: its teardown-time base
-                }
+                const baseRev = _stateSendBase(gen);  // Q1 / Q2 / S6 / policy a
                 let out = null;
                 const ctrl = new AbortController();
                 try {
@@ -630,9 +641,12 @@
             if (_statePushTimer) { clearTimeout(_statePushTimer); _statePushTimer = null; }
             _statePushAgain = false;
             _statePendingPush = false;
+            // Z1: the base its next send would carry -- taken BEFORE the park
+            // is rewritten, so a gen parked again keeps its original base.
+            const base = _stateSendBase(_stateEditGen);
             _stateParked = (_stateOwed() || _statePushInFlight)
                 && _stateSerialize() !== _stateLastSerialized;
-            if (_stateParked) { _stateParkGen = _stateEditGen; _stateParkBase = _stateRev; }
+            if (_stateParked) { _stateParkGen = _stateEditGen; _stateParkBase = base; }
         }
         // #247 item 3: called by 84 rebuildView BEFORE its initial pull. Let
         // the channel drain (an old PUT settles; bounded by the deadline),

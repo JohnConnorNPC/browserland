@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 66
+EXPECTED_ASSERTS = 70
 
 _HARNESS = r"""
 'use strict';
@@ -648,6 +648,49 @@ function mkWorld() {
     await tick(w);
     ok(w.srv() === J(['MINE']), 'B7b a fast-phase retry rebases and wins (policy a)');
 
+    // ---- Z1 (w2 code audit): a teardown keeps the debt's ORIGINAL base ----
+    const PEERZ = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    // Z1: Q2 -- a thrown failure, a peer writes, the lease is lost and regained.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'throw'; w.edit(['MINE']); await w.firePush(); w.putMode = null;
+    w.server = clone(PEERZ);
+    await w.api.pullState(false); await flush();                       // takes rev 2, keeps the owed edit
+    w.api.teardown(); await w.rebuild(); await w.firePush(); await flush();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+        'Z1 a thrown failure parked across a lease loss still retries on its original base and yields (Q2)');
+    // Z2: S6 -- the ladder engaged, a peer writes, the lease is lost and regained.
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['MINE']); await w.firePush();
+    for (let i = 0; i < 3; i++) await tick(w);                         // 4 failures: the ladder is on
+    w.putMode = null;
+    w.server = clone(PEERZ);
+    await w.api.pullState(false); await flush();
+    w.api.teardown(); await w.rebuild();
+    w.perf += 60000; await tick(w); await tick(w);
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+        'Z2 a late retry parked across a lease loss still uses its original base and yields (S6)');
+    // Z3: a Q2 retry IN FLIGHT at the teardown is parked with that PUT's base.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'throw'; w.edit(['MINE']); await w.firePush(); w.putMode = null;
+    w.server = clone(PEERZ);
+    await w.api.pullState(false); await flush();
+    w.putMode = '500'; w.holdPut = true; w.api.savePrefs(); await w.firePush();   // the retry, held
+    w.holdPut = false;
+    w.api.teardown();
+    await w.release(); await flush(); w.putMode = null;
+    await w.rebuild(); await w.firePush(); await flush();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+        'Z3 a Q2 retry in flight at the teardown is parked with its base 1 and yields on regain');
+    // Z3b: a parked edit whose flush failed, parked AGAIN by a second
+    // teardown, keeps its first teardown-time base (not the rev of the moment).
+    w = mkWorld(); await w.boot();
+    w.edit(['MINE']); w.api.teardown();                                // parked on base 1
+    w.server = clone(PEERZ);                                           // a peer writes meanwhile
+    w.putMode = '500'; await w.rebuild(); w.putMode = null;            // flush fails; the pull takes rev 2
+    w.api.teardown(); await w.rebuild(); await w.firePush(); await flush();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
+        'Z3b a parked edit parked again keeps its first base and yields to the peer');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -824,6 +867,16 @@ def test_247_codex_rollback_rebases_without_a_loop(run):
     hits = [k for k, v in run["results"].items()
             if k.startswith("F13 a rollback showing our parent at a lower rev rebases onto it")]
     assert len(hits) == 1 and run["results"][hits[0]] is True, run["stdout"]
+
+
+@pytest.mark.parametrize("label", [
+    "Z1 a thrown failure parked across a lease loss still retries on its original base and yields (Q2)",
+    "Z2 a late retry parked across a lease loss still uses its original base and yields (S6)",
+    "Z3 a Q2 retry in flight at the teardown is parked with its base 1 and yields on regain",
+    "Z3b a parked edit parked again keeps its first base and yields to the peer",
+])
+def test_247_z1_park_keeps_the_original_base(run, label):
+    _ok(run, label)
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):
