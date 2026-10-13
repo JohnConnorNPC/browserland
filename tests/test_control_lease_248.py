@@ -235,3 +235,62 @@ def test_a_stalled_pong_send_closes_the_socket_1012(tmp_path, monkeypatch):
         assert loop.time() - t0 < 1.5
         await c.close_all()
     asyncio.run(go())
+
+
+# ---- atom 3: become_active from the current holder is idempotent ----------
+
+def _record_4409s(app):
+    calls = []
+
+    async def fake(client_id, code):
+        calls.append((client_id, code))
+    app.ctx.registry.close_clients_terminals = fake
+    return calls
+
+
+def test_holder_become_active_twice_changes_nothing(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a1 = await c.connect("A")
+        a2 = await c.connect("A")           # the holder's second socket
+        b = await c.connect("B")
+        cuts = _record_4409s(app)
+        g = c.ctx.lease_generation
+        before = {id(w): len(w.sent) for w in (a1, a2, b)}
+        for _ in range(2):
+            a1.push({"type": "become_active"})
+            await _settle()
+        assert c.ctx.lease_generation == g
+        assert c.ctx.active_client_id == "A"
+        assert cuts == []
+        # One status per request, to the requesting socket only.
+        assert a1.sent[before[id(a1)]:] == [
+            {"type": "status", "active": True, "activeClientId": "A",
+             "gen": g, "bootId": c.ctx.boot_id}] * 2
+        assert len(a2.sent) == before[id(a2)]
+        assert len(b.sent) == before[id(b)]
+        await c.close_all()
+    asyncio.run(go())
+
+
+def test_non_holder_become_active_still_flips(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.connect("A")
+        b = await c.connect("B")
+        cuts = _record_4409s(app)
+        g = c.ctx.lease_generation
+        b.push({"type": "become_active"})
+        await _settle()
+        assert c.ctx.lease_generation == g + 1
+        assert c.ctx.active_client_id == "B"
+        assert cuts == [("A", 4409)]
+        assert _statuses(a)[-1]["active"] is False
+        assert _statuses(a)[-1]["activeClientId"] == "B"
+        assert _statuses(b)[-1]["active"] is True
+        await c.close_all()
+    asyncio.run(go())

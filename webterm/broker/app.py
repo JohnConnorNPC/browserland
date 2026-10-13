@@ -4937,16 +4937,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # ---- become_active: flip the lease, then (OUTSIDE the lock)
                 # cut every other client loose and broadcast live status.
                 async with ctx.lease_lock:
-                    ctx.active_client_id = client_id
-                    # #244: the holder changed -- a new generation; pending
-                    # calls to any older one fail INSIDE the lock, before the
-                    # broadcast awaits can interleave a late answer.
-                    ctx.lease_generation += 1
-                    _fail_superseded_desktop_rpcs(ctx.lease_generation)
-                    losers = {cid: list(socks)
-                              for cid, socks in ctx.control_clients.items()
-                              if cid != client_id}
-                    winners = list(ctx.control_clients.get(client_id, ()))
+                    # #248 A7: a repeat from the CURRENT holder (a late or
+                    # doubled click) changes nothing: no generation bump (it
+                    # would fail in-flight #244 desktop RPCs as lost_lease),
+                    # no 4409s, no fan-out -- only its own socket is told.
+                    repeat = ctx.active_client_id == client_id
+                    if not repeat:
+                        ctx.active_client_id = client_id
+                        # #244: the holder changed -- a new generation;
+                        # pending calls to any older one fail INSIDE the
+                        # lock, before the broadcast awaits can interleave a
+                        # late answer.
+                        ctx.lease_generation += 1
+                        _fail_superseded_desktop_rpcs(ctx.lease_generation)
+                        losers = {cid: list(socks)
+                                  for cid, socks in ctx.control_clients.items()
+                                  if cid != client_id}
+                        winners = list(ctx.control_clients.get(client_id, ()))
+                if repeat:
+                    await _send(ws, client_id)
+                    continue
                 for cid in losers:
                     await ctx.registry.close_clients_terminals(cid, 4409)
                 for cid, socks in losers.items():
