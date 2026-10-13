@@ -4882,11 +4882,24 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # instead of leaving a client stuck on a stale owner. Every lease
             # transition re-notifies all affected sockets, so the final resting
             # status on each socket is always the truth.
+            #
+            # #248 S7: bounded like _push_terminal_control -- a socket that
+            # cannot take its status within CONTROL_SEND_TIMEOUT is closed
+            # 1012 so the page re-dials (any code but 4401) and reads a fresh
+            # status, instead of staying registered with a missed one.
             try:
-                await sock.send(protocol.control_status_frame(
-                    *_lease_view(owner_id)))
+                await asyncio.wait_for(sock.send(protocol.control_status_frame(
+                    *_lease_view(owner_id))), CONTROL_SEND_TIMEOUT)
             except Exception as exc:
-                LOGGER.debug("control send failed: %s", exc)
+                LOGGER.debug("control send failed: %r", exc)
+                ctx.registry.close_soon(sock, 1012, "control status timed out")
+
+        async def _send_all(groups):
+            # Every socket's status at once ({clientId: [sockets]}), so one
+            # stalled peer delays nobody else's.
+            await asyncio.gather(*(_send(sock, cid)
+                                   for cid, socks in groups.items()
+                                   for sock in socks))
 
         async def _pong(sock, data):
             # #248 A1': answer an app ping on the socket that sent it, with
@@ -4957,13 +4970,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if repeat:
                     await _send(ws, client_id)
                     continue
+                # #248 S7: the statuses go first, all at once: cutting the
+                # losers' terminals awaits each close unbounded, and must not
+                # hold back any page's status. Their input is already gated
+                # on the flipped lease (relay._may_drive).
+                await _send_all({**losers, client_id: winners})
                 for cid in losers:
                     await ctx.registry.close_clients_terminals(cid, 4409)
-                for cid, socks in losers.items():
-                    for lws in socks:
-                        await _send(lws, cid)
-                for wws in winners:
-                    await _send(wws, client_id)
         except Exception as exc:
             LOGGER.info("control session ended: %s", exc)
         finally:
@@ -4988,9 +5001,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                  for cid, s in ctx.control_clients.items()}
                 else:
                     remaining = {}
-            for cid, socks in remaining.items():
-                for rws in socks:
-                    await _send(rws, cid)
+            await _send_all(remaining)
 
     async def _producer_ws(request: Request, ws: Websocket):
         # Producers need the token too (#142). Loopback used to be exempt here

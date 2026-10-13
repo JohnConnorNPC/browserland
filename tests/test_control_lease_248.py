@@ -156,7 +156,7 @@ def test_status_names_the_live_generation_and_boot(tmp_path, monkeypatch):
 import websockets  # noqa: E402
 
 from tests.test_terminal_control import (  # noqa: E402,F401
-    TOKEN, _lease, _until, broker)
+    TOKEN, FakeWS, _hello, _lease, _until, broker)
 
 
 async def _ctl(port, client_id):
@@ -292,5 +292,79 @@ def test_non_holder_become_active_still_flips(tmp_path, monkeypatch):
         assert _statuses(a)[-1]["active"] is False
         assert _statuses(a)[-1]["activeClientId"] == "B"
         assert _statuses(b)[-1]["active"] is True
+        await c.close_all()
+    asyncio.run(go())
+
+
+# ---- atom 4 (S7): every status send is bounded; one stall delays nobody ---
+
+async def _wait(pred, timeout=3.0):
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    while not pred():
+        if loop.time() - t0 > timeout:
+            return None
+        await asyncio.sleep(0.01)
+    return loop.time() - t0
+
+
+async def _stalled_loser(c, client_id):
+    """A connected socket that takes its first status, then stalls."""
+    gate = asyncio.Event()
+    gate.set()
+    ws = await c.connect(client_id, stall=gate)
+    gate.clear()
+    return ws
+
+
+class _HangingClose(FakeWS):
+    """A terminal /ws whose close never completes."""
+
+    async def close(self, code=1000, reason=""):
+        await asyncio.Event().wait()
+
+
+def test_a_stalled_loser_does_not_delay_the_takeover_statuses(
+        tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        await c.connect("A")                      # the holder
+        # The holder's attached terminal: cutting it (4409) hangs, which must
+        # not hold back any page's status either.
+        entry = await app.ctx.registry.register(FakeWS(), _hello(248001))
+        entry.add_subscriber(_HangingClose(), "A")
+        stalled = await _stalled_loser(c, "L")    # ahead of H in dict order
+        h = await c.connect("H")
+        w = await c.connect("W")
+        nh, nw = len(h.sent), len(w.sent)
+        w.push({"type": "become_active"})
+        # Faster than ONE send timeout: the others are not queued behind it.
+        dt = await _wait(lambda: len(h.sent) > nh and len(w.sent) > nw)
+        assert dt is not None and dt < 0.3, dt
+        assert h.sent[-1]["activeClientId"] == "W"
+        assert w.sent[-1]["active"] is True
+        # The stalled one is dropped so its page re-dials for a fresh status.
+        assert await _wait(lambda: stalled.closed == 1012) is not None
+        await c.close_all()
+    asyncio.run(go())
+
+
+def test_a_stalled_peer_does_not_delay_the_release_statuses(
+        tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.connect("A")                  # the holder
+        stalled = await _stalled_loser(c, "L")
+        h = await c.connect("H")
+        nh = len(h.sent)
+        a.hang_up()                               # release on disconnect
+        dt = await _wait(lambda: len(h.sent) > nh)
+        assert dt is not None and dt < 0.3, dt
+        assert h.sent[-1]["activeClientId"] is None
+        assert await _wait(lambda: stalled.closed == 1012) is not None
         await c.close_all()
     asyncio.run(go())
