@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 26
+EXPECTED_ASSERTS = 37
 
 _HARNESS = r"""
 'use strict';
@@ -147,6 +147,12 @@ function mkWorld() {
         await flush();
     };
     w.boot = async function () { await w.api.pullState(true); w.api.setReady(true); };
+    // 84 rebuildView's order: flush the parked edit, then the initial pull.
+    w.rebuild = async function () {
+        w.api.rebuildStart();
+        await w.api.flushOwed(); await w.api.pullState(true); await flush();
+    };
+    w.putsLog = () => w.log.filter(x => x.indexOf('PUT@') === 0);
     w.cols = () => J(w.prefs._layout && w.prefs._layout.cols);
     w.srv = () => J(w.server.layout.cols);
     w.edit = function (cols) {
@@ -340,6 +346,91 @@ function mkWorld() {
     await w.api.pullState(true); await flush();
     ok(w.cols() === J(['A']) && w.api.rev() === 1, 'P4 an inactive page still adopts its load pull');
 
+    // ---- 247-3: park, flush, M3, R1 ---------------------------------------
+    // D1: resetLocalView (teardown + rebuild in one tick) keeps a debounced edit.
+    w = mkWorld(); await w.boot();
+    w.edit(['D']); w.api.teardown(); await w.rebuild(); await w.firePush();
+    ok(w.srv() === J(['D']) && w.cols() === J(['D']) && J(w.putsLog()) === J(['PUT@1:["D"]']),
+        'D1 an edit in its debounce at a reset lands (one PUT, its old base)');
+    // D2: a lease loss, nobody writes, the lease comes back.
+    w = mkWorld(); await w.boot();
+    w.edit(['D2']); w.api.teardown();
+    await w.api.pullState(false); await flush();                       // polls are stopped / skipped
+    await w.rebuild();
+    ok(w.srv() === J(['D2']), 'D2 a parked edit is saved when this page takes the lease back (Q1)');
+    // D3: someone wrote meanwhile -> the flush yields, nothing is clobbered.
+    w = mkWorld(); await w.boot();
+    w.edit(['MINE']); w.api.teardown();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    await w.rebuild(); await w.firePush();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && J(w.putsLog()) === J(['PUT@1:["MINE"]']),
+        'D3 a peer wrote meanwhile: the parked edit 409s on its old base and yields');
+    // D3b (codex r2 #5): the flush fails (5xx), the M3 pull takes the peer's rev,
+    // and the retry must still use the teardown-time base -> it yields, never clobbers.
+    w = mkWorld(); await w.boot();
+    w.edit(['MINE']); w.api.teardown();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    w.api.rebuildStart();
+    w.putMode = '500'; await w.api.flushOwed(); w.putMode = null;
+    await w.api.pullState(true); await flush();
+    for (let i = 0; i < 3; i++) { await w.api.pullState(false); await flush(); await w.firePush(); }
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']),
+        'D3b a parked edit retried after a failed flush keeps its teardown-time base and yields');
+    // D4: a PUT in flight at the teardown + a newer edit in its debounce.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['P1']); await w.firePush(); w.holdPut = false;
+    w.edit(['P2']); w.api.teardown();
+    const d4 = w.rebuild(); await flush(); await w.release(); await d4; await w.release();
+    ok(w.srv() === J(['P2']) && J(w.putsLog()) === J(['PUT@1:["P1"]', 'PUT@2:["P2"]']),
+        'D4 an in-flight PUT and a newer debounced edit both land, in order');
+    // D4b (M1): the newer edit QUEUED behind the in-flight PUT (its debounce fired).
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['P1']); await w.firePush();
+    w.edit(['P2']); await w.firePush(); w.holdPut = false;             // _statePushAgain
+    w.api.teardown();
+    const d4b = w.rebuild(); await flush(); await w.release(); await d4b; await w.release();
+    ok(w.srv() === J(['P2']) && J(w.putsLog()) === J(['PUT@1:["P1"]', 'PUT@2:["P2"]']),
+        'D4b an edit queued behind an in-flight PUT is parked and lands after it (M1)');
+    // D5: nothing pending -> the rebuild sends nothing.
+    w = mkWorld(); await w.boot();
+    w.api.teardown(); await w.rebuild();
+    ok(w.puts.length === 0, 'D5 a rebuild with nothing owed sends no PUT');
+    // D6 (M3): the flush's own PUT stalls past the deadline -> the pull keeps the edit.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'hangBody'; w.edit(['P1']); await w.firePush(); w.putMode = null;
+    w.edit(['P2']); w.api.teardown();
+    w.api.rebuildStart();
+    w.holdPut = true;
+    const fo6 = w.api.flushOwed(); await flush();
+    await w.fireDeadlines(); await flush(); await w.fireDeadlines();
+    await fo6; await w.api.pullState(true); await flush();
+    ok(w.cols() === J(['P2']) && w.log.indexOf('ADOPT:["P1"]') === -1,
+        'D6 a flush that did not get out: the initial pull keeps the parked edit (M3)');
+    w.holdPut = false; await w.release();
+    // D7 (R1a): the in-flight PUT is refused not_active AT the lease loss.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '409notactive'; w.edit(['P1']); await w.firePush();
+    w.holdPut = false; w.putMode = null;
+    w.api.teardown();
+    await w.release();                                                 // its 409 arrives torn down
+    await w.rebuild();
+    ok(w.srv() === J(['P1']) && w.cols() === J(['P1']), 'D7 an in-flight PUT refused not_active at the lease loss is pushed on regain (R1)');
+    // D7b: the same, but the new holder wrote meanwhile -> yield.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '409notactive'; w.edit(['P1']); await w.firePush();
+    w.holdPut = false; w.putMode = null;
+    w.api.teardown(); await w.release();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    await w.rebuild();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']), 'D7b ...and yields when someone wrote meanwhile');
+    // D8 (R1b): the in-flight PUT gets a 500 after the teardown.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '500'; w.edit(['P1']); await w.firePush();
+    w.holdPut = false;
+    w.api.teardown(); await w.release(); w.putMode = null;
+    await w.rebuild();
+    ok(w.srv() === J(['P1']), 'D8 an in-flight PUT that fails with a 500 after the teardown stays owed and lands on regain (R1)');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -432,6 +523,38 @@ def test_247_6_deadline_and_epoch_gates(run, label):
 ])
 def test_247_2_pull_epoch_gate(run, label):
     _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "D1 an edit in its debounce at a reset lands (one PUT, its old base)",
+    "D2 a parked edit is saved when this page takes the lease back (Q1)",
+    "D3 a peer wrote meanwhile: the parked edit 409s on its old base and yields",
+    "D3b a parked edit retried after a failed flush keeps its teardown-time base and yields",
+    "D4 an in-flight PUT and a newer debounced edit both land, in order",
+    "D4b an edit queued behind an in-flight PUT is parked and lands after it (M1)",
+    "D5 a rebuild with nothing owed sends no PUT",
+    "D6 a flush that did not get out: the initial pull keeps the parked edit (M3)",
+    "D7 an in-flight PUT refused not_active at the lease loss is pushed on regain (R1)",
+    "D7b ...and yields when someone wrote meanwhile",
+    "D8 an in-flight PUT that fails with a 500 after the teardown stays owed and lands on regain (R1)",
+])
+def test_247_3_park_flush(run, label):
+    _ok(run, label)
+
+
+def test_247_3_84_wiring():
+    """84 drives the 52 helpers the harness models: teardownView parks instead
+    of clearing the debounce timer, and rebuildView flushes the parked edit
+    BEFORE its initial pull, with the epoch re-checked across the flush."""
+    src = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    td = src[src.index("        function teardownView() {"):src.index("        async function rebuildView() {")]
+    assert "_stateParkPendingPush();" in td
+    assert "clearTimeout(_statePushTimer)" not in td
+    rb = src[src.index("        async function rebuildView() {"):src.index("        function onRemoteControlStatus(")]
+    flush = rb.index("try { await _stateFlushOwed(); } catch (_) {}")
+    regate = rb.index("if (_deactivated || epoch !== _viewEpoch) return;", flush)
+    pull = rb.index("try { await pullState(true); } catch (_) {}")
+    assert flush < regate < pull
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):

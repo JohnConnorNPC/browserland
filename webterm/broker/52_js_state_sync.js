@@ -54,6 +54,20 @@
         let _stateEditBytes = null;
         let _stateSentGen = 0;
         let _stateFail = null;
+        // #247 item 3: a teardown (a lease loss, or resetLocalView) PARKS the
+        // owed edit instead of dropping it -- one in its debounce, one queued
+        // behind an in-flight PUT, and (R1) the one IN FLIGHT -- with the base
+        // it had then. The next view pushes it on that base before its initial
+        // pull (_stateFlushOwed), so it lands only if nobody wrote meanwhile
+        // and yields otherwise (owner, Q1); until it has gone out, the initial
+        // pull never adopts over it (M3).
+        let _stateParked = false;
+        let _stateParkGen = 0;
+        let _stateParkBase = null;
+        // ---- #247 owner switches (one line each) ----------------------------
+        // Q1: a parked edit is pushed when this page takes the lease back.
+        // false = it is dropped at the rebuild instead.
+        const STATE_PUSH_PARKED_ON_REGAIN = true;
         // #246 review: a rev was taken WITHOUT adopting its state (a pull
         // skipped for a pending push, or a 409 kept the local edit). If that
         // push then sends nothing (the edit undone inside the debounce, a
@@ -88,10 +102,20 @@
             _stateSentGen = _stateEditGen;
             _stateEditBytes = _stateSerialize();
             _stateFail = null;
+            _stateParked = false;
         }
         // What one sent gen settles: its failure record (an older one too).
         function _stateSettleSent(gen) {
             if (_stateFail && _stateFail.gen <= gen) _stateFail = null;
+            if (_stateParked && gen >= _stateParkGen) _stateParked = false;
+        }
+        // R1: a parked gen whose PUT FAILED in the old view (its 409 not_active
+        // at the lease loss, a 5xx, a throw, the deadline) stays owed -- it is
+        // unsent again, and the next view's flush carries it.
+        function _stateParkedFailure(gen) {
+            if (_stateParked && gen <= _stateParkGen && _stateSentGen >= gen) {
+                _stateSentGen = gen - 1;
+            }
         }
         // A failure of `gen`; a newer edit starts a fresh record.
         function _stateFailed(gen, baseRev, thrown) {
@@ -191,7 +215,10 @@
                 mine = new Promise(r => { release = r; });
                 _stateChannel = mine;
                 _stateSentGen = gen;
-                const baseRev = _stateRev;
+                let baseRev = _stateRev;
+                if (_stateParked && _stateParkGen === gen && _stateParkBase !== null) {
+                    baseRev = _stateParkBase;     // Q1: its teardown-time base
+                }
                 let out = null;
                 const ctrl = new AbortController();
                 try {
@@ -225,6 +252,7 @@
                     // already holds it; retry. (The PUT may still have landed:
                     // pullState acknowledges that.)
                     if (epoch === _viewEpoch) _stateFailed(gen, baseRev, true);
+                    else _stateParkedFailure(gen);
                     return;
                 }
                 if (out.status === 409) {
@@ -249,7 +277,10 @@
                     // re-renders into the overlay the teardown just put up or
                     // into a view that has adopted since. (The probe above runs
                     // first: probing after a teardown is harmless.)
-                    if (_deactivated || epoch !== _viewEpoch) return;
+                    if (_deactivated || epoch !== _viewEpoch) {
+                        _stateParkedFailure(gen);
+                        return;
+                    }
                     if (_stateBodyOk(cur)) {
                         _stateRev = cur.rev;
                         if (!_statePushAgain && _stateSerialize() === serialized) {
@@ -268,6 +299,7 @@
                         // may or may not have landed, so it is still owed (the
                         // next pull acknowledges it if it did).
                         if (epoch === _viewEpoch) _stateFailed(gen, baseRev, true);
+                        else _stateParkedFailure(gen);
                         return;
                     }
                     // Our write landed. That fact holds across a teardown (the
@@ -275,6 +307,13 @@
                     // guarantees no newer response has been processed since.
                     _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
+                    // A parked edit built on top of this write moves its base
+                    // up to it: it must not 409 against our own landed PUT.
+                    // (A peer write after it still makes the flush 409.)
+                    if (_stateParked && gen < _stateParkGen && _stateParkBase !== null
+                            && _stateParkBase < resp.rev) {
+                        _stateParkBase = resp.rev;
+                    }
                     _stateSettleSent(gen);
                     _stateRevSkipped = false;
                 } else if (out.status === 400 || out.status === 413) {
@@ -286,6 +325,8 @@
                     // the existing /sessions auth flow handles login, next
                     // save retries.
                     _stateFailed(gen, baseRev, false);
+                } else {
+                    _stateParkedFailure(gen);
                 }
             } finally {
                 _statePushInFlight = false;
@@ -428,7 +469,11 @@
             // render made). Skipping then is permanent: the rev was just
             // taken, so no later pull retries, and the next unrelated save
             // pushes this stale layout over the newer one. Adopt instead.
-            if (!initial && _statePushPending()
+            // #247 M3: an INITIAL pull does not adopt over an edit a teardown
+            // parked that has still not gone out (the flush failed or timed
+            // out): take the rev, keep local, and the retry carries it.
+            if (((!initial && _statePushPending())
+                    || (initial && _stateParked && _stateOwed()))
                 && _stateSerialize() !== _stateLastSerialized) {
                 _stateRevSkipped = true;         // reconsidered by later polls
                 _retryOwedPush();
@@ -453,6 +498,32 @@
         // already cleared it at the top of pullState.
         function _retryOwedPush() {
             if (_stateOwed() && !_statePushQueued()) schedulePush();
+        }
+        // #247 item 3: called by 84 teardownView in place of clearing the
+        // debounce timer. Drops only the WAKE-UPS; the edit itself is the
+        // mutation record, which stays owed. R1: an edit whose PUT is in
+        // flight right now is parked too (its failure in the old view then
+        // keeps it owed, _stateParkedFailure).
+        function _stateParkPendingPush() {
+            if (_statePushTimer) { clearTimeout(_statePushTimer); _statePushTimer = null; }
+            _statePushAgain = false;
+            _statePendingPush = false;
+            _stateParked = (_stateOwed() || _statePushInFlight)
+                && _stateSerialize() !== _stateLastSerialized;
+            if (_stateParked) { _stateParkGen = _stateEditGen; _stateParkBase = _stateRev; }
+        }
+        // #247 item 3: called by 84 rebuildView BEFORE its initial pull. Let
+        // the channel drain (an old PUT settles; bounded by the deadline),
+        // then push what is parked. Returns whether it is STILL unsent (the
+        // initial pull then keeps local, M3). A rebuild therefore waits up to
+        // one deadline plus one PUT.
+        async function _stateFlushOwed() {
+            do { await _stateWaitChannel(); } while (_stateChannel);
+            if (!_stateParked) return false;
+            if (!STATE_PUSH_PARKED_ON_REGAIN) { _stateSettleAll(); return false; }
+            if (!_stateOwed()) { _stateParked = false; return false; }
+            try { await pushState(); } catch (_) {}
+            return _stateParked && _stateOwed();
         }
         // The same minus the failed-push debt: something will send by itself.
         function _statePushQueued() {
