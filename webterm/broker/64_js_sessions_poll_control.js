@@ -634,6 +634,9 @@
                 // auth-form success path re-dials this control WS). Do NOT
                 // hammer-reconnect a broker that needs a password.
                 pollStateFor(rec.hostId).authNeeded = true;
+                // The auth overlay owns this state: a lost-contact count
+                // armed by an earlier missed pong must not fire beside it.
+                if (rec.hostId === homeHostId()) _clearLostContact();
                 try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
                 try { renderHostStatus(); } catch (_) {}
                 return;
@@ -690,6 +693,9 @@
                 // (A home status in between cleared this timer.)
                 const rec = controlSockets.get(homeHostId());
                 if (!rec || rec.closedByUs) return;
+                // Waiting on a password (a 401/4401 anywhere for this host):
+                // the auth overlay already says so.
+                if (pollStateFor(rec.hostId).authNeeded) return;
                 showNotice(LOST_CONTACT_NOTICE, { sticky: true, type: 'error' });
             }, CONTROL_LOST_NOTICE_MS);
         }

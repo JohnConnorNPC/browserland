@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 82
+EXPECTED_ASSERTS = 85
 
 _HARNESS = r"""
 'use strict';
@@ -662,6 +662,30 @@ s0._drop(1012);
 ok(w.rec().reattachTimer === null && w.sockets.length === 3,
     'Q5 the 1012 stability test reads the closing socket, not a replacement that just opened');
 
+// ---- w1-4 SH-3: the lost-contact notice never sits beside the auth overlay ----
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the 10 s count
+s0._drop(4401);                          // then the token is refused
+w.advance(10000);
+ok(lostUp(w) === 0 && w.log.indexOf('auth') !== -1,
+    'SH3a miss -> 4401 -> +10 s: the auth overlay, no lost-contact notice');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the count
+w.poll = { authNeeded: true };           // a 401 elsewhere (the /sessions poll)
+w.advance(10000);
+ok(lostUp(w) === 0, 'SH3b an armed count skips while the host is waiting on a password');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the count
+s0._drop(4401);
+w.poll.authNeeded = false;               // the user logs in before the re-dial reports
+w.advance(10000);
+ok(lostUp(w) === 0, 'SH3c the 4401 itself cancels the armed count');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -847,6 +871,15 @@ def test_manager_note_1012_and_pong_order(run, label):
     "Q5 the 1012 stability test reads the closing socket, not a replacement that just opened",
 ])
 def test_codex_round2(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "SH3a miss -> 4401 -> +10 s: the auth overlay, no lost-contact notice",
+    "SH3b an armed count skips while the host is waiting on a password",
+    "SH3c the 4401 itself cancels the armed count",
+])
+def test_w14_sh3_no_notice_beside_auth(run, label):
     _ok(run, label)
 
 
