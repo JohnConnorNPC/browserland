@@ -340,6 +340,9 @@
         const CONTROL_PONG_TIMEOUT_MS = 10000;
         const CONTROL_CONNECT_TIMEOUT_MS = 5000;
         let _controlPingSeq = 0;
+        // ws -> its per-socket state, kept after the socket is retired so a
+        // late desktop_result can still tell which broker run delivered it.
+        const _ctlSockState = new WeakMap();
         function homeHostId() { return (localHost() || {}).id || 'local'; }
 
         function openControlWs(host) {
@@ -384,10 +387,11 @@
                 rec: rec, ws: ws, role: role, done: false,
                 pingTimer: null, deadlineTimer: null, connectTimer: null,
                 pendN: null, lastN: 0, missed: 0, capable: false, statusSeen: false,
-                openedAt: 0,
+                openedAt: 0, bootId: null,
             };
             if (role === 'cur') { rec.cur = st; rec.ws = ws; }
             else rec.cand = st;
+            _ctlSockState.set(ws, st);
             // The watchdog covers the first STATUS, not just the upgrade: a
             // socket that opened but never reports (a broker or proxy that
             // accepted the upgrade and then went silent) would otherwise sit
@@ -431,10 +435,12 @@
                 // #244: an MCP desktop op relayed by this broker to us, the
                 // lease holder. Fire-and-forget: handleDesktopRpc owns its
                 // own errors and always answers (or errors into) exactly one
-                // desktop_result frame per rid. desktopReply answers only
-                // while this socket is rec.ws: a replacement's first frame is
-                // its status (promoting it) and a retired socket handles
-                // nothing, so every socket that can deliver an rpc is rec.ws.
+                // desktop_result frame per rid. Every socket that can DELIVER
+                // an rpc is rec.ws (a replacement's first frame is its status,
+                // which promotes it; a retired socket handles nothing). An op
+                // that is still running when its socket is promoted away is
+                // answered on the new rec.ws if it talks to the same broker run
+                // (desktopReply -> _desktopReplySocket, #248 SH-1).
                 if (msg.type === 'desktop_rpc') {
                     Promise.resolve(handleDesktopRpc(hid, rec, ws, msg))
                         .catch(function () {});
@@ -531,6 +537,10 @@
             const rec = st.rec;
             if (!st.statusSeen) {
                 st.statusSeen = true;
+                // The broker run this socket talks to (#248 SH-1): fixed for
+                // the socket's life, so it still names where an rpc came from
+                // after the socket is promoted away.
+                st.bootId = typeof msg.bootId === 'string' ? msg.bootId : null;
                 if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 // Capability from the FIRST status, per socket: a broker that
                 // stamps gen + bootId answers pings.
@@ -559,6 +569,24 @@
             onControlStatus(rec.hostId, msg);
             _settleWantActive(rec, msg);
             _noteLeaseHolding(rec.hostId, msg);
+        }
+
+        // #248 SH-1: where a desktop_result goes when the socket that
+        // delivered its rpc was promoted away while the op ran (it awaits
+        // pushState). The broker accepts a result from ANY socket of this
+        // clientId and lease generation, so the socket now in charge carries
+        // it -- but only when it talks to the SAME broker run (bootId) as the
+        // delivering socket: another run numbers rids from 1 again, and its
+        // rid N is a different call. Anything else: null (dropped, as before).
+        function _desktopReplySocket(rec, ws) {
+            if (!rec || !ws) return null;
+            if (rec.ws === ws) return ws;
+            const from = _ctlSockState.get(ws);
+            const cur = rec.cur;
+            if (!from || !cur || cur.done || !cur.ws || cur.ws !== rec.ws) return null;
+            if (cur.ws.readyState !== WebSocket.OPEN) return null;
+            if (typeof from.bootId !== 'string' || from.bootId !== cur.bootId) return null;
+            return cur.ws;
         }
 
         // #248 C1: the holder owns the PTY size (owner O1), so a NEW holding
@@ -618,6 +646,26 @@
         function _controlSocketGone(st, ev) {
             if (st.done) return;
             const rec = st.rec;
+            if (ev && ev.code === 4401) {
+                // Token rejected -- for the HOST, whichever socket heard it
+                // (a replacement's 4401 used to take the "failed candidate"
+                // path and wait 10-20 s for the old socket to time out).
+                // Retire both and defer to the existing auth flow (the
+                // auth-form success path re-dials this control WS). Do NOT
+                // hammer-reconnect a broker that needs a password.
+                _retireControlSocket(st);
+                if (rec.cur) _retireControlSocket(rec.cur);
+                if (rec.cand) _retireControlSocket(rec.cand);
+                rec.cur = rec.cand = null;
+                rec.ws = null;
+                pollStateFor(rec.hostId).authNeeded = true;
+                // The auth overlay owns this state: a lost-contact count
+                // armed by an earlier missed pong must not fire beside it.
+                if (rec.hostId === homeHostId()) _clearLostContact();
+                try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
+                try { renderHostStatus(); } catch (_) {}
+                return;
+            }
             const wasCur = rec.cur === st;
             _retireControlSocket(st);
             if (!wasCur) {
@@ -628,16 +676,6 @@
             }
             rec.cur = null;
             rec.ws = null;
-            if (ev && ev.code === 4401) {
-                if (rec.cand) { _retireControlSocket(rec.cand); rec.cand = null; }
-                // Token rejected — defer to the existing auth flow (the
-                // auth-form success path re-dials this control WS). Do NOT
-                // hammer-reconnect a broker that needs a password.
-                pollStateFor(rec.hostId).authNeeded = true;
-                try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
-                try { renderHostStatus(); } catch (_) {}
-                return;
-            }
             if (rec.closedByUs) return;          // closeControlWs / host removed
             if (rec.hostId === homeHostId() && rec.lastOpenAt) _armLostContact();
             // A replacement in flight takes charge when it reports; its own
@@ -690,6 +728,9 @@
                 // (A home status in between cleared this timer.)
                 const rec = controlSockets.get(homeHostId());
                 if (!rec || rec.closedByUs) return;
+                // Waiting on a password (a 401/4401 anywhere for this host):
+                // the auth overlay already says so.
+                if (pollStateFor(rec.hostId).authNeeded) return;
                 showNotice(LOST_CONTACT_NOTICE, { sticky: true, type: 'error' });
             }, CONTROL_LOST_NOTICE_MS);
         }
@@ -989,9 +1030,10 @@
                 _desktopAppliedRids.delete(_desktopAppliedRids.keys().next().value);
             }
         }
-        // The ONE ws.send call site in this fragment (the terminal-funnel
-        // enumeration pins the count): both the control-ping keepalive and
-        // every desktop_result reply ride it.
+        // One of the TWO /control send sites in this fragment (the
+        // terminal-funnel enumeration pins each count: `ws.send` here and
+        // `rec.ws.send` in sendBecomeActive). Every nonce'd ping and every
+        // desktop_result reply ride this one; become_active is the other.
         function desktopWsSend(ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
         }
@@ -999,10 +1041,17 @@
             try { return _deactivated === true; } catch (_) { return false; }
         }
         function desktopReply(rec, ws, rid, payload) {
-            // Socket identity: a reply must never ride a socket the rec has
-            // already replaced (openControlWs reuses recs across reconnects).
-            if (!rec || rec.ws !== ws) return;
-            desktopWsSend(ws, Object.assign(
+            // Socket identity: a reply rides the socket that delivered the
+            // rpc while it is still rec.ws. If a replacement took over while
+            // the op ran (#248 SH-1), _desktopReplySocket hands back the new
+            // socket when it talks to the same broker run; otherwise the
+            // reply is dropped, as it always was for a replaced socket.
+            let out = (rec && rec.ws === ws) ? ws : null;
+            if (!out && typeof _desktopReplySocket === 'function') {
+                out = _desktopReplySocket(rec, ws);
+            }
+            if (!out) return;
+            desktopWsSend(out, Object.assign(
                 { type: 'desktop_result', rid: rid }, payload));
         }
         // Broker-local int id (the DELIVERING connection's namespace) ->

@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 82
+EXPECTED_ASSERTS = 93
 
 _HARNESS = r"""
 'use strict';
@@ -48,6 +48,11 @@ const src = fs.readFileSync(__SRC_PATH__, 'utf8');
 const a = src.indexOf(__START__), b = src.indexOf(__END__);
 if (a < 0 || b < a) throw new Error('section markers missing');
 const slice = src.slice(a, b);
+// #248 SH-1: the reply funnel lives in the desktop-relay section; cut just it.
+const ra = src.indexOf('        function desktopReply(rec, ws, rid, payload) {');
+const rb = src.indexOf('        // Broker-local int id (the DELIVERING connection');
+if (ra < 0 || rb < ra) throw new Error('desktopReply boundary missing');
+const replySrc = src.slice(ra, rb);
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -67,6 +72,7 @@ function mkWorld(opts) {
             this.closed = false; w.sockets.push(this);
         }
         send(t) {
+            this.attempts = (this.attempts || 0) + 1;
             if (this.readyState !== 1) throw new Error('not open');
             this.sent.push(JSON.parse(t));
         }
@@ -120,7 +126,7 @@ function mkWorld(opts) {
         controlKey: function (h, s) { return h + ':' + s; },
         applyControlView: function (k, m, src) { w.views.push(k + '/' + src); },
         handleDesktopRpc: function (hid, rec, ws, msg) {
-            w.rpcs.push({ hid: hid, rid: msg.rid, live: rec.ws === ws });
+            w.rpcs.push({ hid: hid, rid: msg.rid, live: rec.ws === ws, rec: rec, ws: ws });
         },
         desktopWsSend: function (ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
@@ -160,10 +166,11 @@ function mkWorld(opts) {
     if (opts.env) Object.assign(env, opts.env);
     w.env = env;
     const factory = new Function('env',
-        'with (env) {\n' + slice + '\n' +
+        'with (env) {\n' + slice + '\n' + replySrc + '\n' +
         'var __api = { openControlWs: openControlWs, closeControlWs: closeControlWs,\n' +
         '  controlSockets: controlSockets, sendBecomeActive: sendBecomeActive,\n' +
-        '  onControlStatus: onControlStatus, probeControl: probeControl };\n' +
+        '  onControlStatus: onControlStatus, probeControl: probeControl,\n' +
+        '  desktopReply: desktopReply };\n' +
         '}\nreturn __api;\n');
     w.api = factory(env);
     w.rec = function (hid) { return w.api.controlSockets.get(hid || 'local'); };
@@ -662,6 +669,81 @@ s0._drop(1012);
 ok(w.rec().reattachTimer === null && w.sockets.length === 3,
     'Q5 the 1012 stability test reads the closing socket, not a replacement that just opened');
 
+// ---- w1-4 SH-3: the lost-contact notice never sits beside the auth overlay ----
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the 10 s count
+s0._drop(4401);                          // then the token is refused
+w.advance(10000);
+ok(lostUp(w) === 0 && w.log.indexOf('auth') !== -1,
+    'SH3a miss -> 4401 -> +10 s: the auth overlay, no lost-contact notice');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the count
+w.poll = { authNeeded: true };           // a 401 elsewhere (the /sessions poll)
+w.advance(10000);
+ok(lostUp(w) === 0, 'SH3b an armed count skips while the host is waiting on a password');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 arms the count
+s0._drop(4401);
+w.poll.authNeeded = false;               // the user logs in before the re-dial reports
+w.advance(10000);
+ok(lostUp(w) === 0, 'SH3c the 4401 itself cancels the armed count');
+
+// ---- w1-4 NIT-7: a replacement's 4401 goes to the auth flow at once --------
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 -> replacement dialing
+s1 = w.last();
+s1._drop(4401);                          // the REPLACEMENT is refused
+ok(w.log.indexOf('auth') !== -1 && w.poll && w.poll.authNeeded === true,
+    'N7a a replacement 4401 shows the auth overlay at once');
+ok(s0.closed && w.rec().ws === null && w.rec().cur === null && w.rec().cand === null
+    && w.rec().reattachTimer === null,
+    'N7b ...retires the old socket too and schedules no re-dial');
+const nAfter = w.sockets.length;
+w.advance(60000);
+ok(w.sockets.length === nAfter, 'N7c ...and nothing re-dials a broker that needs a password');
+
+// ---- w1-4 SH-1: a reply survives a promotion on the same broker run ---------
+const RESULTS = function (ws) { return ws.sent.filter(m => m.type === 'desktop_result'); };
+function promoteMidRpc(bootOfReplacement) {
+    const w = mkWorld();
+    const s0 = connected(w, ST(true, { bootId: 'b1' }));
+    pong(s0, s0.lastPing().n);
+    s0._recv({ type: 'desktop_rpc', rid: 7, op: 'focus', args: {} });   // the op starts
+    const call = w.rpcs[0];
+    w.advance(25000);                    // next ping, unanswered
+    w.advance(10000);                    // miss -> replacement
+    const s1 = w.last(); s1._open(); s1._recv(ST(true, { bootId: bootOfReplacement }));
+    w.api.desktopReply(call.rec, call.ws, 7, { ok: true });          // the op finishes
+    return { w: w, s0: s0, s1: s1 };
+}
+let pm = promoteMidRpc('b1');
+ok(pm.w.rec().ws === pm.s1 && pm.s0.closed, 'R0 precondition: the delivering socket was promoted away mid-rpc');
+ok(RESULTS(pm.s1).length === 1 && RESULTS(pm.s1)[0].rid === 7 && RESULTS(pm.s0).length === 0,
+    'R1 same broker run: the reply goes out on the socket now in charge');
+pm = promoteMidRpc('b2');
+ok(RESULTS(pm.s1).length === 0 && RESULTS(pm.s0).length === 0,
+    'R2 a different broker run (bootId): the reply is dropped');
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._recv({ type: 'desktop_rpc', rid: 9, op: 'get', args: {} });
+w.api.desktopReply(w.rpcs[0].rec, w.rpcs[0].ws, 9, { ok: true });
+ok(RESULTS(s0).length === 1, 'R3 no promotion: the reply rides the delivering socket (unchanged)');
+pm = promoteMidRpc('b1');
+w = pm.w;
+s0 = pm.s0; s1 = pm.s1;
+s1.sent.length = 0;
+s1._drop(1006);                          // the socket in charge is gone too
+const att0 = s0.attempts || 0, att1 = s1.attempts || 0;
+w.api.desktopReply(w.rpcs[0].rec, w.rpcs[0].ws, 7, { ok: true });
+ok(RESULTS(s1).length === 0 && (s0.attempts || 0) === att0 && (s1.attempts || 0) === att1,
+    'R4 no socket in charge: dropped (no send attempted on any socket)');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -850,9 +932,50 @@ def test_codex_round2(run, label):
     _ok(run, label)
 
 
+@pytest.mark.parametrize("label", [
+    "SH3a miss -> 4401 -> +10 s: the auth overlay, no lost-contact notice",
+    "SH3b an armed count skips while the host is waiting on a password",
+    "SH3c the 4401 itself cancels the armed count",
+])
+def test_w14_sh3_no_notice_beside_auth(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "N7a a replacement 4401 shows the auth overlay at once",
+    "N7b ...retires the old socket too and schedules no re-dial",
+    "N7c ...and nothing re-dials a broker that needs a password",
+])
+def test_w14_nit7_replacement_4401(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "R0 precondition: the delivering socket was promoted away mid-rpc",
+    "R1 same broker run: the reply goes out on the socket now in charge",
+    "R2 a different broker run (bootId): the reply is dropped",
+    "R3 no promotion: the reply rides the delivering socket (unchanged)",
+    "R4 no socket in charge: dropped (no send attempted on any socket)",
+])
+def test_w14_sh1_reply_across_promotion(run, label):
+    _ok(run, label)
+
+
 def test_every_scenario_passed_and_node_exited_clean(run):
     assert run["failed"] == 0, run["stdout"] + run["stderr"]
     assert run["passed"] == EXPECTED_ASSERTS, (
         f"expected {EXPECTED_ASSERTS} asserts, ran {run['passed']}\n{run['stdout']}")
     assert len(run["results"]) == EXPECTED_ASSERTS
     assert run["rc"] == 0, run["stderr"]
+
+
+def test_w14_auth_success_clears_auth_needed_then_redials_control():
+    """SH-3's timer skips while ``authNeeded`` is set, so the flag must be
+    cleared by the real auth-success path -- which lives in 63 (the auth
+    form), outside the sliced section, so it is pinned by source: the form's
+    submit clears the host's ``authNeeded`` BEFORE it re-dials /control."""
+    src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    clear = "            if (st) st.authNeeded = false;"
+    redial = "            try { openControlWs(host); } catch (_) {}"
+    assert src.count(clear) == 1 and src.count(redial) == 1
+    assert src.index(clear) < src.index(redial)
