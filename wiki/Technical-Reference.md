@@ -435,13 +435,18 @@ operator names each peer in `broker_config.json`:
 | Gate | Credential | Refusals, in order |
 |---|---|---|
 | browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 404 `unknown_peer` → 503 `proxy_unavailable` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
-| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 404 `unknown_peer` (also for a peer without `mcp: true` — the opt-in cannot be probed) → 503 `proxy_unavailable` → 404 `not_relayed` → 401 `auth_required` (no bearer) → 400 `bad_scope` → 503 `peer_busy` |
+| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → 400 `bad_scope` → 503 `peer_busy` |
 
 Every refusal happens before anything is dialed. Browser-gate bodies are
 `{"ok": false, "error": …}`; MCP-gate bodies are `{"error": …}`, the MCP
-realm's shape. The 409 is what keeps a token on the machine it was entered
-for: a page that has not seen a re-pointed origin cannot send that token to
-the new one. Turning `mcp: true` on publishes the peer's MCP surface at this
+realm's shape. Each of this broker's own refusals also carries
+`X-Browserland-Peer-Refusal: <error>`, a header a relayed answer can never
+carry, so the page acts on this broker's refusals and never on a body a peer
+wrote. The 409 is what keeps a token on the machine it was entered for: a
+page that has not seen a re-pointed origin cannot send that token to the new
+one. Without a bearer the MCP prefix says nothing about which peers exist;
+with one, a peer that opted in answers with the peer's own refusal, which
+this broker cannot hide (it cannot check the peer's MCP token). Turning `mcp: true` on publishes the peer's MCP surface at this
 broker's address; an agent then adds `http://<this broker>/peer/<id>` as a
 second mcptool host with the **peer's** MCP token. This broker's MCP token,
 scopes and admin credential do not apply to it.
@@ -472,9 +477,9 @@ The path is decoded once and the **table's** path is what is dialed, never
 the client's bytes.
 
 **What crosses.** Allowlists both ways. Upstream: `Content-Type`,
-`Content-Length`, `Accept`, exactly one `X-Browserland-Scope`,
-`X-Webterm-Admin` only when the caller sent it, `X-Browserland-Mcp-Admin`
-only on the MCP gate, and the one `Authorization` this broker sets (the
+`Content-Length`, `Content-Encoding`, `Accept`, exactly one
+`X-Browserland-Scope`, `X-Webterm-Admin` only when the caller sent it and
+only on the browser gate, `X-Browserland-Mcp-Admin` only on the MCP gate, and the one `Authorization` this broker sets (the
 peer's token). This broker's own bearer, the peer-token and pairing headers,
 `Cookie`, `Host`, `Origin`, `X-Forwarded-*` and every hop-by-hop header never
 cross, and `token` / `auth` are dropped from the forwarded query. Back:
@@ -491,7 +496,11 @@ cross, and `token` / `auth` are dropped from the forwarded query. Back:
 A peer's script on this origin could read every host token the page holds.
 
 **Loops, timeouts, load.** Redirects are never followed (a 3xx is relayed
-without `Location`). A peer's `broker_id` is advisory only. Concurrent dials
+without `Location`; a 1xx is never relayed). A peer's `broker_id` is
+advisory only. The origin's host name is resolved when it is dialed, so name
+a peer by an address, or by a name whose DNS you control. The "not this
+broker" check catches a typo, not every alias of this machine; the hop
+refusal is what stops a loop. Concurrent dials
 are capped at **8 per peer within 32 overall**; over either: 503 `peer_busy`,
 never a queue. Connect timeout 2.5 s (under the page's 3 s fetch deadline),
 read timeout 30 s (past the 15 s `/mcp/read` wait and the 10 s desktop relay).

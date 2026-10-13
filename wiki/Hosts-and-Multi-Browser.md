@@ -28,7 +28,9 @@ its `broker_config.json` and restart it.
 ```
 
 A host reached that way is fetched through `/peer/b/` on the broker that
-served the page, so the phone dials only that broker. You still need the other
+served the page, so the phone dials only that broker. (The host list does
+not have a control to mark a host this way yet; it comes with a later
+release, together with the terminals below.) You still need the other
 broker's password: it is sent along with this broker's own, and this broker
 never stores it. It is tied to the address the operator configured — if the
 operator points `b` somewhere else, the password is forgotten and you are
