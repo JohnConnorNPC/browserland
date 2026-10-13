@@ -263,7 +263,8 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | `POST /launch` | token required — never an open RCE on any bind. Refusal order: **401 `auth_required`**, then **503 `restarting`** while the broker quiesces, then **403 `terminals_disabled`** on a broker with `terminals: false` (#253) — checked before the body is parsed. |
 | `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
-| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. The broker's **only outbound HTTP**: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
+| `GET`/`POST`/`PUT /peer/<id>/…` (peer proxy, #252) | **two gates**, see [Peer proxy](#peer-proxy-252): browser routes take **this broker's token as the bearer** (header only — a `?token=` does not count here) **plus** the peer's own token in `X-Browserland-Peer-Token` and the pairing in `X-Browserland-Peer-Origin`; `/peer/<id>/mcp/*` takes the **peer's MCP token alone**, and only for a peer configured with `mcp: true`. `OPTIONS` is not routed (405). |
+| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three egresses (with `/update/check` and the configured peers): an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
 | CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
 | Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token), and CSP `script-src` — see below. |
 
@@ -355,9 +356,11 @@ token-gated instead.
 ### Multiple hosts
 
 Control Panel → Hosts lets the UI attach to sessions on additional brokers
-(e.g. a WSL box over Tailscale). The **browser connects directly** to each
-host (cross-origin `fetch /sessions` + `ws://host/ws`); hosts and their
-passwords live per-browser in localStorage. Requirements:
+(e.g. a WSL box over Tailscale). By default the **browser connects
+directly** to each host (cross-origin `fetch /sessions` + `ws://host/ws`);
+a host can instead be reached **through this broker** (below). Hosts and
+their passwords live per-browser in localStorage. Requirements for a
+direct host:
 
 * you need the remote broker's token (every broker has one — either
   configured or minted; `python -m webterm.broker --print-token` prints it)
@@ -398,6 +401,111 @@ WEB_TERMINAL_TOKEN='...' ./launchers/run-agent.sh -- bash -l
 
 Any producer can register the same way:
 `BROWSERLAND_BROKER_URL=ws://host:4445/browserland?token=...`.
+
+### Peer proxy (#252)
+
+A broker can relay an allowlisted set of **another** broker's HTTP routes, so a
+page or a phone that can reach only this broker (say, the public one) still
+reaches a broker behind it (on its LAN or tailnet), and that broker needs no
+upgrade and no CORS. This broker stores **no credential** of the peer's. The
+operator names each peer in `broker_config.json`:
+
+```json
+"peers": {"b": {"origin": "http://100.64.0.2:4445", "mcp": false}}
+```
+
+* **The peer list is validated at startup** — a bad one is one stderr line and
+  exit 2, like a bad role. An id is 1–64 of `A-Za-z0-9_-`; an origin is
+  `http` or `https` with a host and an optional port: **no path, no query, no
+  fragment, no userinfo**, and never this broker itself (loopback or the bind
+  host on this broker's port). It is stored rebuilt (`HTTP://B:80/` →
+  `http://b`). Unknown keys are refused. `mcp` defaults to `false`.
+* **The client names a peer id, never a URL.** The origin is read from the
+  config at dial time. `GET /info` publishes `peers` as `{id: origin}` (never
+  the `mcp` flag, never a token) and `peer_proxy` (true when this broker has
+  peers **and** the proxy extra).
+* **The `proxy` extra.** The upstream client is `httpx`, installed by
+  `pip install webterm[proxy]` (core stays `websockets` + `sanic`). A broker
+  that names peers without it logs one line
+  (`peer proxy unavailable: install webterm[proxy] (httpx); …`) and answers
+  every `/peer/*` with **503 `proxy_unavailable`**.
+
+**The two gates.** The first decoded segment after `/peer/<id>/` decides:
+
+| Gate | Credential | Refusals, in order |
+|---|---|---|
+| browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 404 `unknown_peer` → 503 `proxy_unavailable` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
+| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 404 `unknown_peer` (also for a peer without `mcp: true` — the opt-in cannot be probed) → 503 `proxy_unavailable` → 404 `not_relayed` → 401 `auth_required` (no bearer) → 400 `bad_scope` → 503 `peer_busy` |
+
+Every refusal happens before anything is dialed. Browser-gate bodies are
+`{"ok": false, "error": …}`; MCP-gate bodies are `{"error": …}`, the MCP
+realm's shape. The 409 is what keeps a token on the machine it was entered
+for: a page that has not seen a re-pointed origin cannot send that token to
+the new one. Turning `mcp: true` on publishes the peer's MCP surface at this
+broker's address; an agent then adds `http://<this broker>/peer/<id>` as a
+second mcptool host with the **peer's** MCP token. This broker's MCP token,
+scopes and admin credential do not apply to it.
+
+#### Relayed on the browser gate
+
+| Method | Paths |
+|---|---|
+| GET | `/info`, `/sessions`, `/profiles`, `/profiles/config`, `/profiles/detect`, `/recordings`, `/recording`, `/recording/notes`, `/update/check` |
+| POST | `/launch`, `/file/list`, `/file/read`, `/file/read_chunk`, `/file/hash`, `/file/write`, `/file/upload`, `/file/upload_begin`, `/file/upload_chunk`, `/file/upload_commit`, `/file/upload_abort`, `/file/paste_image`, `/file/delete`, `/file/mkdir`, `/file/copy`, `/file/move`, `/file/zip`, `/file/unzip`, `/file/stat`, `/file/setattr`, `/session/procs`, `/session/kill`, `/session/git`, `/session/mcp`, `/session/control`, `/recording/begin`, `/recording/chunk`, `/recording/commit`, `/recording/abort`, `/recording/delete`, `/recording/notes`, `/update/apply`, `/update/policy`, `/mods/policy`, `/profiles/config` |
+| GET, PUT | `/mod-store/<modId>` |
+
+#### Relayed on the MCP gate (`mcp: true` only)
+
+| Method | Paths |
+|---|---|
+| GET | `/mcp/info`, `/mcp/terminals`, `/mcp/profiles`, `/mcp/desktop`, `/mcp/config` |
+| POST | `/mcp/read`, `/mcp/input`, `/mcp/reset`, `/mcp/flush`, `/mcp/pace`, `/mcp/launch`, `/mcp/window`, `/mcp/desktop`, `/mcp/config`, `/mcp/knobs` |
+
+**Anything absent is denied** (exact match, no prefixes). Never relayed:
+`GET /`, `/help-corpus.json`, `/vendor/*`, `/mods/<id>/<gen>/*`,
+`/mods/install|uninstall|rescan|installed`, `POST /restart`,
+`WS /browserland`, `GET`/`PUT /state`, `/status/fetch`, and — until phase 2 —
+`/ws` and `/control`. A path naming another `/peer/` hop is refused
+(`peer_hop_refused`). `OPTIONS` is not routed on the prefix (405, never
+dialed): the page is same-origin with this broker, so no preflight arises.
+The path is decoded once and the **table's** path is what is dialed, never
+the client's bytes.
+
+**What crosses.** Allowlists both ways. Upstream: `Content-Type`,
+`Content-Length`, `Accept`, exactly one `X-Browserland-Scope`,
+`X-Webterm-Admin` only when the caller sent it, `X-Browserland-Mcp-Admin`
+only on the MCP gate, and the one `Authorization` this broker sets (the
+peer's token). This broker's own bearer, the peer-token and pairing headers,
+`Cookie`, `Host`, `Origin`, `X-Forwarded-*` and every hop-by-hop header never
+cross, and `token` / `auth` are dropped from the forwarded query. Back:
+`Content-Length`, `Content-Encoding`, `Cache-Control`, `ETag`,
+`Last-Modified`, `Content-Disposition`. `Set-Cookie`, `Location` and every
+`Access-Control-*` are dropped.
+
+**A relayed body is never a page.** `Content-Type` is forced:
+`application/json` when the peer said JSON, otherwise
+`application/octet-stream` (a peer's `text/html` included), and **every**
+`/peer/*` response — this broker's own refusals too — carries
+`X-Content-Type-Options: nosniff` and
+`Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`.
+A peer's script on this origin could read every host token the page holds.
+
+**Loops, timeouts, load.** Redirects are never followed (a 3xx is relayed
+without `Location`). A peer's `broker_id` is advisory only. Concurrent dials
+are capped at **8 per peer within 32 overall**; over either: 503 `peer_busy`,
+never a queue. Connect timeout 2.5 s (under the page's 3 s fetch deadline),
+read timeout 30 s (past the 15 s `/mcp/read` wait and the 10 s desktop relay).
+Bodies stream both ways, one chunk at a time — a 256 MiB recording is never
+held whole; a body that dies half-way drops the connection rather than
+arriving short. Nothing is retried. Log lines name the peer **id**, the
+method, the table path and the error class — never the upstream URL or its
+query (the `httpx` loggers are held at WARNING for that reason).
+
+**Phase 1 limits.** A host reached through this broker lists sessions, reads
+files, profiles and recordings, but its terminals do not open yet: the page
+does not dial `/ws` or `/control` for it and each terminal window says
+*proxied terminals arrive in the next phase*. The peer sees every proxied
+client as this broker (its logs lose the client address).
 
 ## Linux deployment
 

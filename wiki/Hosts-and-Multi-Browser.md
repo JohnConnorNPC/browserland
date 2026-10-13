@@ -16,9 +16,37 @@ One per-host setting is stored differently from all the others: **Clipboard (OSC
 
 The password you enter is the broker's browser-login token. The bearer token AI agents use to drive terminals over MCP is a **separate** secret, configured on its own — if you plan to let agents work on this host, see [[MCP-and-AI-Agents]].
 
+## Reaching a broker through this one
+
+Sometimes the browser can reach only one broker — the public one — while the
+others sit on its LAN or tailnet, or speak plain http to an https page. The
+operator of that broker can let it **relay** to them: add a `peers` entry to
+its `broker_config.json` and restart it.
+
+```json
+"peers": {"b": {"origin": "http://100.64.0.2:4445"}}
+```
+
+A host reached that way is fetched through `/peer/b/` on the broker that
+served the page, so the phone dials only that broker. You still need the other
+broker's password: it is sent along with this broker's own, and this broker
+never stores it. It is tied to the address the operator configured — if the
+operator points `b` somewhere else, the password is forgotten and you are
+asked again. If this broker cannot relay (no peers, no `proxy` extra, or an
+older build) the host says **this broker cannot proxy** and nothing is
+dialed — it never quietly falls back to connecting directly.
+
+To let agents use the other broker's MCP interface through this one as well,
+the operator adds `"mcp": true` to that peer; the agent then uses
+`http://<this broker>/peer/b` with the **other** broker's MCP token.
+
+For now, a host reached this way lists its sessions, files, profiles and
+recordings, but its terminals do not open yet; each terminal window says so.
+See [[Technical-Reference#peer-proxy-252]] for the routes, the headers and every refusal.
+
 ## Sharing your broker list
 
-Your host list normally lives only in the browser you added it in: open the desktop from a different browser and you start with an empty list, and clearing local storage to fix a UI glitch also wipes your remote brokers. The optional **Broker registry** fixes that by storing a copy of the list on a broker, so you can pull it back somewhere else. It is a convenience layer, not a change to how connections work — your host list stays browser-local and remains the source of truth, and the desktop always connects **directly** to each broker. The broker only stores the list; it never proxies your traffic.
+Your host list normally lives only in the browser you added it in: open the desktop from a different browser and you start with an empty list, and clearing local storage to fix a UI glitch also wipes your remote brokers. The optional **Broker registry** fixes that by storing a copy of the list on a broker, so you can pull it back somewhere else. It is a convenience layer, not a change to how connections work — your host list stays browser-local and remains the source of truth, and the registry only stores the list. A registry row can never make a host one that is reached through a broker (see below); that is set in this browser only.
 
 Find it in **Control Panel → Browser → Broker registry**, just below the Hosts list.
 
