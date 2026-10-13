@@ -186,3 +186,19 @@ def test_the_failed_future_is_retrieved(tmp_path, monkeypatch):
                                     monkeypatch)
     assert out["http"][0] == 409
     assert out["loop_errors"] == []
+
+
+# ---- A3: a random rid start per run ---------------------------------------
+
+def test_each_run_numbers_its_rids_from_a_random_start(tmp_path, monkeypatch):
+    """T6: two fresh broker apps (two runs) do not start at rid 1, nor at
+    the same rid; every rid stays a positive int under 2**53. (Each start
+    is random over 2**40, so a false failure is ~2**-40.)"""
+    firsts = []
+    for n in range(2):
+        sub = tmp_path / f"run{n}"
+        sub.mkdir()
+        app = _desktop_app(sub, monkeypatch)
+        firsts.append(next(app.ctx.desktop_rid))
+    assert all(isinstance(r, int) and 1 < r < 2 ** 53 for r in firsts), firsts
+    assert firsts[0] != firsts[1], firsts

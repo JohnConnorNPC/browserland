@@ -4312,7 +4312,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # is loop-confined like the rest of the relay state.
     app.ctx.lease_generation = 0
     app.ctx.desktop_rpcs = {}
-    app.ctx.desktop_rid = itertools.count(1)
+    # #250: each run starts its rids at a random offset. A page that
+    # survives a broker restart may still run JS that caches answers by rid
+    # alone; a run counting from 1 again would be served the old run's
+    # answers. Positive and far below 2**53, so the page's
+    # Number.isInteger and _desktop_result's rid > 0 both still hold.
+    app.ctx.desktop_rid = itertools.count(secrets.randbelow(2 ** 40) + 1)
     app.ctx.desktop_rpc_timeout_s = DESKTOP_RPC_TIMEOUT_S
 
     async def _bounded(coro, timeout):
