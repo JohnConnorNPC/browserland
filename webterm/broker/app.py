@@ -4742,7 +4742,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # into a terminal or writing a file. X-Frame-Options for older browsers,
         # frame-ancestors for the rest.
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = app.ctx.csp
+        if request.path.startswith("/peer/"):
+            # #252: whatever a peer sent, a /peer/* response is never a
+            # document that runs script on THIS origin -- whose localStorage
+            # holds every host token the page knows. Set here, not in the
+            # handler, because this middleware runs last and would otherwise
+            # overwrite it; A's own refusals on the prefix get it too.
+            response.headers["Content-Security-Policy"] = peers.SANDBOX_CSP
+            response.headers["X-Content-Type-Options"] = "nosniff"
+        else:
+            response.headers["Content-Security-Policy"] = app.ctx.csp
         # #190 staged rollout: the FULL policy (default-src, dynamic
         # connect-src, form-action/base-uri/frame-src) ships Report-Only on
         # every response the enforced header covers, so the soak gathers
@@ -8719,6 +8728,117 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             body["admin"] = {"required": True, "routes": list(ADMIN_ROUTES)}
         return sanic_json(body, headers={"Cache-Control": "no-store"})
 
+    # ---- peer proxy (/peer/<id>/..., #252 phase 1) -------------------------
+    # A relays an allowlisted set of a configured peer's HTTP routes, so a page
+    # or phone that can reach only A still reaches B. A stores no credential of
+    # B's. Two gates, decided by the first DECODED segment of the rest:
+    #
+    # * browser routes: A's token as the bearer (the Authorization header only;
+    #   a ?token= does not count here and is stripped from the forwarded
+    #   query), B's browser token in peers.PEER_TOKEN_HEADER, and the pairing
+    #   header naming the origin the page paired that token with -- a missing
+    #   or stale one is 409 peer_origin_changed with no dial, so a re-pointed
+    #   origin never receives a token that was entered for another machine;
+    # * /mcp/*: B's MCP token as the bearer and nothing of A's, and only for a
+    #   peer whose entry sets mcp: true. Otherwise it is the same 404 as an
+    #   unknown peer, so the opt-in cannot be probed.
+    #
+    # Every refusal happens before the dial. The peer's origin is read from
+    # app.ctx.peers at dial time, never captured. Response hardening (the
+    # sandbox CSP + nosniff) is applied by _cors_headers to every /peer/*
+    # response, A's own refusals included.
+    app.ctx.peer_cap = peers.DialCap()
+    app.ctx.peer_client = None
+
+    def _peer_refusal(gate_mcp: bool, status: int, error: str):
+        body = {"error": error} if gate_mcp else {"ok": False, "error": error}
+        return sanic_json(body, status=status)
+
+    def _peer_bearer(request: Request) -> Optional[str]:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            return header[7:].strip() or None
+        return None
+
+    async def _peer_relay(request: Request, peer_id: str, rest: str = ""):
+        gate_mcp = peers.is_mcp_path(rest)
+        peer = app.ctx.peers.get(peer_id)
+        if gate_mcp:
+            if peer is None or not peer["mcp"]:
+                return _peer_refusal(True, 404, "unknown_peer")
+            bearer = _peer_bearer(request)
+        else:
+            if not auth.token_matches(_peer_bearer(request),
+                                      app.ctx.auth_token):
+                LOGGER.warning("rejected unauthenticated /peer from %s",
+                               request.ip)
+                return _peer_refusal(False, 401, "auth_required")
+            if peer is None:
+                return _peer_refusal(False, 404, "unknown_peer")
+        if not app.ctx.peer_proxy:
+            return _peer_refusal(gate_mcp, 503, "proxy_unavailable")
+        gate, path = peers.classify(request.method, rest)
+        if gate is None or (gate == peers.GATE_MCP) != gate_mcp:
+            return _peer_refusal(gate_mcp, 404,
+                                 path if gate is None else "not_relayed")
+        if gate_mcp:
+            if not bearer:
+                LOGGER.warning("rejected unauthenticated /peer mcp from %s",
+                               request.ip)
+                return _peer_refusal(True, 401, "auth_required")
+        else:
+            bearer = request.headers.get(peers.PEER_TOKEN_HEADER) or ""
+            if not bearer:
+                return _peer_refusal(False, 401, "auth_required")
+            if (request.headers.get(peers.PEER_ORIGIN_HEADER)
+                    != peer["origin"]):
+                return _peer_refusal(False, 409, "peer_origin_changed")
+        try:
+            headers = peers.upstream_headers(
+                request.headers, gate=gate, bearer=bearer,
+                admin_header=ADMIN_HEADER)
+        except peers.PolicyError as exc:
+            return _peer_refusal(gate_mcp, exc.status, exc.error)
+        if not app.ctx.peer_cap.acquire(peer_id):
+            return _peer_refusal(gate_mcp, 503, "peer_busy")
+        try:
+            if app.ctx.peer_client is None:
+                app.ctx.peer_client = peers.make_client()
+            body = None
+            if request.method in ("POST", "PUT"):
+                async def _stream_body():
+                    # The route is stream=True: B's body crosses chunk by
+                    # chunk, as its answer does, and is never held whole.
+                    while True:
+                        chunk = await request.stream.read()
+                        if chunk is None:
+                            return
+                        yield chunk
+                body = _stream_body()
+            err = await peers.relay(
+                app.ctx.peer_client, peer_id=peer_id,
+                # Re-read at dial time: the entry, not a captured origin.
+                origin=app.ctx.peers[peer_id]["origin"],
+                method=request.method, path=path,
+                query=peers.upstream_query(request.query_string),
+                headers=headers, body=body, respond=request.respond,
+                abort=lambda: request.transport.abort(),
+                log=LOGGER.warning)
+        finally:
+            app.ctx.peer_cap.release(peer_id)
+        if err is not None:
+            return _peer_refusal(gate_mcp, err[0], err[1])
+        return None
+
+    @app.after_server_stop
+    async def _close_peer_client(app_, loop):
+        # The client belongs to the loop that made it: close it with that
+        # loop, and let the next server start (a test client's next request
+        # runs a new one) build its own.
+        client, app_.ctx.peer_client = app_.ctx.peer_client, None
+        if client is not None:
+            await client.aclose()
+
     # ---- mod policy write (/mods/policy, #157) ----------------------------
     # The ONLY writer of the pins GET /info reports. Token-gated like every
     # browser-realm route -- and deliberately NOT lease-gated: unlike /state and
@@ -10952,6 +11072,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_session_mcp, "/session/mcp", methods=["POST"])
     app.add_route(_session_control, "/session/control", methods=["POST"])
     app.add_route(_info, "/info", methods=["GET"])
+    # #252: the peer prefix. stream=True so a body crosses chunk by chunk;
+    # unquote=False (Sanic's default, pinned here) hands `rest` over still
+    # percent-encoded, and peers.classify decodes it exactly once. No OPTIONS:
+    # the page is same-origin with A, so a preflight never arises, and an
+    # unrouted OPTIONS is a 405 that never dials. The bare /peer/<id> form
+    # answers the same JSON refusals instead of the HTML 404.
+    app.add_route(_peer_relay, "/peer/<peer_id:str>/<rest:path>",
+                  methods=["GET", "POST", "PUT"], stream=True, unquote=False,
+                  name="peer_relay")
+    app.add_route(_peer_relay, "/peer/<peer_id:str>",
+                  methods=["GET", "POST", "PUT"], stream=True, unquote=False,
+                  name="peer_relay_bare")
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])

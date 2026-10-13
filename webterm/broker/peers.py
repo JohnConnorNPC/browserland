@@ -20,6 +20,7 @@ starts and answers ``/peer/*`` with ``503 proxy_unavailable``.
 
 from __future__ import annotations
 
+import logging
 import re
 import urllib.parse
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -179,6 +180,12 @@ def make_client():
     hop A never checked), no environment proxies, explicit timeouts, and a
     pool no bigger than the dial cap."""
     import httpx
+    # httpx logs every request at INFO as "HTTP Request: GET <full URL>", and
+    # httpcore logs connection detail at DEBUG: the upstream URL, its query,
+    # and (phase 2) a WebSocket leg's ?token=. The broker's own lines name a
+    # peer id instead, so both loggers stay at WARNING in this process.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     return httpx.AsyncClient(
         follow_redirects=False,
         trust_env=False,
@@ -357,6 +364,36 @@ def downstream_headers(up_headers) -> dict:
     out["X-Content-Type-Options"] = "nosniff"
     out["Content-Security-Policy"] = SANDBOX_CSP
     return out
+
+
+# ---- the dial cap -----------------------------------------------------------------
+
+class DialCap:
+    """Concurrent upstream dials: at most :data:`PEER_MAX_DIALS_PER_PEER` to
+    one peer, inside :data:`PEER_MAX_DIALS` overall. Non-blocking: a dial over
+    either limit is refused (503 ``peer_busy``), never queued -- a queue
+    would be a second retry layer under the page's own. One event loop, so
+    plain counters are enough."""
+
+    def __init__(self, total: int = PEER_MAX_DIALS,
+                 per_peer: int = PEER_MAX_DIALS_PER_PEER) -> None:
+        self.total = total
+        self.per_peer = per_peer
+        self._busy: Dict[str, int] = {}
+
+    def acquire(self, peer_id: str) -> bool:
+        if (sum(self._busy.values()) >= self.total
+                or self._busy.get(peer_id, 0) >= self.per_peer):
+            return False
+        self._busy[peer_id] = self._busy.get(peer_id, 0) + 1
+        return True
+
+    def release(self, peer_id: str) -> None:
+        left = self._busy.get(peer_id, 0) - 1
+        if left > 0:
+            self._busy[peer_id] = left
+        else:
+            self._busy.pop(peer_id, None)
 
 
 # ---- the relay ------------------------------------------------------------------

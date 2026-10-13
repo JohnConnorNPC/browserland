@@ -45,6 +45,7 @@ EXPECTED = {
     ("update.py", "call _OPENER.open", "fetch_json"),
     ("peers.py", "import httpx", "proxy_available"),
     ("peers.py", "import httpx", "make_client"),
+    ("peers.py", "import httpx", "relay"),
     ("peers.py", "call httpx.AsyncClient", "make_client"),
 }
 

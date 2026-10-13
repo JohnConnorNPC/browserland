@@ -190,3 +190,74 @@ class FakeUpstream:
         for i in range(CHUNK, len(answer.body), CHUNK):
             writer.write(answer.body[i:i + CHUNK])
             await writer.drain()
+
+
+class LiveApp:
+    """A Sanic app served for real on 127.0.0.1:<free port> in its own thread
+    and loop, for tests that need CONCURRENT requests (the dial cap) or a
+    client that reads the body as it streams. The in-process test clients
+    serve one request at a time and hand back the whole body."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.port = 0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server = None
+        self._ready = threading.Event()
+        self._error: Optional[BaseException] = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def start(self) -> "LiveApp":
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self._thread.start()
+        assert self._ready.wait(20), "live app did not start"
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        # Sanic's touchup rewrites its own Http methods once per process; a
+        # second live app in the same process would re-run it on the already
+        # rewritten source and fail. It is an optimisation only.
+        self.app.config.TOUCHUP = False
+
+        async def boot():
+            self._server = await self.app.create_server(
+                host="127.0.0.1", port=self.port,
+                return_asyncio_server=True)
+            await self._server.startup()
+            await self._server.before_start()
+            await self._server.after_start()
+
+        try:
+            self._loop.run_until_complete(boot())
+        except BaseException as exc:  # noqa: BLE001 -- reported by start()
+            self._error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        self._loop.run_forever()
+
+    def stop(self) -> None:
+        if self._loop is None or self._server is None:
+            return
+
+        async def shutdown():
+            await self._server.before_stop()
+            self._server.close()
+            await self._server.wait_closed()
+            await self._server.after_stop()
+            self._loop.stop()
+
+        asyncio.run_coroutine_threadsafe(shutdown(), self._loop)
+        self._thread.join(20)
