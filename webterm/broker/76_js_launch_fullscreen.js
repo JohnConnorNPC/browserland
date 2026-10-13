@@ -28,8 +28,46 @@
         // Task 7: `cwd` (optional absolute dir) sets the spawned shell's working
         // directory; older brokers ignore it. Default undefined keeps every
         // existing call site at the broker's own default cwd.
+        // #253: the reason a terminals-off broker gives, one wording for the
+        // click-time refusal and for a 403 terminals_disabled from /launch.
+        const TERMINALS_OFF_WHY = 'hosts no terminals (terminals: false) — '
+            + 'launch on another host';
+        function refuseTerminalsOff(host) {
+            openInfoModal({
+                title: 'Cannot launch',
+                rows: [{ k: host.label, v: TERMINALS_OFF_WHY }],
+            });
+        }
+        // Click-time answer to "does this host refuse every launch?". The
+        // serving broker's comes from the AWAITED /info memo, never the paint
+        // predicate: the first sync read of a fresh memo is null (#253 MUST 2).
+        // A peer has only the Control Panel's record to go on; the broker's own
+        // 403 (mapped below) covers a peer this page has not probed.
+        async function hostRefusesLaunch(host) {
+            if (host.id !== 'local') return hostTerminalsOff(host.id) === true;
+            let info = null;
+            try { info = await localInfo(); } catch (_) { info = null; }
+            return !!(info && info.terminals === false);
+        }
+        // Quick-launch found no host to launch on (defaultLaunchHost() null):
+        // say why instead of posting /launch to a broker that refuses it.
+        function showNoLaunchHost() {
+            const chosen = hostById(getSettings().defaultHost);
+            const v = (chosen && chosen.id !== 'local')
+                ? chosen.label + ' (the default host) hosts no terminals. '
+                    + 'Pick a host in the launch menu, or set another default '
+                    + 'in Settings → Hosts.'
+                : 'This broker is a Hub with terminals off. Pick a host in '
+                    + 'the launch menu, or set a default in Settings → Hosts.';
+            openInfoModal({
+                title: 'No host can launch here',
+                rows: [{ k: '', v }],
+            });
+        }
         async function launchProfile(host, name, cwd) {
-            host = host || localHost();
+            // #253: a null host is "nowhere to launch", never the local broker
+            // by default — that is the very broker that may be refusing.
+            if (!host) { showNoLaunchHost(); return; }
             // Decided at CLICK time (the hostMenuItems rule): a menu row can
             // outlive the state it was painted from, so re-read the host and
             // its state now and refuse a hidden / auth / down host instead of
@@ -47,6 +85,10 @@
                     title: 'Cannot launch',
                     rows: [{ k: fresh.label, v: why }],
                 });
+                return;
+            }
+            if (await hostRefusesLaunch(fresh)) {
+                refuseTerminalsOff(fresh);
                 return;
             }
             // Issue #10: when no explicit cwd was chosen (e.g. via "Open in
@@ -93,6 +135,14 @@
                     return;
                 }
                 const d = await r.json().catch(() => ({}));
+                // #253: the broker's own refusal, for a page whose /info memo
+                // could not say so (booted before login: a 401 /info memoizes
+                // {}), or a peer not yet probed. Same modal as the click-time
+                // refusal, not a bare "launch failed".
+                if (r.status === 403 && d && d.error === 'terminals_disabled') {
+                    refuseTerminalsOff(fresh);
+                    return;
+                }
                 if (!d || !d.ok || d.id == null) {
                     showNotice('launch failed: '
                         + ((d && d.error) || ('HTTP ' + r.status)));
@@ -361,6 +411,7 @@
         // Profile rows follow only for a host that is neither down nor
         // waiting on a password: those states have nothing to launch, and
         // the broker row itself says why.
+        const LAUNCH_ROW_TERMINALS_OFF = 'terminals off — launches nothing here';
         function launchHostItems(host) {
             const items = hostMenuItems(host);
             const state = hostMenuState(pollStateFor(host.id));
@@ -368,6 +419,13 @@
             // A hidden host is parked: its broker row (which says '— hidden'
             // and unhides on click) is the only row worth offering.
             if (host.hidden) return items;
+            // #253: a broker that hosts no terminals has nothing to launch, so
+            // its broker row is followed by the reason, not profiles. Paint
+            // only: launchProfile re-decides at click time.
+            if (hostTerminalsOff(host.id) === true) {
+                items.push({ label: LAUNCH_ROW_TERMINALS_OFF, enabled: false });
+                return items;
+            }
             const d = profilesCache.get(host.id);
             if (d && d.profiles.length) {
                 items.push(...profileMenuItems(host, d));
@@ -478,6 +536,9 @@
                     }
                     const hs = hostMenuState(pollStateFor(host.id));
                     if (hs === 'auth' || hs === 'down') continue;
+                    // #253: no profiles to fetch from a broker that hosts no
+                    // terminals; its row already says so.
+                    if (hostTerminalsOff(host.id) === true) continue;
                     fetchProfiles(host).then(
                         () => repaintLaunchMenu(), () => {});
                 }
@@ -493,10 +554,16 @@
             // right = menu; ON swaps them. The listeners stay bound once and the
             // contextmenu one always suppresses the native menu (see below).
             // #107: quick-launch targets the DEFAULT host (s.defaultHost, via
-            // defaultLaunchHost() — unset/removed → local, prior behavior) using
-            // THAT host's per-host defaultProfile (else the broker default).
-            const quickLaunch = () => {
-                const h = defaultLaunchHost();
+            // defaultLaunchHost() — unset/removed → local, prior behavior; null
+            // when that host hosts no terminals, #253) using THAT host's
+            // per-host defaultProfile (else the broker default).
+            // #253: decided on the AWAITED local /info (never the paint
+            // predicate), and a null target is explained, not launched.
+            const quickLaunch = async () => {
+                let info = null;
+                try { info = await localInfo(); } catch (_) { info = null; }
+                const h = defaultLaunchHost(!!(info && info.terminals === false));
+                if (!h) { showNoLaunchHost(); return; }
                 launchProfile(h, hostDefaultProfile(h));
             };
             launchBtn.addEventListener('click', (e) => {

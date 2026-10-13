@@ -880,7 +880,7 @@
         // below: a render must never re-fetch after a failed fetch, or a sleeping
         // broker turns the section into a hot retry loop. Re-selecting the tab is
         // the retry, and it is a deliberate one.
-        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart, admin, mcpScopes}
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart, admin, mcpScopes, terminalsOff}
         const modCatalogFetching = new Set();   // hostIds with an in-flight GET
         // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
         // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
@@ -905,6 +905,9 @@
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
                           policy: {}, update: null, restart: null,
                           admin: null, mcpScopes: false };
+            // #253: a record is a settled "launches" until its /info says
+            // terminals: false (hostTerminalsOff, 56).
+            rec.terminalsOff = false;
             try {
                 const r = await hostFetch(host, '/info', { cache: 'no-store' });
                 if (r.status === 401 || r.status === 403) {
@@ -918,6 +921,10 @@
                     // catalog. Only a literal true counts.
                     if (j && typeof j === 'object') {
                         rec.mcpScopes = (j.mcp_scopes === true);
+                        // #253: that broker hosts no terminals. Only a literal
+                        // false counts; an older build omits the key and
+                        // launches. Read through hostTerminalsOff (56).
+                        rec.terminalsOff = (j.terminals === false);
                     }
                     if (j && typeof j === 'object' && Array.isArray(j.mods)) {
                         rec.mods = j.mods;
@@ -1306,13 +1313,26 @@
         // fetch, and since a failed fetch leaves the cache empty that re-render
         // immediately re-fetched — a hot loop against a broker that is down.
         const profilesConfigFailed = new Set();
+        const PROFILES_TERMINALS_OFF_NOTE = 'This broker hosts no terminals '
+            + '(terminals: false), so its launch profiles cannot be edited '
+            + 'here.';
         function renderProfilesEditor() {
             flushProfilePickers();
             const t = settingsTarget;
             if (!t || !setProfilesListEl) return;
             const host = hostById(t.hostId);
-            const cfg = host ? profilesConfigCache.get(host.id) : null;
             setProfilesListEl.innerHTML = '';
+            // #253: a broker that hosts no terminals refuses profile edits
+            // and the detect scan (terminals_disabled), so offer neither.
+            // Paint-only read (hostTerminalsOff, 56); the broker refuses on
+            // its own whatever this shows.
+            if (host && hostTerminalsOff(host.id) === true) {
+                if (setProfileAddBtn) setProfileAddBtn.disabled = true;
+                if (setProfileDetectBtn) setProfileDetectBtn.disabled = true;
+                setProfilesListEl.textContent = PROFILES_TERMINALS_OFF_NOTE;
+                return;
+            }
+            const cfg = host ? profilesConfigCache.get(host.id) : null;
             // Add/Detect both end in a whole-set REPLACE POST built on top of
             // the cached set, so neither is safe while that set is unknown —
             // see openProfileDialog. Gate them on a loaded config.

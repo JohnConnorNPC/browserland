@@ -446,7 +446,11 @@
             // button must stay ENABLED so the user can clear the foreign id back
             // to ''. Disabling off `curId` instead would strand it (the only row
             // that could clear it is the one that appears already-selected).
-            const curId = defaultLaunchHost().id;
+            // #253: null when START would launch nowhere (the chosen default,
+            // or the local fallback, hosts no terminals): no row wears the
+            // badge then, and every Default button keeps its stored-value rule.
+            const curHost = defaultLaunchHost();
+            const curId = curHost ? curHost.id : null;
             const storedDefault = getSettings().defaultHost;
             for (const host of hosts) {
                 const row = document.createElement('div');

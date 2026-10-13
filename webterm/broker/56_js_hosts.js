@@ -145,12 +145,60 @@
             } catch (e) { console.warn('csp hosts cookie write failed:', e); }
         }
         syncHostOriginsCookie();            // once at load, before any edit
+        // #253: does this host's broker host NO terminals (/info `terminals`
+        // false)? Three answers, like hostMcpScopes (78):
+        //   true  - its /info said terminals: false; it refuses every launch
+        //   false - a settled answer without that: it launches, or it is an
+        //           older build that omits the key (an ordinary broker)
+        //   null  - not known yet
+        // It never fetches, so it is for PAINT only: the serving broker's
+        // answer is localInfo()'s memo (86), a peer's is the Control Panel's
+        // modCatalogCache record (81). A click-time decision must read the
+        // awaited (await localInfo()).terminals instead — the first sync read
+        // of a fresh memo is null, which reads as "launches". Only a literal
+        // false counts.
+        function hostTerminalsOff(hostId) {
+            if (hostId === 'local') {
+                const m = hostTerminalsOff;
+                const p = localInfo._p;
+                if (!p) return null;
+                if (m._p !== p) {
+                    m._p = p;
+                    m._local = null;
+                    p.then(function (j) {
+                        if (m._p === p) m._local = !!(j && j.terminals === false);
+                    }, function () {
+                        if (m._p === p) m._local = false;
+                    });
+                }
+                return m._local;
+            }
+            let rec = null;
+            // 81 declares the cache with const, later in this script: a call
+            // before it ran must read "unknown", never throw.
+            try { rec = modCatalogCache.get(hostId); } catch (_) { return null; }
+            if (!rec) return null;
+            return rec.terminalsOff === true;
+        }
         // #107: the host the START (+) button targets. Empty / 'local' / a removed
-        // id all fall back to the local broker, so a deleted host never bricks
+        // id all resolve to the local broker, so a deleted host never bricks
         // START. Resolution is deferred here (not in normalizeSettings) — same
         // precedent as hostDefaultProfile / hostDefaultColor.
-        function defaultLaunchHost() {
-            return hostById(getSettings().defaultHost) || localHost();
+        // #253: it never picks a host the user did not choose. A chosen default
+        // whose broker hosts no terminals, or a local fallback that hosts none,
+        // resolves to null and the caller explains (76 showNoLaunchHost). A
+        // hidden / down / auth default is still returned: launchProfile's
+        // click-time refusal names that reason, as before. `localOff` lets a
+        // click-time caller pass the AWAITED local answer; omitted, the paint
+        // predicate decides.
+        function defaultLaunchHost(localOff) {
+            const off = (h) => ((h.id === 'local' && localOff !== undefined)
+                ? localOff === true
+                : hostTerminalsOff(h.id) === true);
+            const chosen = hostById(getSettings().defaultHost);
+            if (chosen) return off(chosen) ? null : chosen;
+            const local = localHost();
+            return off(local) ? null : local;
         }
         // Optional per-host DEFAULT accent (#103): the color a new terminal on
         // this host seeds from when it has no saved per-window color, instead of
