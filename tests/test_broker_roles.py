@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -98,6 +99,9 @@ def test_resolve_table(label, cfg, cli, err, serve_ui, terminals):
     if err is not None:
         assert got is not None and err in got, got
         assert got.startswith("error: ") and "\n" not in got
+        # A refusal leaves the input untouched, so a retry refuses again.
+        assert config == cfg
+        assert roles.resolve(config, **cli) == got
         return
     assert got is None
     assert "role" not in config                 # derived, never stored
@@ -180,6 +184,11 @@ def _assert_refused(rc, err, port, line):
     assert rc == 2, (rc, err)
     assert err.count(line) == 1, err
     assert "Traceback" not in err, err
+    # Nothing else on stderr but the broker's own INFO log lines (the config
+    # load is logged before the fold runs).
+    others = [ln for ln in err.splitlines() if ln and ln != line]
+    assert all(re.match(r"^\d{4}-\d\d-\d\d [\d:,]+ INFO ", ln)
+               for ln in others), err
     assert not _connectable(port)
 
 
@@ -415,18 +424,21 @@ def test_producer_hello_still_registers_on_a_terminals_off_broker(tmp_path):
     accepting agents -- one launched before the flag must reconnect."""
     import asyncio
     import time
+    import urllib.error
     import urllib.request
 
     import websockets
 
     cfg_path = tmp_path / "broker_config.json"
     cfg_path.write_text(json.dumps({
-        "state_path": str(tmp_path / "webterm_state.json"),
-        "terminals": False}), encoding="utf-8")
+        "state_path": str(tmp_path / "webterm_state.json")}),
+        encoding="utf-8")
     port = _free_port()
+    # --no-terminals on the CLI, so the supervisor's argv replay to its worker
+    # is what carries the flag (the worker re-folds it).
     proc = subprocess.Popen(
         [sys.executable, "-m", "webterm.broker", "--config", str(cfg_path),
-         "--host", "127.0.0.1", "--port", str(port)],
+         "--host", "127.0.0.1", "--port", str(port), "--no-terminals"],
         cwd=str(tmp_path), env=_env(),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = f"http://127.0.0.1:{port}"
@@ -448,6 +460,15 @@ def test_producer_hello_still_registers_on_a_terminals_off_broker(tmp_path):
             assert time.time() < deadline, "broker did not come up"
             time.sleep(0.2)
         assert info["terminals"] is False and info["role"] == "hub"
+        req = urllib.request.Request(
+            f"{base}/launch?token={TEST_TOKEN}", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("/launch answered 2xx on --no-terminals")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+            assert json.loads(exc.read())["error"] == "terminals_disabled"
 
         async def scenario():
             ws = await websockets.connect(
@@ -473,3 +494,64 @@ def test_producer_hello_still_registers_on_a_terminals_off_broker(tmp_path):
     finally:
         proc.kill()
         proc.wait(timeout=10)
+
+
+def test_role_node_flag_serves_a_node(tmp_path):
+    """--role node, not only the legacy --headless, through the supervisor."""
+    import time
+    import urllib.request
+
+    cfg_path = tmp_path / "broker_config.json"
+    cfg_path.write_text(json.dumps({
+        "state_path": str(tmp_path / "webterm_state.json")}),
+        encoding="utf-8")
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "webterm.broker", "--config", str(cfg_path),
+         "--host", "127.0.0.1", "--port", str(port), "--role", "node"],
+        cwd=str(tmp_path), env=_env(),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+
+    def get(path):
+        with urllib.request.urlopen(f"{base}{path}", timeout=5) as r:
+            return json.loads(r.read())
+
+    try:
+        deadline = time.time() + 30
+        while True:
+            try:
+                info = get(f"/info?token={TEST_TOKEN}")
+                break
+            except OSError:
+                pass
+            assert proc.poll() is None, f"broker exited: {proc.returncode}"
+            assert time.time() < deadline, "broker did not come up"
+            time.sleep(0.2)
+        assert info["role"] == "node" and info["serve_ui"] is False
+        assert info["terminals"] is True
+        assert get("/") == {"ui": False, "role": "node"}
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_every_launcher_call_sits_in_a_gated_handler():
+    """The gate lives at the handlers, so a NEW call to the launcher anywhere
+    else would launch on a terminals-off broker. Pin the enclosing handler of
+    every app.ctx.launcher.launch( call -- only _launch and _mcp_launch -- and
+    that each of those calls _refuse_if_no_terminals."""
+    src = (REPO / "webterm" / "broker" / "app.py").read_text(encoding="utf-8")
+    handlers = list(re.finditer(r"^    async def (_\w+)\(", src, re.M))
+    calls = list(re.finditer(r"app\.ctx\.launcher\.launch\(", src))
+    assert calls, "no launcher call found: retarget this test"
+    seen = set()
+    for m in calls:
+        enclosing = [h for h in handlers if h.start() < m.start()][-1]
+        seen.add(enclosing.group(1))
+    assert seen == {"_launch", "_mcp_launch"}, seen
+    for name in seen:
+        start = src.index(f"    async def {name}(")
+        nxt = [h.start() for h in handlers if h.start() > start]
+        body = src[start:nxt[0] if nxt else len(src)]
+        assert "_refuse_if_no_terminals(app)" in body, name

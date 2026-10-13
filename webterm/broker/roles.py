@@ -32,39 +32,47 @@ def role_of(serve_ui: bool) -> str:
 def resolve(config: Dict[str, Any], cli_role: Optional[str] = None,
             cli_headless: bool = False,
             cli_no_terminals: bool = False) -> Optional[str]:
-    """Fold the role alias and the CLI flags into ``config`` in place.
+    """Fold the role alias and the CLI flags into ``config`` in place, on
+    success only: a refusal leaves ``config`` exactly as it was.
 
     Returns ``None`` when the result is a broker that may start, else a
     one-line reason. Precedence follows ``--host``/``--port``: the CLI beats
     the config. ``--headless`` is the alias of ``--role node``, so passing it
     with ``--role hub`` is a contradiction, not a precedence question.
     """
-    if "role" in config:
-        role = config.pop("role")
+    # Everything is decided on a scratch copy and written back only on
+    # success, so a refused config is refused again on a second call (a
+    # caller that catches create_app's ValueError and retries the same dict
+    # must not find the offending `role` key gone).
+    folded = dict(config)
+    if "role" in folded:
+        role = folded.pop("role")
         if role not in ROLES:
             return (f"error: unknown role {role!r} in config "
                     f"(expected 'hub' or 'node')")
         serve_ui = role == "hub"
-        if "serve_ui" in config and bool(config["serve_ui"]) != serve_ui:
+        if "serve_ui" in folded and bool(folded["serve_ui"]) != serve_ui:
             return (f"error: config role {role!r} contradicts serve_ui: "
-                    f"{str(bool(config['serve_ui'])).lower()}; "
+                    f"{str(bool(folded['serve_ui'])).lower()}; "
                     f"keep one of them")
-        config["serve_ui"] = serve_ui
+        folded["serve_ui"] = serve_ui
     if cli_headless and cli_role == "hub":
         return ("error: --headless is the alias of --role node; "
                 "it contradicts --role hub")
     if cli_headless or cli_role == "node":
-        config["serve_ui"] = False
+        folded["serve_ui"] = False
     elif cli_role == "hub":
-        config["serve_ui"] = True
-    if "terminals" in config and not isinstance(config["terminals"], bool):
+        folded["serve_ui"] = True
+    if "terminals" in folded and not isinstance(folded["terminals"], bool):
         return (f"error: terminals must be true or false, "
-                f"got {config['terminals']!r}")
+                f"got {folded['terminals']!r}")
     if cli_no_terminals:
-        config["terminals"] = False
-    if (not bool(config.get("serve_ui", True))
-            and config.get("terminals", True) is False):
+        folded["terminals"] = False
+    if (not bool(folded.get("serve_ui", True))
+            and folded.get("terminals", True) is False):
         return ("error: refusing to start: a node (serve_ui: false) with "
                 "terminals: false has no terminals for another broker to "
                 "use; set terminals: true, or serve the page (role: hub)")
+    config.clear()
+    config.update(folded)
     return None

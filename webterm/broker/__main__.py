@@ -200,7 +200,9 @@ def main() -> int:
     parser.add_argument("--role", choices=roles.ROLES, default=None,
                         help="hub = serve the desktop page; node = serve the "
                              "JSON/WS API only, for another Browserland to "
-                             "reach (overrides serve_ui / role in config)")
+                             "reach (overrides serve_ui / role in config; a "
+                             "config whose role and serve_ui disagree is "
+                             "refused either way)")
     parser.add_argument("--headless", action="store_true",
                         help="alias of --role node: no desktop page or help "
                              "corpus (contradicts --role hub)")
