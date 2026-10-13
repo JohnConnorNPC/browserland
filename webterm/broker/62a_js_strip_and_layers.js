@@ -272,7 +272,10 @@
         function floatLocally(win, hint) {
             const pref = getPref(win.id);
             win.tiled = false;
-            pref.tiled = false;
+            // Not this device's choice: leave no local role, so a later
+            // reopen of this key follows the synced mode (a re-tile by a
+            // later adopt writes no role either).
+            delete pref.tiled;
             win.dom.classList.remove('tiled');
             win.dom.classList.remove('tab-hidden');
             win.dom.style.flex = '';
