@@ -335,9 +335,14 @@
                 if (ev && ev.code === 4409) {
                     // Deactivated: another browser took this broker's single-
                     // active lease. The control-WS {active:false} push drives
-                    // the full teardown (HOME) or host masking (remote); do NOT
-                    // reattach here — the relay drops a non-active socket's
-                    // input anyway, so a reattach would just bounce on 4409.
+                    // the full teardown (HOME) or host masking (remote). No
+                    // reattach is scheduled HERE, but the taskbar healing loop
+                    // (75) still re-dials any CLOSED, non-disposed window
+                    // within ~2 s (`reattachable`): such a socket attaches as
+                    // a watcher, whose input/resize the relay drops. A HOME
+                    // teardown disposes the window first, so only a masked
+                    // remote host's windows -- or a page that has not yet
+                    // learned of the loss -- come back that way.
                     return;
                 }
                 if (win.staleSession) {
