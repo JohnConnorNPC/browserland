@@ -191,16 +191,16 @@ def test_the_failed_future_is_retrieved(tmp_path, monkeypatch):
 # ---- A3: a random rid start per run ---------------------------------------
 
 def test_each_run_numbers_its_rids_from_a_random_start(tmp_path, monkeypatch):
-    """T6: two fresh broker apps (two runs) do not start at rid 1, nor at
-    the same rid; every rid stays a positive int under 2**53. (Each start
-    is random over 2**40, so a false failure is ~2**-40.)"""
+    """T6: two fresh broker apps (two runs) do not start at the same rid;
+    every rid stays a positive int under 2**53. (Each start is random over
+    2**40, so a false failure is ~2**-40; T6b pins the draw exactly.)"""
     firsts = []
     for n in range(2):
         sub = tmp_path / f"run{n}"
         sub.mkdir()
         app = _desktop_app(sub, monkeypatch)
         firsts.append(next(app.ctx.desktop_rid))
-    assert all(isinstance(r, int) and 1 < r < 2 ** 53 for r in firsts), firsts
+    assert all(isinstance(r, int) and 1 <= r < 2 ** 53 for r in firsts), firsts
     assert firsts[0] != firsts[1], firsts
 
 
@@ -316,3 +316,57 @@ def test_client_text_for_an_undispatched_lost_lease():
     assert err.code == "lost_lease"
     assert "nothing was applied" in str(err) and "safe to retry" in str(err)
     assert "get_desktop" not in str(err)
+
+
+class _BumpThenStallWS:
+    """A holder socket: the FIRST socket the relay tries bumps the lease
+    generation (a takeover) and then never finishes its send; any later
+    socket would write normally."""
+
+    def __init__(self, app, shared):
+        self.app = app
+        self.shared = shared
+        self.frames = []
+        self.closed = None
+
+    async def send(self, data):
+        if not self.shared["bumped"]:
+            self.shared["bumped"] = True
+            self.app.ctx.lease_generation += 1
+            await asyncio.Event().wait()          # stalls until cancelled
+        self.frames.append(json.loads(data))
+
+    async def close(self, code=1000, reason=""):
+        self.closed = code
+
+
+def test_dispatched_sticks_across_a_failover(tmp_path, monkeypatch):
+    """T9: the first socket's send started (then stalled past its slice and
+    was cancelled); by the second socket the generation has moved, so its
+    re-check refuses -- the answer must still say dispatched:true, because
+    the first, cancelled send may have put the frame on the wire."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 0.4
+    shared = {"bumped": False}
+    socks = [_BumpThenStallWS(app, shared), _BumpThenStallWS(app, shared)]
+    app.ctx.control_clients["h"] = set(socks)
+    app.ctx.active_client_id = "h"
+    _, resp = app.test_client.get("/mcp/desktop", headers=_AUTH)
+    assert shared["bumped"] is True
+    assert [s.frames for s in socks] == [[], []]       # never fully written
+    assert (resp.status, resp.json) == (409, {"error": "lost_lease",
+                                              "dispatched": True})
+
+
+def test_the_rid_start_is_drawn_from_secrets(tmp_path, monkeypatch):
+    """T6b (deterministic): the first rid is secrets.randbelow(2**40) + 1."""
+    import webterm.broker.app as app_mod
+    asked = []
+
+    def fake(n):
+        asked.append(n)
+        return 41
+    monkeypatch.setattr(app_mod.secrets, "randbelow", fake)
+    app = _desktop_app(tmp_path, monkeypatch)
+    assert 2 ** 40 in asked
+    assert next(app.ctx.desktop_rid) == 42

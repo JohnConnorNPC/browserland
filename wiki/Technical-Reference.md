@@ -780,9 +780,9 @@ browser keys the answers it has given on host, run and rid (#250).
   browser that does not answer within the 10 s end-to-end deadline → **504
   `desktop_timeout`**; a browser that lost the lease mid-op → **409
   `{"error":"lost_lease","dispatched":true|false}`**. Each op applies whole or
-  not at all, but `dispatched: true` means the op reached a browser, which may
-  have applied it before it learned it was deposed: check with `get` before
-  retrying. Only `dispatched: false` (no browser was ever sent the op)
+  not at all, but `dispatched: true` means a send of the op was started, so a
+  browser may have it and may have applied it before it learned it was
+  deposed: check with `get` before retrying. Only `dispatched: false` (no browser was ever sent the op)
   promises nothing was applied. The broker never sends an op once the lease
   has moved on, and the browser refuses an op from a host whose lease it lost,
   from an older lease generation, or from another broker run (#250).

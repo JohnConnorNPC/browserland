@@ -8024,7 +8024,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"error": "bad_args",
                                "detail": outcome.get("detail")}, status=400)
         if code == "lost_lease":
-            # #250 A6: the BROWSER answered, so it was handed the op.
+            # #250 A6: the BROWSER answered, so it was handed the op (the same
+        # "dispatched" as a send that was started).
             return sanic_json({"error": code, "dispatched": True},
                               status=409)
         if code == "not_home":
