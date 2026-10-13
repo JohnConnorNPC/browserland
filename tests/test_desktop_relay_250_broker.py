@@ -202,3 +202,117 @@ def test_each_run_numbers_its_rids_from_a_random_start(tmp_path, monkeypatch):
         firsts.append(next(app.ctx.desktop_rid))
     assert all(isinstance(r, int) and 1 < r < 2 ** 53 for r in firsts), firsts
     assert firsts[0] != firsts[1], firsts
+
+
+# ---- A6: the lost_lease body says whether the op was dispatched ------------
+
+def test_a_takeover_before_the_send_says_not_dispatched(tmp_path,
+                                                        monkeypatch):
+    """T2 body: no socket was ever handed the frame, so dispatched:false
+    (the one lost_lease that promises nothing applied)."""
+    out = _takeover_at_registration(_desktop_app(tmp_path, monkeypatch),
+                                    monkeypatch)
+    assert out["http"] == (409, {"error": "lost_lease",
+                                 "dispatched": False})
+
+
+class _StalledRpcWS(HolderWS):
+    """A holder whose desktop_rpc send blocks (after the relay's re-check
+    passed) until ``release`` is set; status frames pass straight through."""
+
+    def __init__(self, ctx):
+        super().__init__(ctx, answer=False)
+        self.release = asyncio.Event()
+        self.rpc_started = asyncio.Event()
+
+    async def send(self, data):
+        if json.loads(data).get("type") == "desktop_rpc":
+            self.rpc_started.set()
+            await self.release.wait()
+        await super().send(data)
+
+
+def test_a_takeover_during_the_send_says_dispatched(tmp_path, monkeypatch):
+    """T7: the send started under the live generation, a takeover landed
+    while it was blocked, then the frame went out: the deposed browser may
+    apply it, so the caller's lost_lease says dispatched:true."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 2.0
+    out = {}
+
+    async def go():
+        c = Ctl(app)
+        a = await c.attach("A", _StalledRpcWS(app.ctx))
+        b = await c.connect("B")
+        call = asyncio.ensure_future(_get_desktop(app))
+        await asyncio.wait_for(a.rpc_started.wait(), 2)
+        b.push({"type": "become_active"})
+        await _settle()
+        out["holder"] = app.ctx.active_client_id
+        a.release.set()
+        _, resp = await call
+        out["http"] = (resp.status, resp.json)
+        out["a_rpcs"] = _rpcs(a)
+        await c.close_all()
+    asyncio.run(go())
+    assert out["holder"] == "B"
+    assert len(out["a_rpcs"]) == 1          # the frame did reach A
+    assert out["http"] == (409, {"error": "lost_lease", "dispatched": True})
+
+
+class _DeadWS:
+    def __init__(self):
+        self.tries = 0
+
+    async def send(self, data):
+        self.tries += 1
+        raise ConnectionError("gone")
+
+
+def test_every_send_failed_is_dispatched(tmp_path, monkeypatch):
+    """T8: sends that raised were still STARTED; a raise does not prove
+    nothing reached the browser, so the answer stays cautious."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 0.3
+    socks = [_DeadWS(), _DeadWS()]
+    app.ctx.control_clients["dead"] = set(socks)
+    app.ctx.active_client_id = "dead"
+    _, resp = app.test_client.get("/mcp/desktop", headers=_AUTH)
+    assert [s.tries for s in socks] == [1, 1]
+    assert (resp.status, resp.json) == (409, {"error": "lost_lease",
+                                              "dispatched": True})
+
+
+def _client_error(body):
+    import httpx
+    import pytest
+    from tests.test_mcptool import _ToolBroker, _install, _reset_server
+    from webterm.mcptool.client import BrowserlandError
+    broker_ = _ToolBroker(responses={
+        "/mcp/desktop": lambda req: httpx.Response(409, json=body)})
+    server = _install({"h": broker_})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.arrange_window("h:7", "focus")
+    finally:
+        _reset_server()
+    return ei.value
+
+
+def test_client_text_for_a_dispatched_lost_lease():
+    """A6 client: dispatched:true -- and an old broker's body without the
+    key -- tell the agent to check with get_desktop before retrying."""
+    for body in ({"error": "lost_lease", "dispatched": True},
+                 {"error": "lost_lease"}):
+        err = _client_error(body)
+        assert err.code == "lost_lease"
+        assert "get_desktop" in str(err) and "before" in str(err), str(err)
+        assert "safe to retry" not in str(err)
+
+
+def test_client_text_for_an_undispatched_lost_lease():
+    """A6 client: only dispatched:false says nothing was applied."""
+    err = _client_error({"error": "lost_lease", "dispatched": False})
+    assert err.code == "lost_lease"
+    assert "nothing was applied" in str(err) and "safe to retry" in str(err)
+    assert "get_desktop" not in str(err)
