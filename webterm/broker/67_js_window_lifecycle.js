@@ -366,6 +366,10 @@
             // reload can reattach it. openWindow only ever builds terminals,
             // but guard on the app flag for symmetry with closeWindow (app
             // windows restore via appStore, never this set).
+            // #251: read the SHARED float membership first. Once this window
+            // lists itself every key is in openTerms, and a brand-new window
+            // must still follow the tiling default.
+            const knownFloat = win.type !== 'app' && isKnownFloat(id);
             if (win.type !== 'app') addOpenTerm(id);
 
             // #153: the OSC 52 registration is disposed with the window. Not
@@ -912,7 +916,7 @@
             // measurement below and before attachWebSocket — so the
             // resized-before-snapshot handshake measures the final tiled box
             // (not the floating geometry it was created with).
-            if (decideTiled(id)) {
+            if (decideTiled(id, knownFloat)) {
                 placeWindowTiled(win);
             } else {
                 // Float: announce the placement NOW, in the frame the window is

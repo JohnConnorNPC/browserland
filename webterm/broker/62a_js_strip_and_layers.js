@@ -237,6 +237,56 @@
             layoutRemoveKey(key);
             requestRelayout();
         }
+        // #251: an ADOPTED layout can drop a tiled window's column, because
+        // another tab or device floated it. Nothing else un-tiles the window:
+        // relayoutStrip just stops rendering it and removes its old column
+        // element, so it vanished. Float it HERE instead, on this device only.
+        // Only a key the shared layout still lists as open was floated; one
+        // gone from openTerms too was closed elsewhere and is left alone.
+        // `prevLayout` is the layout before the adopt: the column the key had
+        // there names the workspace the float belongs to.
+        function reconcileWindowRoles(prevLayout) {
+            if (isDetachedSurface()) return;   // #226: its layout is fixed
+            const open = getOpenTerms();
+            for (const win of Array.from(windows.values())) {
+                if (win.disposed || win.type === 'app' || !win.tiled) continue;
+                if (findKeyInLayout(win.id)) continue;
+                if (open.indexOf(win.id) === -1) continue;
+                const was = _columnHolding(prevLayout, win.id);
+                floatLocally(win, (was && typeof was.wsId === 'string')
+                    ? { wsId: was.wsId } : undefined);
+            }
+        }
+        function _columnHolding(L, key) {
+            if (!L || !Array.isArray(L.columns)) return null;
+            for (const col of L.columns) {
+                for (const row of ((col && col.rows) || [])) {
+                    if (rowKeys(row).indexOf(key) !== -1) return col;
+                }
+            }
+            return null;
+        }
+        // detachToFloat's presentation half: the layout already says "float",
+        // so no layoutRemoveKey and no savePrefs (an adopt never writes back).
+        // Its own box on this device, never focus: nobody here asked for it.
+        function floatLocally(win, hint) {
+            const pref = getPref(win.id);
+            win.tiled = false;
+            pref.tiled = false;
+            win.dom.classList.remove('tiled');
+            win.dom.classList.remove('tab-hidden');
+            win.dom.style.flex = '';
+            document.getElementById('desktop').appendChild(win.dom);
+            applyGeomToWindow(win, clampGeom(win.floatGeom || pref.floatGeom
+                || pref.geom || defaultGeom()));
+            win.dom.style.zIndex = String(floatZIndex(win));
+            savePrefsLocal();
+            notifyWindowPlaced(win, hint);
+            // The front window stays front: the reparent dropped its DOM focus.
+            // bringToFront refuses one the hook just masked off this workspace.
+            if (frontId === win.id) bringToFront(win.id);
+            refitSoon(win);
+        }
 
         // ---- parking (off-screen custody) ---------------------------------
         // A window the strip is not currently mounting lives in #park
@@ -260,6 +310,8 @@
         //   placed(win)  — a window was just placed as a FLOAT. The workspaces
         //                  mod stamps its workspace and masks it in the same
         //                  frame, so it never paints where it doesn't belong.
+        //                  A window an adopt floated passes a second argument,
+        //                  {wsId}: the workspace its column was on (#251).
         //   reveal(win)  — first refusal before revealAndFocusWindow focuses:
         //                  switch to the workspace holding a tiled window, or
         //                  re-home a float parked on another one (#152).
@@ -292,16 +344,17 @@
                 }
             };
         }
-        function _runPlacementHook(name, arg) {
+        function _runPlacementHook(name, arg, hint) {
             const fn = _placementHooks[name];
             if (!fn) return;
-            try { fn(arg); }
+            try { if (hint === undefined) fn(arg); else fn(arg, hint); }
             catch (e) { console.error('[tiling] placement "' + name + '" hook threw', e); }
         }
         // A window has just been placed as a FLOAT (a fresh one, or one the
         // window factory restored). Public so the create path can announce it
-        // without knowing who -- if anyone -- cares.
-        function notifyWindowPlaced(win) { _runPlacementHook('placed', win); }
+        // without knowing who -- if anyone -- cares. `hint` ({wsId}) says which
+        // workspace a window floated by an adopt belongs to (#251).
+        function notifyWindowPlaced(win, hint) { _runPlacementHook('placed', win, hint); }
         // Its key will never be seen again: prune anything keyed off it.
         function notifyWindowForgotten(key) { _runPlacementHook('forgotten', key); }
         // The single creation tail every window factory ends with: a tiled window
