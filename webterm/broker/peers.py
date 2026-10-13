@@ -24,6 +24,8 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from ..protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
+
 #: The browser gate's second credential: B's browser token, carried beside A's
 #: own bearer. A never forwards it under this name (it becomes the upstream
 #: ``Authorization``) and never stores it.
@@ -186,3 +188,225 @@ def make_client():
                               pool=PEER_CONNECT_TIMEOUT_S),
         limits=httpx.Limits(max_connections=PEER_MAX_DIALS,
                             max_keepalive_connections=PEER_MAX_DIALS))
+
+
+# ---- what may be relayed ----------------------------------------------------
+# Explicit (method, path) tables, research #252 S7 verbatim. Anything absent is
+# denied: no prefix matching, so `/mods/` cannot admit `/mods/install`. Never
+# here, by design: GET /, /help-corpus.json, /vendor/*, /mods/<id>/<gen>/*,
+# /mods/install|uninstall|rescan|installed, POST /restart, WS /browserland,
+# /state (GET/PUT), /status/fetch, OPTIONS, and (until phase 2) /ws, /control.
+
+#: The browser gate: A's browser token AND B's token in PEER_TOKEN_HEADER.
+BROWSER_ALLOW = frozenset(
+    [("GET", p) for p in (
+        "/info", "/sessions", "/profiles", "/profiles/config",
+        "/profiles/detect", "/recordings", "/recording", "/recording/notes",
+        "/update/check")]
+    + [("POST", p) for p in (
+        "/launch", "/file/list", "/file/read", "/file/read_chunk",
+        "/file/hash", "/file/write", "/file/upload", "/file/upload_begin",
+        "/file/upload_chunk", "/file/upload_commit", "/file/upload_abort",
+        "/file/paste_image", "/file/delete", "/file/mkdir", "/file/copy",
+        "/file/move", "/file/zip", "/file/unzip", "/file/stat",
+        "/file/setattr", "/session/procs", "/session/kill", "/session/git",
+        "/session/mcp", "/session/control", "/recording/begin",
+        "/recording/chunk", "/recording/commit", "/recording/abort",
+        "/recording/delete", "/recording/notes", "/update/apply",
+        "/update/policy", "/mods/policy", "/profiles/config")])
+
+#: ``/mod-store/<modId>`` (GET, PUT) on the browser gate. The id shape is
+#: app.py's ``_MODSTORE_ID_RE`` (pinned equal by test), so an id can never
+#: carry a separator.
+MOD_STORE_RE = re.compile(r"/mod-store/([a-z0-9][a-z0-9-]{0,63})")
+MOD_STORE_METHODS = frozenset({"GET", "PUT"})
+
+#: The MCP gate: B's MCP token alone, and only for a peer with ``mcp: true``.
+MCP_ALLOW = frozenset(
+    [("GET", p) for p in (
+        "/mcp/info", "/mcp/terminals", "/mcp/profiles", "/mcp/desktop",
+        "/mcp/config")]
+    + [("POST", p) for p in (
+        "/mcp/read", "/mcp/input", "/mcp/reset", "/mcp/flush", "/mcp/pace",
+        "/mcp/launch", "/mcp/window", "/mcp/desktop", "/mcp/config",
+        "/mcp/knobs")])
+
+GATE_BROWSER = "browser"
+GATE_MCP = "mcp"
+
+
+def classify(method: str, rest: str) -> Tuple[Optional[str], str]:
+    """``(gate, canonical path)`` for a relayable request, else
+    ``(None, error)``.
+
+    ``rest`` is what follows ``/peer/<id>/``, still percent-encoded (Sanic
+    hands path parameters over undecoded). It is decoded ONCE here, the hop
+    refusal runs first on the decoded segments, and the path that is dialed
+    is the canonical table string, never the client's bytes.
+    """
+    path = "/" + urllib.parse.unquote(rest, errors="replace")
+    # Hop limit 1: nothing that names another /peer/ hop is ever relayed,
+    # whatever the table says. It is checked first so that it stays a rule
+    # of its own, not a side effect of the table.
+    if "peer" in path.split("/"):
+        return None, "peer_hop_refused"
+    if (method, path) in MCP_ALLOW:
+        return GATE_MCP, path
+    if (method, path) in BROWSER_ALLOW:
+        return GATE_BROWSER, path
+    if method in MOD_STORE_METHODS and MOD_STORE_RE.fullmatch(path):
+        return GATE_BROWSER, path
+    return None, "not_relayed"
+
+
+def is_mcp_path(rest: str) -> bool:
+    """Does this prefix path aim at the MCP gate? Decided on the decoded
+    first segment, so the gate cannot be dodged by encoding ``mcp``."""
+    return urllib.parse.unquote(rest, errors="replace").split("/")[0] == "mcp"
+
+
+# ---- header policy ------------------------------------------------------------
+# Allowlists both ways: a header not named here does not cross. That drops, by
+# construction, A's own Authorization, the peer token and pairing headers,
+# Cookie, Host, Origin, Referer, X-Forwarded-*, and every hop-by-hop header
+# (Connection, Keep-Alive, Proxy-Authenticate, Proxy-Authorization, TE,
+# Trailer, Transfer-Encoding, Upgrade) in both directions.
+
+#: Request headers forwarded as the client sent them.
+_UP_PLAIN = ("Content-Type", "Content-Length", "Accept")
+
+#: Response headers forwarded as B sent them. Content-Type is never in this
+#: list: it is forced (see :func:`forced_content_type`).
+_DOWN_PLAIN = ("Content-Length", "Content-Encoding", "Cache-Control", "ETag",
+               "Last-Modified", "Content-Disposition")
+
+#: The enforced CSP of every /peer/* response: a relayed body is never a
+#: document that can run script on A's origin.
+SANDBOX_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
+
+
+class PolicyError(Exception):
+    """A request A refuses locally, before any dial (``status``, ``error``)."""
+
+    def __init__(self, status: int, error: str) -> None:
+        super().__init__(error)
+        self.status = status
+        self.error = error
+
+
+def upstream_headers(headers, *, gate: str, bearer: str,
+                     admin_header: str) -> list:
+    """The header list A sends to B. ``headers`` is the incoming multi-dict
+    (``getall``); ``bearer`` is the credential for this gate (B's browser
+    token, or B's MCP token on the MCP gate); ``admin_header`` is #191's
+    ``X-Webterm-Admin``, forwarded only when the caller supplied it.
+
+    Exactly one ``X-Browserland-Scope`` crosses: a repeat is refused here
+    (B would 400 it too), never collapsed to one copy A picked."""
+    out = []
+    for name in _UP_PLAIN:
+        val = headers.get(name)
+        if val is not None:
+            out.append((name, val))
+    scopes = headers.getall(SCOPE_HEADER, None) or []
+    if len(scopes) > 1:
+        raise PolicyError(400, "bad_scope")
+    if scopes:
+        out.append((SCOPE_HEADER, scopes[0]))
+    for val in headers.getall(admin_header, None) or []:
+        out.append((admin_header, val))
+    if gate == GATE_MCP:
+        # B's MCP admin header is B's credential, sent by the mcptool client
+        # beside B's MCP token; on the browser gate it has no business.
+        for val in headers.getall(MCP_ADMIN_HEADER, None) or []:
+            out.append((MCP_ADMIN_HEADER, val))
+    # The relay passes bytes through untouched, so ask for them untouched.
+    out.append(("Accept-Encoding", "identity"))
+    out.append(("Authorization", "Bearer " + bearer))
+    return out
+
+
+def upstream_query(raw_qs: str) -> str:
+    """The query string A forwards: the client's, minus ``token`` and
+    ``auth``. B reads a query token BEFORE the bearer (auth.provided_token),
+    so a forwarded ``?token=`` would both leak A's token and override the
+    credential A set."""
+    pairs = urllib.parse.parse_qsl(raw_qs or "", keep_blank_values=True)
+    return urllib.parse.urlencode(
+        [(k, v) for k, v in pairs if k not in ("token", "auth")])
+
+
+def forced_content_type(upstream_type: Optional[str]) -> str:
+    """JSON stays JSON; everything else -- ``text/html`` above all -- is
+    ``application/octet-stream``, which no browser renders as a page."""
+    media = (upstream_type or "").split(";", 1)[0].strip().lower()
+    if media == "application/json":
+        return "application/json"
+    return "application/octet-stream"
+
+
+def downstream_headers(up_headers) -> dict:
+    """The headers A sends back: B's allowlisted ones, plus the hardening.
+    ``Set-Cookie``, ``Location`` and every ``Access-Control-*`` are not on
+    the list, so they never cross."""
+    out = {}
+    for name in _DOWN_PLAIN:
+        val = up_headers.get(name)
+        if val is not None:
+            out[name] = val
+    out["X-Content-Type-Options"] = "nosniff"
+    out["Content-Security-Policy"] = SANDBOX_CSP
+    return out
+
+
+# ---- the relay ------------------------------------------------------------------
+
+async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
+                query: str, headers: list, body, respond, abort, log):
+    """Dial ``origin + path`` and stream B's answer to ``respond``.
+
+    Returns ``None`` once B's answer has been streamed (or the downstream was
+    dropped mid-body), or ``(status, error)`` for a failure BEFORE anything
+    was sent, which the caller answers as JSON. ``respond(status=, headers=,
+    content_type=)`` is Sanic's ``request.respond``; ``abort()`` drops the
+    downstream connection, so a body that dies half-way is never delivered
+    as if it were complete. Redirects are not followed (the client is built
+    with ``follow_redirects=False``): a 3xx is relayed with its status and
+    without ``Location``.
+
+    ``log`` gets the peer id, the method, the canonical path and the
+    exception CLASS -- never the upstream URL or its query (an httpx
+    exception's text embeds the URL)."""
+    import httpx
+    url = origin + path + ("?" + query if query else "")
+    try:
+        req = client.build_request(method, url, headers=headers,
+                                   content=body)
+        up = await client.send(req, stream=True)
+    except httpx.TimeoutException as exc:
+        log("peer %s: %s %s timed out (%s)", peer_id, method, path,
+            type(exc).__name__)
+        return 504, "peer_timeout"
+    except httpx.HTTPError as exc:
+        log("peer %s: %s %s failed (%s)", peer_id, method, path,
+            type(exc).__name__)
+        return 502, "peer_unreachable"
+    try:
+        response = await respond(
+            status=up.status_code, headers=downstream_headers(up.headers),
+            content_type=forced_content_type(up.headers.get("content-type")))
+        try:
+            # One chunk at a time: Sanic's send waits for the transport to
+            # drain, so a slow client slows the upstream read, and nothing
+            # (not even a 256 MiB recording) is held whole in memory.
+            async for chunk in up.aiter_raw():
+                await response.send(chunk)
+        except httpx.HTTPError as exc:
+            log("peer %s: %s %s broke mid-body (%s)", peer_id, method, path,
+                type(exc).__name__)
+            abort()
+            return None
+        await response.eof()
+        return None
+    finally:
+        await up.aclose()
