@@ -629,6 +629,17 @@
             // A replacement in flight takes charge when it reports; its own
             // failure re-dials (above).
             if (rec.cand) return;
+            // 1012: the broker closed us because ONE status/push send missed
+            // its 0.5 s budget -- the path is fine, and if that was the
+            // holder's only socket the lease was just released, so another
+            // device could auto-claim during a 2 s backoff. Re-dial at once,
+            // but only off a channel that had been up for REATTACH_STABLE_MS:
+            // a broker that 1012s every fresh socket backs off as usual.
+            if (ev && ev.code === 1012 && rec.lastOpenAt
+                    && (Date.now() - rec.lastOpenAt) >= REATTACH_STABLE_MS) {
+                const h = hostById(rec.hostId);
+                if (h) { rec.attempts = 1; openControlWs(h); return; }
+            }
             scheduleControlReattach(rec.hostId);
         }
 

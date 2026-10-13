@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 73
+EXPECTED_ASSERTS = 77
 
 _HARNESS = r"""
 'use strict';
@@ -604,6 +604,33 @@ s1 = w.last(); s1._open(); s1._recv(ST(false, { activeClientId: 'phone', gen: 2,
 ok(w.log.indexOf('teardown') !== -1,
     'K6 a restarted broker (new bootId, lower gen) is not mistaken for a stale status');
 
+// ---- manager note: 1012 re-dials at once; pongs are ordered too -----------
+w = mkWorld();
+s0 = connected(w, ST(true));
+for (let i = 0; i < 6; i++) { w.advance(1000); pong(s0, s0.lastPing().n); }
+s0._drop(1012);
+ok(w.sockets.length === 2 && w.rec().reattachTimer === null,
+    'Q1 a 1012 on a channel up for 5 s re-dials at once (no backoff)');
+s1 = w.last(); s1._open(); s1._drop(1012);    // a fresh socket 1012s at once
+ok(w.sockets.length === 2 && w.rec().reattachTimer !== null,
+    'Q2 a 1012 on a socket opened under 5 s ago backs off (no tight loop)');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+for (let i = 0; i < 6; i++) { w.advance(1000); pong(s0, s0.lastPing().n); }
+s0._drop(1006);
+ok(w.sockets.length === 1 && w.rec().reattachTimer !== null,
+    'Q3 any other close still backs off');
+
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 5 }));
+w.advance(10000);
+s1 = w.last(); s1._open(); s1._recv(ST(false, { activeClientId: 'phone', gen: 6 }));
+const td = w.log.filter(x => x === 'teardown').length;
+pong(s1, s1.lastPing().n, { active: true, activeClientId: 'me', gen: 5, bootId: 'b1' });
+ok(td === 1 && w.log.filter(x => x === 'rebuild').length === 0 && w.env._homeActive === false,
+    'Q4 an older-gen pong (any socket) cannot undo a newer status');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -768,6 +795,16 @@ def test_reclaim_per_new_holding(run, label):
     "K6 a restarted broker (new bootId, lower gen) is not mistaken for a stale status",
 ])
 def test_codex_round1(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "Q1 a 1012 on a channel up for 5 s re-dials at once (no backoff)",
+    "Q2 a 1012 on a socket opened under 5 s ago backs off (no tight loop)",
+    "Q3 any other close still backs off",
+    "Q4 an older-gen pong (any socket) cannot undo a newer status",
+])
+def test_manager_note_1012_and_pong_order(run, label):
     _ok(run, label)
 
 
