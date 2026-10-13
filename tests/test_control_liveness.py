@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 31
+EXPECTED_ASSERTS = 39
 
 _HARNESS = r"""
 'use strict';
@@ -148,7 +148,7 @@ function mkWorld(opts) {
         'with (env) {\n' + slice + '\n' +
         'var __api = { openControlWs: openControlWs, closeControlWs: closeControlWs,\n' +
         '  controlSockets: controlSockets, sendBecomeActive: sendBecomeActive,\n' +
-        '  onControlStatus: onControlStatus };\n' +
+        '  onControlStatus: onControlStatus, probeControl: probeControl };\n' +
         '}\nreturn __api;\n');
     w.api = factory(env);
     w.rec = function (hid) { return w.api.controlSockets.get(hid || 'local'); };
@@ -343,6 +343,59 @@ pong(s0, s0.lastPing().n, { active: false, activeClientId: 'phone', gen: 4, boot
 ok(w.log.indexOf('remote:rb:false') !== -1,
     'P5 a remote host pong lease reaches that host remote handler');
 
+// ---- A4: hints probe the broker; the broker decides ----------------------
+w = mkWorld();
+s0 = connected(w, ST(true));
+pong(s0, s0.lastPing().n);
+let pc = s0.pings().length;
+w.api.probeControl('local');
+ok(s0.pings().length === pc + 1,
+    'H1 a hint on a healthy channel pings the broker at once');
+w.api.probeControl('local');
+w.api.probeControl('local');
+ok(s0.pings().length === pc + 1,
+    'H2 more hints while that probe is in flight send nothing (in-flight guard)');
+pong(s0, s0.lastPing().n, { active: false, activeClientId: 'phone', gen: 2, bootId: 'b1' });
+ok(w.log.indexOf('teardown') !== -1,
+    'H3 the probe pong saying the lease moved tears the stale view down');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+pong(s0, s0.lastPing().n);
+w.api.probeControl('local');
+pong(s0, s0.lastPing().n, { active: true, activeClientId: 'me', gen: 1, bootId: 'b1' });
+ok(w.log.indexOf('teardown') === -1 && w.log.indexOf('overlay') === -1,
+    'H4 a probe tears nothing down by itself (the broker said we still hold it)');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // missed -> replacement dialing
+pc = s0.pings().length;
+const sk = w.sockets.length;
+w.api.probeControl('local');
+ok(s0.pings().length === pc && w.sockets.length === sk,
+    'H5 a hint while a replacement is dialing does nothing more');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._drop(1006);
+w.api.probeControl('local');
+ok(w.sockets.length === 2 && w.rec().reattachTimer === null,
+    'H6 a hint with no channel brings the backed-off re-dial forward');
+
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last(); s0._open(); s0._recv(OLD_ST(true));
+pc = s0.pings().length;
+w.api.probeControl('local');
+ok(s0.pings().length === pc, 'H7 a hint on an older (non-ponging) broker sends nothing');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._drop(4401);
+w.api.probeControl('local');
+ok(w.sockets.length === 1, 'H8 a hint never re-dials a channel parked on 4401 (auth)');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -435,6 +488,20 @@ def test_wake_probe(run, label):
     "P5 a remote host pong lease reaches that host remote handler",
 ])
 def test_pong_lease_goes_through_on_control_status(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "H1 a hint on a healthy channel pings the broker at once",
+    "H2 more hints while that probe is in flight send nothing (in-flight guard)",
+    "H3 the probe pong saying the lease moved tears the stale view down",
+    "H4 a probe tears nothing down by itself (the broker said we still hold it)",
+    "H5 a hint while a replacement is dialing does nothing more",
+    "H6 a hint with no channel brings the backed-off re-dial forward",
+    "H7 a hint on an older (non-ponging) broker sends nothing",
+    "H8 a hint never re-dials a channel parked on 4401 (auth)",
+])
+def test_probe_control(run, label):
     _ok(run, label)
 
 

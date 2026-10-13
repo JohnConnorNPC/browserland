@@ -230,6 +230,13 @@
                     return;
                 }
                 if (heldResized) flushHeldResized();
+                // #248 A4: the broker dropped this socket's input or resize
+                // because this page does not hold the lease. A hint only:
+                // ask the broker (probeControl); its answer drives the view.
+                if (data.type === 'error' && data.reason === 'not_active') {
+                    if (typeof probeControl === 'function') probeControl(win.hostId);
+                    return;
+                }
                 if (data.type === 'error' && data.reason === 'unknown_session') {
                     win.staleSession = true;
                     return;
@@ -342,7 +349,10 @@
                     // a watcher, whose input/resize the relay drops. A HOME
                     // teardown disposes the window first, so only a masked
                     // remote host's windows -- or a page that has not yet
-                    // learned of the loss -- come back that way.
+                    // learned of the loss -- come back that way. #248 A4: a
+                    // 4409 is also a hint for a page whose own /control may be
+                    // stale: ask the broker.
+                    if (typeof probeControl === 'function') probeControl(win.hostId);
                     return;
                 }
                 if (win.staleSession) {

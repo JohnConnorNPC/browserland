@@ -602,14 +602,43 @@
                 if (st && !st.done && st.ws
                         && st.ws.readyState === WebSocket.OPEN) {
                     if (st.capable) _controlPing(st, true);
-                } else if (!rec.cur && !rec.cand && rec.reattachTimer) {
-                    clearTimeout(rec.reattachTimer);
-                    rec.reattachTimer = null;
-                    const h = hostById(rec.hostId);
-                    if (h) openControlWs(h);
+                } else {
+                    _redialNow(rec);
                 }
             }
         });
+        // Bring a backed-off re-dial forward. Only a channel that is WAITING
+        // to re-dial: a 4401'd one has no timer and waits for the auth form.
+        function _redialNow(rec) {
+            if (!rec || rec.closedByUs || rec.cur || rec.cand
+                    || !rec.reattachTimer) return;
+            clearTimeout(rec.reattachTimer);
+            rec.reattachTimer = null;
+            const h = hostById(rec.hostId);
+            if (h) openControlWs(h);
+        }
+
+        // #248 A4: a HINT that this page may no longer hold `hostId`'s lease
+        // -- a terminal closed 4409, a terminal `error` not_active (its input
+        // or resize was dropped), a home PUT /state 409 not_active. A hint
+        // never tears anything down itself: it asks the broker NOW, by a
+        // ping whose pong carries the live lease (routed to onControlStatus),
+        // so the broker stays the one authority. In-flight guard (S3): a
+        // stale page with an owed push re-PUTs on every poll, so a probe is a
+        // no-op while a deadline is already running or a replacement is
+        // already dialing. No channel at all: the waiting re-dial is brought
+        // forward, and its first status answers instead.
+        function probeControl(hostId) {
+            const rec = controlSockets.get(hostId);
+            if (!rec || rec.closedByUs || rec.cand) return;
+            const st = rec.cur;
+            if (!st || st.done || !st.ws) { _redialNow(rec); return; }
+            if (st.ws.readyState !== WebSocket.OPEN) return;  // its status answers
+            // A deadline is already running -- or the broker is an older one
+            // that never pongs, whose first ping therefore stays outstanding.
+            if (st.pendN !== null) return;
+            _controlPing(st);
+        }
 
         function scheduleControlReattach(hostId) {
             const rec = controlSockets.get(hostId);

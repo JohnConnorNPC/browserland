@@ -112,6 +112,13 @@
                     // differs from `serialized` exactly when the user edited
                     // during the in-flight PUT (the Codex lost-update case).
                     const cur = await r.json();
+                    // #248 A4: refused for the LEASE (not a stale rev): a hint
+                    // that this page may have lost it unawares. Ask the broker;
+                    // the adopt below is unchanged.
+                    if (cur && cur.error === 'not_active'
+                            && typeof probeControl === 'function') {
+                        probeControl(homeHostId());
+                    }
                     if (cur && typeof cur === 'object') {
                         _stateRev = (typeof cur.rev === 'number') ? cur.rev : _stateRev;
                         if (!_statePushAgain && _stateSerialize() === serialized) {
