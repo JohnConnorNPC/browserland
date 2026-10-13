@@ -178,11 +178,18 @@ def test_control_lease(broker_proc):
     _, port, base = broker_proc
 
     async def scenario():
+        # #248: every status also names the lease generation and the broker
+        # run (bootId, the same one /info reports).
+        _, info = _http("GET", f"{base}/info?token={TOKEN}")
+        boot = info["restart"]["bootId"]
         # A connects first -> auto-activated; B connects -> inactive.
         ctrl_a, sa = await _claim_lease(port, "A")
-        assert sa == {"type": "status", "active": True, "activeClientId": "A"}
+        g0 = sa["gen"]
+        assert sa == {"type": "status", "active": True, "activeClientId": "A",
+                      "gen": g0, "bootId": boot}
         ctrl_b, sb = await _claim_lease(port, "B")
-        assert sb == {"type": "status", "active": False, "activeClientId": "A"}
+        assert sb == {"type": "status", "active": False, "activeClientId": "A",
+                      "gen": g0, "bootId": boot}
 
         # A live producer to gate input against.
         producer = await websockets.connect(
@@ -207,9 +214,11 @@ def test_control_lease(broker_proc):
         # already-attached terminal is closed with 4409 (deactivated).
         await ctrl_b.send(json.dumps({"type": "become_active"}))
         assert json.loads(await asyncio.wait_for(ctrl_a.recv(), 5)) == \
-            {"type": "status", "active": False, "activeClientId": "B"}
+            {"type": "status", "active": False, "activeClientId": "B",
+             "gen": g0 + 1, "bootId": boot}
         assert json.loads(await asyncio.wait_for(ctrl_b.recv(), 5)) == \
-            {"type": "status", "active": True, "activeClientId": "B"}
+            {"type": "status", "active": True, "activeClientId": "B",
+             "gen": g0 + 1, "bootId": boot}
         with pytest.raises(websockets.ConnectionClosed):
             while True:
                 await asyncio.wait_for(br_a.recv(), 10)
@@ -257,11 +266,13 @@ def test_control_lease(broker_proc):
         # control socket is told nobody is active.
         await ctrl_b.close()
         assert json.loads(await asyncio.wait_for(ctrl_a.recv(), 5)) == \
-            {"type": "status", "active": False, "activeClientId": None}
+            {"type": "status", "active": False, "activeClientId": None,
+             "gen": g0 + 2, "bootId": boot}
 
         # A fresh client C reconnecting onto the empty lease auto-claims it.
         ctrl_c, sc = await _claim_lease(port, "C")
-        assert sc == {"type": "status", "active": True, "activeClientId": "C"}
+        assert sc == {"type": "status", "active": True, "activeClientId": "C",
+                      "gen": g0 + 3, "bootId": boot}
 
         await ctrl_a.close()
         await ctrl_c.close()

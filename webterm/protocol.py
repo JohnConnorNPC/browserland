@@ -461,19 +461,26 @@ def mcp_activity_frame(kind: str) -> str:
 # Each browser carries a stable ``clientId``; the broker tracks the one
 # ``active`` client per broker and tears down the others' terminal views.
 #   broker -> client: {"type": "status", "active": <bool>,
-#                      "activeClientId": <id|null>}
+#                      "activeClientId": <id|null>, "gen": <int>,
+#                      "bootId": <str>}
 #                     {"type": "terminal_control", ...}  (#238, below)
 #   client -> broker: {"type": "become_active"}
 # ---------------------------------------------------------------------------
 
 def control_status_frame(active: bool,
-                         active_client_id: Optional[str]) -> str:
+                         active_client_id: Optional[str],
+                         gen: int, boot_id: str) -> str:
     """Broker -> client on /control: whether THIS client holds the lease, plus
-    who currently does (``None`` when nobody is active)."""
+    who currently does (``None`` when nobody is active). #248: ``gen`` is the
+    broker's lease generation (it bumps on every holder change) and
+    ``bootId`` names the broker run, so a page can key "a NEW holding" on
+    (bootId, gen) -- a generation alone restarts with the broker."""
     return json.dumps({
         "type": "status",
         "active": bool(active),
         "activeClientId": active_client_id,
+        "gen": int(gen),
+        "bootId": str(boot_id),
     })
 
 

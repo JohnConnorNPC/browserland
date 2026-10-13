@@ -4878,8 +4878,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # status on each socket is always the truth.
             try:
                 cur = ctx.active_client_id
-                await sock.send(
-                    protocol.control_status_frame(cur == owner_id, cur))
+                await sock.send(protocol.control_status_frame(
+                    cur == owner_id, cur, ctx.lease_generation, ctx.boot_id))
             except Exception as exc:
                 LOGGER.debug("control send failed: %s", exc)
 
