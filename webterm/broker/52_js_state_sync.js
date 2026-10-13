@@ -524,6 +524,10 @@
             }
             const epoch = _viewEpoch;
             if (initial) { do { await _stateWaitChannel(); } while (_stateChannel); }
+            // #247 Z4: superseded while it waited -- never claim the channel
+            // for a dead view (the next rebuild would wait a deadline behind
+            // it). The load pull keeps its exemption (item 2).
+            if (initial && epoch !== _viewEpoch && !(load && !_stateLoadRevoked)) return;
             let release;
             const mine = new Promise(r => { release = r; });
             _stateChannel = mine;

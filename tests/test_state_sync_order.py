@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 70
+EXPECTED_ASSERTS = 72
 
 _HARNESS = r"""
 'use strict';
@@ -691,6 +691,22 @@ function mkWorld() {
     ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.putsLog().indexOf('PUT@2:["MINE"]') === -1,
         'Z3b a parked edit parked again keeps its first base and yields to the peer');
 
+    // ---- Z4 (w2 code audit): a superseded initial pull never claims ------
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.edit(['H']); await w.firePush();               // a PUT holds the channel
+    const z4g = w.gets;
+    const z4 = w.api.pullState(true); await flush();                   // a rebuild's pull waits
+    w.api.teardown(); w.api.rebuildStart();                            // ... and is superseded
+    w.holdPut = false; await w.release(); await z4; await flush();
+    ok(w.gets === z4g, 'Z4 an initial pull superseded while it waited for the channel sends no GET');
+    // Z4b: the load pull keeps its exemption while it waits (P3b's rule).
+    w = mkWorld();
+    w.holdPut = true; w.api.setReady(true); w.edit(['H']); await w.firePush();
+    const z4l = w.api.pullState(true); await flush();                  // the LOAD pull waits
+    w.api.bumpEpoch();                                                 // the first boot's bump
+    w.holdPut = false; await w.release(); await z4l; await flush();
+    ok(w.gets === 1, 'Z4b the load pull still sends after the first epoch bump while it waited');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -876,6 +892,14 @@ def test_247_codex_rollback_rebases_without_a_loop(run):
     "Z3b a parked edit parked again keeps its first base and yields to the peer",
 ])
 def test_247_z1_park_keeps_the_original_base(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "Z4 an initial pull superseded while it waited for the channel sends no GET",
+    "Z4b the load pull still sends after the first epoch bump while it waited",
+])
+def test_247_z4_superseded_initial_pull(run, label):
     _ok(run, label)
 
 
