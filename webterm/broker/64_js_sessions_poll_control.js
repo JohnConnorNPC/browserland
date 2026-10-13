@@ -618,6 +618,26 @@
         function _controlSocketGone(st, ev) {
             if (st.done) return;
             const rec = st.rec;
+            if (ev && ev.code === 4401) {
+                // Token rejected -- for the HOST, whichever socket heard it
+                // (a replacement's 4401 used to take the "failed candidate"
+                // path and wait 10-20 s for the old socket to time out).
+                // Retire both and defer to the existing auth flow (the
+                // auth-form success path re-dials this control WS). Do NOT
+                // hammer-reconnect a broker that needs a password.
+                _retireControlSocket(st);
+                if (rec.cur) _retireControlSocket(rec.cur);
+                if (rec.cand) _retireControlSocket(rec.cand);
+                rec.cur = rec.cand = null;
+                rec.ws = null;
+                pollStateFor(rec.hostId).authNeeded = true;
+                // The auth overlay owns this state: a lost-contact count
+                // armed by an earlier missed pong must not fire beside it.
+                if (rec.hostId === homeHostId()) _clearLostContact();
+                try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
+                try { renderHostStatus(); } catch (_) {}
+                return;
+            }
             const wasCur = rec.cur === st;
             _retireControlSocket(st);
             if (!wasCur) {
@@ -628,19 +648,6 @@
             }
             rec.cur = null;
             rec.ws = null;
-            if (ev && ev.code === 4401) {
-                if (rec.cand) { _retireControlSocket(rec.cand); rec.cand = null; }
-                // Token rejected — defer to the existing auth flow (the
-                // auth-form success path re-dials this control WS). Do NOT
-                // hammer-reconnect a broker that needs a password.
-                pollStateFor(rec.hostId).authNeeded = true;
-                // The auth overlay owns this state: a lost-contact count
-                // armed by an earlier missed pong must not fire beside it.
-                if (rec.hostId === homeHostId()) _clearLostContact();
-                try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
-                try { renderHostStatus(); } catch (_) {}
-                return;
-            }
             if (rec.closedByUs) return;          // closeControlWs / host removed
             if (rec.hostId === homeHostId() && rec.lastOpenAt) _armLostContact();
             // A replacement in flight takes charge when it reports; its own

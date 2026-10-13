@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 85
+EXPECTED_ASSERTS = 88
 
 _HARNESS = r"""
 'use strict';
@@ -686,6 +686,20 @@ w.poll.authNeeded = false;               // the user logs in before the re-dial 
 w.advance(10000);
 ok(lostUp(w) === 0, 'SH3c the 4401 itself cancels the armed count');
 
+// ---- w1-4 NIT-7: a replacement's 4401 goes to the auth flow at once --------
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 -> replacement dialing
+s1 = w.last();
+s1._drop(4401);                          // the REPLACEMENT is refused
+ok(w.log.indexOf('auth') !== -1 && w.poll && w.poll.authNeeded === true,
+    'N7a a replacement 4401 shows the auth overlay at once');
+ok(s0.closed && w.rec().ws === null && w.rec().cand === null && w.rec().reattachTimer === null,
+    'N7b ...retires the old socket too and schedules no re-dial');
+const nAfter = w.sockets.length;
+w.advance(60000);
+ok(w.sockets.length === nAfter, 'N7c ...and nothing re-dials a broker that needs a password');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -880,6 +894,15 @@ def test_codex_round2(run, label):
     "SH3c the 4401 itself cancels the armed count",
 ])
 def test_w14_sh3_no_notice_beside_auth(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "N7a a replacement 4401 shows the auth overlay at once",
+    "N7b ...retires the old socket too and schedules no re-dial",
+    "N7c ...and nothing re-dials a broker that needs a password",
+])
+def test_w14_nit7_replacement_4401(run, label):
     _ok(run, label)
 
 
