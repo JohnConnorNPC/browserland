@@ -368,3 +368,43 @@ def test_a_stalled_peer_does_not_delay_the_release_statuses(
         assert await _wait(lambda: stalled.closed == 1012) is not None
         await c.close_all()
     asyncio.run(go())
+
+
+# ---- atom 5 (A6): one log line per holder change, short ids only ----------
+
+import logging  # noqa: E402
+
+LONG_A = "aaaaaaaa-1111-2222-3333-444444444444"
+LONG_B = "bbbbbbbb-5555-6666-7777-888888888888"
+
+
+def test_one_lease_log_line_per_holder_change(tmp_path, monkeypatch, caplog):
+    app = _app(tmp_path, monkeypatch)
+    caplog.set_level(logging.INFO, logger="webterm.broker.app")
+
+    async def go():
+        c = Ctl(app)
+        a = await c.connect(LONG_A)              # claim
+        b = await c.connect(LONG_B)              # no change
+        b.push({"type": "become_active"})        # take over
+        await _settle()
+        b.push({"type": "become_active"})        # repeat: no change
+        await _settle()
+        a.hang_up()                              # a non-holder leaves
+        await _settle()
+        b.hang_up()                              # release
+        await _settle()
+        await c.close_all()
+        return c.ctx.lease_generation
+    gen = asyncio.run(go())
+    lines = [r.getMessage() for r in caplog.records
+             if r.name == "webterm.broker.app"
+             and r.getMessage().startswith("lease: ")]
+    assert lines == [
+        f"lease: aaaaaaaa claimed a free lease (gen {gen - 2})",
+        f"lease: bbbbbbbb took over from aaaaaaaa (gen {gen - 1})",
+        f"lease: bbbbbbbb released it on disconnect (gen {gen})",
+    ]
+    text = caplog.text
+    assert LONG_A not in text and LONG_B not in text
+    assert LONG_A[:9] not in text and LONG_B[:9] not in text

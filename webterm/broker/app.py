@@ -4868,6 +4868,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return
         ctx = app.ctx
 
+        def _cid8(cid):
+            # #248 A6: lease log lines name a client by an 8-char prefix of
+            # its clientId, never the whole id.
+            return (cid or "-")[:8]
+
         def _lease_view(owner_id):
             # (active, activeClientId, gen, bootId) for a socket opened by
             # clientId `owner_id`, read live at the moment of the call.
@@ -4929,6 +4934,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     # #244: a fresh holder is a new lease generation.
                     ctx.lease_generation += 1
                     _fail_superseded_desktop_rpcs(ctx.lease_generation)
+                    LOGGER.info("lease: %s claimed a free lease (gen %d)",
+                                _cid8(client_id), ctx.lease_generation)
             await _send(ws, client_id)
 
             async for message in ws:
@@ -4956,6 +4963,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     # no 4409s, no fan-out -- only its own socket is told.
                     repeat = ctx.active_client_id == client_id
                     if not repeat:
+                        prev = ctx.active_client_id
                         ctx.active_client_id = client_id
                         # #244: the holder changed -- a new generation;
                         # pending calls to any older one fail INSIDE the
@@ -4967,6 +4975,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                   for cid, socks in ctx.control_clients.items()
                                   if cid != client_id}
                         winners = list(ctx.control_clients.get(client_id, ()))
+                        LOGGER.info("lease: %s took over from %s (gen %d)",
+                                    _cid8(client_id), _cid8(prev),
+                                    ctx.lease_generation)
                 if repeat:
                     await _send(ws, client_id)
                     continue
@@ -4997,6 +5008,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     # they are lost_lease, not timeouts.
                     ctx.lease_generation += 1
                     _fail_superseded_desktop_rpcs(ctx.lease_generation)
+                    LOGGER.info("lease: %s released it on disconnect (gen %d)",
+                                _cid8(client_id), ctx.lease_generation)
                     remaining = {cid: list(s)
                                  for cid, s in ctx.control_clients.items()}
                 else:
