@@ -7937,7 +7937,8 @@ def test_visibility_timers_present_and_control_keepalive_stays_plain():
     # visibilityInterval: it is what keeps the lease socket alive through an
     # idle proxy, and slowing it 10x in a hidden tab would let the socket time
     # out from under a tab that still holds the lease.
-    assert "rec.pingTimer = setInterval" in s64
+    # #248: the timer moved onto the per-socket state (`st`); still plain.
+    assert "st.pingTimer = setInterval" in s64
 
 
 def test_refresh_taskbar_pollers_ride_the_visibility_interval():

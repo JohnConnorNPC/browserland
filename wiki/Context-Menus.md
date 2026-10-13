@@ -49,6 +49,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 - **MCP access** (terminals only) — set this window's agent access to **Off**, **Read**, or **Read-write**. See [[MCP-and-AI-Agents]].
 - **MCP scope** (terminals only, on a broker that supports scopes) — tag the window with an MCP scope, so only an MCP client declaring that scope (or one declaring none) can see it: **(none)** removes the tag, each scope already in use on that broker is listed with a `✓` on the current one, and **Set scope...** takes a new name (1–64 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit; empty removes the tag). See [[MCP-and-AI-Agents]].
 - **Open in new window** (terminals only) — move the terminal into a browser window of its own; see [[Window-Types]].
+- **Fit to this screen** (terminals only) — give the terminal this screen's size back, for example after another device such as a phone was active and left it phone-sized. A floating window is first reset to the default size. See [[Hosts-and-Multi-Browser]].
 - **Minimize** / **Restore** — hide the window to the taskbar, or bring it back.
 - **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with a save prompt for unsaved changes); a file manager / task manager just closes.
 - **Terminate** (terminals only) — hard-kill the shell process tree (asks to confirm).
@@ -109,7 +110,7 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - **Rename &lt;workspace&gt;…** — rename the workspace you are on.
 - **Remove &lt;workspace&gt;** — delete the workspace you are on (disabled when only one remains).
 
-Both modes then offer **🎛 Control panel** — this menu does still use the emoji. **Undo &lt;action&gt;** comes after it, as the **last** item in the menu, appearing in floating mode once there is an arrange to reverse (single-level). The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
+Both modes then offer **Fit all to this screen**, which does **Fit to this screen** for every terminal, and **🎛 Control panel** — this menu does still use the emoji. **Undo &lt;action&gt;** comes after it, as the **last** item in the menu, appearing in floating mode once there is an arrange to reverse (single-level). The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
 
 Because this menu also opens from an empty part of the **taskbar**, it is the one workspace surface that is always reachable — no window can cover it — which is what makes hiding the pager safe.
 
