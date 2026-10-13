@@ -2695,8 +2695,8 @@ POST /mods/rescan      {}
 GET  /mods/installed                    // operator detail for the Control Panel
 ```
 
-All four are browser-realm token-gated, `serve_ui`-gated (a headless broker
-registers none of them), and deliberately **not** lease-gated — this is broker
+All four are browser-realm token-gated, `serve_ui`-gated (a node — a broker with
+`serve_ui: false` — registers none of them; `terminals: false` does not affect them), and deliberately **not** lease-gated — this is broker
 configuration, and the point is being able to administer a broker somebody else
 is using.
 

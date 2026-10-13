@@ -85,16 +85,40 @@ for destroy (no fallback yet).
 ## Broker
 
 ```
-python -m webterm.broker [--host 127.0.0.1] [--port 4445] [--config PATH] [--headless]
+python -m webterm.broker [--host 127.0.0.1] [--port 4445] [--config PATH]
+                         [--role hub|node] [--headless] [--no-terminals]
 ```
 
-`--headless` (or config `"serve_ui": false`, default `true`) serves the full
-JSON/WS API but **not** the desktop page or the in-app Help — `GET /` returns
-`200 {"ui": false}`, `/help-corpus.json` 404s, and both UI constants
-(`INDEX_HTML`, `HELP_CORPUS`) are never assembled (#87). `--headless` overrides
-the config key (like `--host`/`--port`); there is no `--no-headless`. `GET /info`
-reports the active mode as `serve_ui` (the one additive change to a JSON route);
-existing JSON/WS behavior is otherwise unchanged in either mode.
+**Roles (#253).** A broker is a **hub** or a **node**. A hub serves the desktop
+page; you open it in a browser. A node serves the JSON/WS API only, for another
+Browserland to reach. The role is **derived** from the stored key `serve_ui`
+(default `true` = hub) and never stored itself. `--role node` (or a config
+`"role": "node"`, accepted as an alias and folded into `serve_ui`) means
+`serve_ui: false`; `--headless` is the older spelling of `--role node`. A node
+serves the full JSON/WS API but **not** the desktop page or the in-app Help —
+`GET /` returns `200 {"ui": false, "role": "node"}`, `/help-corpus.json` 404s,
+and both UI constants (`INDEX_HTML`, `HELP_CORPUS`) are never assembled (#87).
+The CLI overrides the config (like `--host`/`--port`); there is no
+`--no-headless`. `--headless` together with `--role hub` is a contradiction and
+refused, as is a config `role` that disagrees with an explicit `serve_ui`.
+
+The second stored key, `terminals` (default `true`), says whether this broker
+hosts terminals. `--no-terminals` sets it `false`: the broker then refuses new
+launches — `POST /launch`, `POST /mcp/launch`, `POST /profiles/config` and
+`GET /profiles/detect` answer **403 `terminals_disabled`** — while terminals that
+already exist keep running and `WS /browserland` keeps accepting agents, so an
+agent launched before the flag reconnects as usual. Profile reads
+(`GET /profiles`, `GET /profiles/config`) and `/sessions` still answer. Use it on
+a hub that is only the front door to its nodes. A node must host terminals:
+`serve_ui: false` with `terminals: false` is refused at startup — one line on
+stderr, exit 2, before the port is bound (`--print-token` and
+`--scan-recordings` still run on that config; they bind nothing).
+
+`GET /info` reports `serve_ui`, the derived `role` (`"hub"` / `"node"`) and
+`terminals`; `GET /mcp/info` reports `terminals`. The boot log names both
+(`broker role: hub - terminals on`). Existing JSON/WS behavior is otherwise
+unchanged in every combination; a broker that predates #253 omits `role` and
+`terminals`, which a client reads as an ordinary broker that launches.
 
 Config (`broker_config.json`, path overridable via `$WEB_TERMINAL_CONFIG`;
 see `broker_config.example.json`): `auth_token`, plus `agent.profiles` for
@@ -232,11 +256,11 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 
 | Surface | Rule |
 |---|---|
-| `GET /`, `GET /help-corpus.json` | **unauthenticated.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. The corpus is public but **auth-sensitive** (#173): with no token it is the wiki + shipped-mod corpus alone, exactly what it was before #163; the sections contributed by **installed** mods — their help text, their manifest label/icon, and hence the list of installed ids — are merged in only for a caller holding the token. Same `request_token_ok` as every gated route, answering with a smaller `200` instead of a `401`, plus `Cache-Control: no-store` and `Vary: Authorization` so no cache can hand one audience the other's body. |
+| `GET /`, `GET /help-corpus.json` | **unauthenticated.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. On a node (`serve_ui: false`), `GET /` is `200 {"ui": false, "role": "node"}`, so health probes keep working. The corpus is public but **auth-sensitive** (#173): with no token it is the wiki + shipped-mod corpus alone, exactly what it was before #163; the sections contributed by **installed** mods — their help text, their manifest label/icon, and hence the list of installed ids — are merged in only for a caller holding the token. Same `request_token_ok` as every gated route, answering with a smaller `200` instead of a `401`, plus `Cache-Control: no-store` and `Vary: Authorization` so no cache can hand one audience the other's body. |
 | `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source and styles are publicly readable**, exactly as `GET /` already carries every shipped mod's source — but *reaching* one takes the id **and** the generation **and** the file name, and #173 stopped the help corpus from handing out that first ingredient. Neither ingredient is a *broker* secret, though: `<gen>` is a content hash of the package, so someone holding a **publicly distributed** mod's bytes recomputes it and can confirm that mod is installed here (`200` vs `404`). #173 stops the corpus **enumerating** installed ids; it cannot hide a mod you already know to ask for by name. `help.md` is not servable here at all. |
 | `OPTIONS` preflights | unauthenticated by design (they carry no credentials). Explicit routes, because route resolution happens before request middleware. |
 | `WS /browserland` (producers) | token required, loopback included. Was the one gate the token never covered — and WebSockets are not CORS-gated, so any website could dial `ws://127.0.0.1:4445/browserland`, re-register a live `window_id` (kicking the real agent off with 1012) and inject fabricated terminal output. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). A re-register whose `host` and nonzero `pid` match the entry it replaces now keeps that window's MCP access override instead of falling back to the broker default; that match is a collision heuristic, not a security boundary (both are self-reported), and the producer token is the boundary. |
-| `POST /launch` | token required — never an open RCE on any bind. |
+| `POST /launch` | token required — never an open RCE on any bind. Refusal order: **401 `auth_required`**, then **503 `restarting`** while the broker quiesces, then **403 `terminals_disabled`** on a broker with `terminals: false` (#253) — checked before the body is parsed. |
 | `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
 | `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. The broker's **only outbound HTTP**: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
@@ -611,7 +635,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `terminals` #253, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -866,8 +890,11 @@ effective mode to permit them.
 | `POST /mcp/desktop` | `allow_desktop` | one desktop op (#244) |
 
 **`GET /mcp/info`** →
-`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e",
+`{"ok":true,"allow_launch":false,"terminals":true,"default_mode":"off","version":"0.8.0+ba4b62e",
 "scope":null,"admin":false}`.
+`terminals` (#253) is `false` on a broker that hosts no terminals: every launch
+is refused with `terminals_disabled` whatever `allow_launch` says. Absent from an
+older broker, which launches.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22). `scope` is the caller's own declared scope echoed back: `null`
@@ -1009,7 +1036,9 @@ mode override, it never carries over a reconnect.
 are global: a declared scope never changes this list, and a scoped caller may
 launch any of them.
 
-**`POST /mcp/launch`** — requires `allow_launch` (else **403 `launch_disabled`**).
+**`POST /mcp/launch`** — refused with **403 `terminals_disabled`** when the
+broker has `terminals: false` (#253, checked first, whatever `allow_launch` says),
+then requires `allow_launch` (else **403 `launch_disabled`**).
 Body reuses the `/launch` shape plus an MCP-only `mode`: `{"profile": <str>,
 "cols": 80, "rows": 24, "title": <str>, "cwd": <str>,
 "mode": "off"|"read"|"readwrite"}`, all optional (dims default 80×24, `profile`
@@ -1093,6 +1122,7 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 502 | `no_producer_rpc` | `/mcp/read` · `/mcp/reset` · `/mcp/flush` producer did not answer (non-agent / timeout) |
 | 502 | `reset_failed` | `/mcp/reset` agent could not clear its render buffer |
 | 502 | `flush_failed` | `/mcp/flush` agent could not flush its pending input |
+| 403 | `terminals_disabled` | `/mcp/launch` on a broker with `terminals: false` (#253); checked before `launch_disabled` |
 | 403 | `launch_disabled` | `/mcp/launch` with `allow_launch:false` |
 | 400 | `unknown_profile` | `/mcp/launch` profile not in config |
 | 400 | `bad_dims` / `bad_cwd` / `cwd_not_dir` | `/mcp/launch` bad `cols`/`rows`/`cwd` |
@@ -1287,8 +1317,8 @@ catalog + the security rationale: **[[Launch-Profiles]]**.
 ### Mods (browser `auth_token`-gated) — #157 / #163 / #172
 
 The desktop's mod system. Authoring contract, the `ctx` API and the trust model:
-**[[Writing-a-Mod]]**. All of these are **`serve_ui`-gated** — a headless
-broker registers none of them and reports `mods: []` — and, like
+**[[Writing-a-Mod]]**. All of these are **`serve_ui`-gated** — a node
+(`serve_ui: false`) registers none of them and reports `mods: []` — and, like
 `/mcp/config`, they take the **browser** token, never the MCP one. They are
 deliberately **not** lease-gated: this is broker configuration, and the point is
 being able to administer a broker somebody else is using right now.

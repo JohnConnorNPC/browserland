@@ -4,6 +4,27 @@ Breaking changes, what they cost you, and how to recover. Newest first.
 
 ---
 
+## Broker roles: hub and node, and `terminals: false` (#253)
+
+Nothing changes for an existing deploy. A config without the new `terminals`
+key keeps launching terminals exactly as before, and `serve_ui` keeps meaning
+what it meant: `true` is now called a **hub**, `false` (or `--headless`) a
+**node**. Two things are additive and visible:
+
+- **`GET /info`** gains `role` (`"hub"` / `"node"`, derived from `serve_ui`) and
+  `terminals`; **`GET /mcp/info`** gains `terminals`. Clients that ignore
+  unknown keys are unaffected.
+- **A node's `GET /`** answers `{"ui": false, "role": "node"}` instead of
+  `{"ui": false}`. A health probe that checks `ui === false` keeps working; one
+  that compares the whole body for equality must accept the new key.
+
+The new behaviour is opt-in: `terminals: false` (or `--no-terminals`) makes a
+hub refuse new launches with `terminals_disabled`. A node with
+`terminals: false` refuses to start. See
+[[Technical-Reference#broker]].
+
+---
+
 ## Workspaces became a mod, and the layout blob changed shape (#148)
 
 **Nothing to do, and nothing is lost.** This is here because the persisted
@@ -101,7 +122,7 @@ prints a ready-to-open `?token=…` URL.
 | **Tokenless behind `tailscale serve` / a proxy** | Same, plus every remote browser must enter the token once. | Same. |
 | **`auth_token` already configured** | Almost nothing. Running agents already carry `WEB_TERMINAL_TOKEN` and reconnect fine; browsers already stored it. Only **hand-started local agents** and tokenless local scripts break. | `launchers/run-agent.{sh,ps1}` now read the sidecar automatically, or set `$WEB_TERMINAL_TOKEN`. |
 | **MCP clients** (`webterm.mcptool`) | Nothing. Separate `mcp_token`, `Authorization: Bearer`, `/mcp/*` realm — untouched. | — |
-| **Headless** (`serve_ui: false`) | Nothing. `GET /` still answers `200 {"ui": false}`, so health probes keep working. | — |
+| **Node** (`serve_ui: false`, `--headless`) | Nothing. `GET /` still answers `200` with `"ui": false`, so health probes keep working. Since #253 the body also names the role — `{"ui": false, "role": "node"}` — which a probe that checks `ui === false` still reads as "no page". | A probe that compares the **whole** body for equality needs the new key. |
 
 ### Getting your token
 

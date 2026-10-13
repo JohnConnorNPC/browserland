@@ -149,9 +149,9 @@ TOKEN = "route-policy-token"
 #: ``/``                  the token is typed INTO this page (the login overlay).
 #:                        Auth is query/header-only with no cookies, so gating
 #:                        the document deadlocks the bootstrap: every reload,
-#:                        bookmark and new tab would 401 forever. Headless, it
-#:                        is ``{"ui": false}`` — which is also what health
-#:                        probes hit.
+#:                        bookmark and new tab would 401 forever. On a node
+#:                        (headless), it is ``{"ui": false, "role": "node"}``
+#:                        (#253) — which is also what health probes hit.
 #: ``/help-corpus.json``  wiki-derived static help text, served alongside the
 #:                        page. Neither response carries host- or
 #:                        session-derived data. Public but AUTH-SENSITIVE since

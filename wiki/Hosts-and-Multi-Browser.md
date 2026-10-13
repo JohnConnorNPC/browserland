@@ -45,7 +45,7 @@ A few things worth knowing:
 - **A pin lives on the broker**, not in your browser, and not in the settings that sync between your browsers. It survives a restart, and it can be changed even while somebody else's browser is the active view on that broker — unlike the other settings on a host tab, which that broker only accepts from its active browser.
 - **A mod that broker doesn't have** still shows if it is pinned there (as `not installed on this broker`), so a leftover pin is visible and removable rather than silently governing nothing.
 
-If a broker can't answer, the section says why instead of showing an empty list: it may be **running an older build** that can't report its mods (update it to manage them from here), **serving no desktop page** at all (a headless broker has no mods to pin), **unreachable**, or **refusing your password**. Select the tab again to retry.
+If a broker can't answer, the section says why instead of showing an empty list: it may be **running an older build** that can't report its mods (update it to manage them from here), **serving no desktop page** at all (a **node** — a broker started with `--role node`, `--headless` or `serve_ui: false` — has no mods to pin; a hub with `terminals: false` still serves its page and has mods like any other), **unreachable**, or **refusing your password**. Select the tab again to retry.
 
 The broker-wide **master switch** still outranks all of this: a broker started with `mods_enabled: false` runs no mods at all, and its section says so.
 
@@ -91,6 +91,8 @@ The profile color sits between the per-window and per-host colors in the order o
 ## Default host for the START (+) button
 
 A quick-launch of the START (**+**) button — a plain left-click by default — launches a terminal on your **default host**, using that host's own default terminal profile. Pick which host that is in **Control Panel → Hosts** with the **Default** button on that host's row; the current default is marked with a **default** badge and its own button is disabled. The local **this broker** is selectable too and is the default when you have not chosen one — so leaving it unset behaves exactly as before. (The button's picker menu still lets you launch on any host regardless of this setting.)
+
+If the default host — or, with no default chosen, this broker — **hosts no terminals** (`terminals: false`), quick-launch never picks another host for you: it opens a dialog saying why, and you pick a host in the launch menu or set a default here. In the launch menu such a broker's row reads `terminals off — launches nothing here` instead of listing profiles, and its launch profiles cannot be edited from the Control Panel.
 
 If you delete the host that was your START default, it falls back to **this broker** automatically, so the button keeps working. When the chosen host needs a password, quick-launching START surfaces its login prompt just like opening the host directly. Note that remote host identities are specific to the browser where you added them, so a non-local START default is only meaningful in that browser; other browsers fall back to launching locally.
 

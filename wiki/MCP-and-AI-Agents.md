@@ -38,7 +38,7 @@ MCP is configured per host in **Control Panel → Access → MCP access**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
 - **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window an MCP client launches starts in `readwrite` instead — scoped or not, unless the launch passes a `mode` — and a mode set on a window is kept across broker restarts (see **Scopes**).
-- **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones).
+- **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones). A broker whose config says `terminals: false` hosts no terminals and refuses every launch even with this on: `launch_terminal` reports `terminals_disabled`, which is checked before `launch_disabled`, and `mcp_info` reports `terminals: false`. Existing terminals on that broker can still be listed, read and driven.
 - **token** — a secret that authenticates the agent (set it yourself or hit **generate**). This is a **bearer secret distinct from the browser/UI password** you use to log in; granting MCP access does not hand out your login.
 
 > Settings are per host, so each broker you add has its own MCP switch, default mode, launch gate, and token. See [[Hosts-and-Multi-Browser]] for adding and managing hosts.

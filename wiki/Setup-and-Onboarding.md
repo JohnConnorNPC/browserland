@@ -21,6 +21,12 @@ follows.
 | **Agent** | A headless process that owns a real PTY (a terminal) and streams it to *a* broker over one WebSocket. | On the same machine as the broker that launches it. |
 | **Browser** | The desktop UI. Renders windows, sends your keystrokes. Can attach to **several brokers at once**. | Wherever you point a browser. |
 
+A broker itself comes in two kinds. A **hub** (the default) serves the desktop
+page you open. A **node** (`--role node`, or `serve_ui: false`) serves no page:
+it exists so that another Browserland can use its terminals over the API. A hub
+started with `--no-terminals` (`terminals: false`) launches nothing itself and
+is only the front door to its nodes. A node always hosts terminals.
+
 The shape that trips people up:
 
 - **One broker per machine.** A broker is not a "client" you point at another
