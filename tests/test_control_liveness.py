@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 26
+EXPECTED_ASSERTS = 31
 
 _HARNESS = r"""
 'use strict';
@@ -320,6 +320,29 @@ w.visCbs.forEach(fn => fn());
 ok(w.sockets.length === 2 && w.rec().reattachTimer === null,
     'L24 the wake probe re-dials a backed-off channel at once');
 
+// ---- the pong carries the live lease (M6) -----------------------------------
+w = mkWorld();
+s0 = connected(w, ST(true));
+pong(s0, s0.lastPing().n, { active: true, activeClientId: 'me', gen: 1, bootId: 'b1' });
+ok(w.log.filter(x => x === 'teardown' || x === 'rebuild').length === 0,
+    'P1 a pong repeating the held lease runs no transition');
+pong(s0, s0.lastPing().n, { active: false, activeClientId: 'phone', gen: 2, bootId: 'b1' });
+ok(w.log.indexOf('teardown') !== -1 && w.env._homeActive === false,
+    'P2 a pong saying the lease moved tears the view down (a missed status is corrected)');
+const tdCount = w.log.filter(x => x === 'teardown').length;
+pong(s0, s0.lastPing().n, { active: false, activeClientId: 'phone', gen: 2, bootId: 'b1' });
+ok(w.log.filter(x => x === 'teardown').length === tdCount,
+    'P3 a repeated inactive pong tears down nothing more');
+const logLen = w.log.length;
+pong(s0, s0.lastPing().n);
+ok(w.log.length === logLen, 'P4 a pong without lease fields routes nothing');
+w = mkWorld();
+w.api.openControlWs(w.env.hostById('rb'));
+s0 = w.last(); s0._open(); s0._recv(ST(true));
+pong(s0, s0.lastPing().n, { active: false, activeClientId: 'phone', gen: 4, bootId: 'bB' });
+ok(w.log.indexOf('remote:rb:false') !== -1,
+    'P5 a remote host pong lease reaches that host remote handler');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -401,6 +424,17 @@ def test_per_socket_state_watchdog_and_close(run, label):
     "L25 a periodic ping never pushes a running deadline out",
 ])
 def test_wake_probe(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "P1 a pong repeating the held lease runs no transition",
+    "P2 a pong saying the lease moved tears the view down (a missed status is corrected)",
+    "P3 a repeated inactive pong tears down nothing more",
+    "P4 a pong without lease fields routes nothing",
+    "P5 a remote host pong lease reaches that host remote handler",
+])
+def test_pong_lease_goes_through_on_control_status(run, label):
     _ok(run, label)
 
 

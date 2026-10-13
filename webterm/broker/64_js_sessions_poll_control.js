@@ -481,6 +481,16 @@
                 st.missed = 0;
                 if (st.deadlineTimer) { clearTimeout(st.deadlineTimer); st.deadlineTimer = null; }
             }
+            // The pong carries the live lease (built like a status frame), so
+            // a socket that is alive but MISSED a status -- the broker logs a
+            // failed status send and moves on -- is corrected by its next
+            // pong. onControlStatus is level-idempotent: a repeat of the
+            // current level runs no transition and emits nothing new.
+            if (typeof msg.active === 'boolean') {
+                _controlStatus(st, { type: 'status', active: msg.active,
+                    activeClientId: msg.activeClientId,
+                    gen: msg.gen, bootId: msg.bootId });
+            }
         }
         function _controlPongMissed(st) {
             if (st.done) return;
