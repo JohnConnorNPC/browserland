@@ -30,16 +30,30 @@
         let _stateReady = false;       // initial pull done; gates pushes
         let _statePendingPush = false; // a save fired before the initial pull
         let _statePushTimer = null;
+        // #247: a push holds or waits for the /state channel.
         let _statePushInFlight = false;
+        // A push was asked for while one was in flight: a WAKE flag only --
+        // what is owed is the mutation record below, never this flag.
         let _statePushAgain = false;
-        // #246: the last push of a real edit failed (5xx, 401, offline, an
-        // unusable 409) and nothing re-queued it. "Next save retries" -- so
-        // the edit still counts as pending and a pull must not adopt it away.
-        // A 400/413 is a verdict on the payload, which can never land, so it
-        // clears it. Also cleared by a landed push, by any adopt, by a push or
-        // pull that finds nothing left to send, and never set by a PUT that
-        // outlived its view (_viewEpoch).
-        let _statePushFailed = false;
+        // ---- #247 S8: the mutation record ----------------------------------
+        // What this tab owes the broker is ONE thing: the edits up to
+        // _stateEditGen that no landed PUT, acknowledgement or adopt has
+        // covered. Timers, _statePushAgain and _statePendingPush only WAKE
+        // the sender; each settle names the gen it settles.
+        //   _stateEditGen   bumps when the synced bytes CHANGE at a save (S4):
+        //                   a byte-identical savePrefs() is not new intent;
+        //   _stateSentGen   the newest gen a PUT carried, or found nothing to
+        //                   send for: _stateEditGen > _stateSentGen = unsent;
+        //   _stateFail      the failure of the newest sent gen: {gen, baseRev,
+        //                   thrown, fails}. (#246: a failed push of a real edit
+        //                   -- 5xx, 401, offline, an unusable 409 -- stays owed
+        //                   and a pull must not adopt it away; a 400/413 is a
+        //                   verdict on the payload and owes nothing; never set
+        //                   by a PUT that outlived its view, _viewEpoch.)
+        let _stateEditGen = 0;
+        let _stateEditBytes = null;
+        let _stateSentGen = 0;
+        let _stateFail = null;
         // #246 review: a rev was taken WITHOUT adopting its state (a pull
         // skipped for a pending push, or a 409 kept the local edit). If that
         // push then sends nothing (the edit undone inside the debounce, a
@@ -62,6 +76,31 @@
             };
         }
         function _stateSerialize() { return JSON.stringify(_stateBlob()); }
+        function _stateNoteEdit() {
+            const b = _stateSerialize();
+            if (b !== _stateEditBytes) { _stateEditBytes = b; _stateEditGen++; }
+        }
+        function _stateUnsent() { return _stateEditGen > _stateSentGen; }
+        function _stateOwed() { return _stateUnsent() || !!_stateFail; }
+        // Everything up to the current gen is covered (an adopt, an
+        // acknowledgement, an undone edit): nothing is owed.
+        function _stateSettleAll() {
+            _stateSentGen = _stateEditGen;
+            _stateEditBytes = _stateSerialize();
+            _stateFail = null;
+        }
+        // What one sent gen settles: its failure record (an older one too).
+        function _stateSettleSent(gen) {
+            if (_stateFail && _stateFail.gen <= gen) _stateFail = null;
+        }
+        // A failure of `gen`; a newer edit starts a fresh record.
+        function _stateFailed(gen, baseRev, thrown) {
+            const f = (_stateFail && _stateFail.gen === gen) ? _stateFail
+                : { gen: gen, baseRev: baseRev, thrown: false, fails: 0 };
+            f.thrown = f.thrown || !!thrown;
+            f.fails += 1;
+            _stateFail = f;
+        }
         // #247 item 4 / N1: every rev a response carries is a safe
         // non-negative integer, and a state body (a GET 200, a 409) also
         // carries object settings and layout -- a proxy's `409 {}` or
@@ -120,6 +159,7 @@
             if (_deactivated) return;            // torn down — never push state
             if (isDetachedSurface()) return;     // #226: one writer, the desktop
             if (_stateApplying) return;          // don't echo server state back
+            _stateNoteEdit();                    // #247 S4: a byte change is intent
             if (!_stateReady) { _statePendingPush = true; return; }
             if (_statePushTimer) return;
             _statePushTimer = setTimeout(() => {
@@ -142,12 +182,16 @@
                 do { await _stateWaitChannel(); } while (_stateChannel);
                 if (_deactivated) return;
                 const serialized = _stateSerialize();
+                const gen = _stateEditGen;
                 if (serialized === _stateLastSerialized) {        // nothing changed
-                    _statePushFailed = false;    // (an undone edit owes nothing)
+                    _stateSentGen = gen;          // (an undone edit owes nothing)
+                    _stateSettleSent(gen);
                     return;
                 }
                 mine = new Promise(r => { release = r; });
                 _stateChannel = mine;
+                _stateSentGen = gen;
+                const baseRev = _stateRev;
                 let out = null;
                 const ctrl = new AbortController();
                 try {
@@ -157,7 +201,7 @@
                             method: 'PUT',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                baseRev: _stateRev,
+                                baseRev: baseRev,
                                 settings: blob.settings,
                                 layout: blob.layout,
                                 clientId: CLIENT_ID,   // lease: only the active browser
@@ -180,7 +224,7 @@
                     // Offline / lost response / the deadline — localStorage
                     // already holds it; retry. (The PUT may still have landed:
                     // pullState acknowledges that.)
-                    if (epoch === _viewEpoch) _statePushFailed = true;
+                    if (epoch === _viewEpoch) _stateFailed(gen, baseRev, true);
                     return;
                 }
                 if (out.status === 409) {
@@ -215,7 +259,7 @@
                             _stateRevSkipped = true;         // took cur.rev, did not adopt it
                         }
                     } else if (epoch === _viewEpoch) {
-                        _statePushFailed = true;     // unusable body: still owed
+                        _stateFailed(gen, baseRev, false);   // unusable body: still owed
                     }
                 } else if (out.ok) {
                     const resp = out.body;
@@ -223,7 +267,7 @@
                         // A 200 without a usable rev taught us nothing: the PUT
                         // may or may not have landed, so it is still owed (the
                         // next pull acknowledges it if it did).
-                        if (epoch === _viewEpoch) _statePushFailed = true;
+                        if (epoch === _viewEpoch) _stateFailed(gen, baseRev, true);
                         return;
                     }
                     // Our write landed. That fact holds across a teardown (the
@@ -231,17 +275,17 @@
                     // guarantees no newer response has been processed since.
                     _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
-                    _statePushFailed = false;
+                    _stateSettleSent(gen);
                     _stateRevSkipped = false;
                 } else if (out.status === 400 || out.status === 413) {
                     // A verdict on this payload (which carries any older
                     // failed edit too): it can never land, so nothing is owed.
-                    _statePushFailed = false;
+                    _stateSettleSent(gen);
                 } else if (epoch === _viewEpoch) {
                     // 401 (local broker needs auth) / other: keep localStorage;
                     // the existing /sessions auth flow handles login, next
                     // save retries.
-                    _statePushFailed = true;
+                    _stateFailed(gen, baseRev, false);
                 }
             } finally {
                 _statePushInFlight = false;
@@ -270,7 +314,7 @@
                 getLayout();                    // reconcile the adopted layout
                 savePrefsLocal();               // cache, do NOT push
                 _stateLastSerialized = _stateSerialize();
-                _statePushFailed = false;       // the adopted state supersedes it
+                _stateSettleAll();              // the adopted state supersedes it
                 _stateRevSkipped = false;
                 document.body.classList.toggle('size-locked', isSizeLocked());
                 applyDisplaySettings();
@@ -335,8 +379,8 @@
             if (!_stateBodyOk(srv)) return;         // #247 N1
             // A tab back at its baseline (a failed edit undone without a
             // save) owes nothing, whatever the server's rev says.
-            if (_statePushFailed && _stateSerialize() === _stateLastSerialized) {
-                _statePushFailed = false;
+            if (_stateOwed() && _stateSerialize() === _stateLastSerialized) {
+                _stateSettleAll();
             }
             const srvRev = srv.rev;
             if (srvRev === 0) {
@@ -369,7 +413,7 @@
             // is owed and nothing needs adopting -- record it as the baseline.
             if (!initial && srvSerialized === _stateSerialize()) {
                 _stateLastSerialized = srvSerialized;
-                _statePushFailed = false;
+                _stateSettleAll();
                 _stateRevSkipped = false;
                 return;
             }
@@ -397,7 +441,7 @@
         // (the next save retries it). pullState's dirty skip is honoured only
         // while this is true (#246).
         function _statePushPending() {
-            return _statePushQueued() || _statePushFailed;
+            return _statePushQueued() || _stateOwed();
         }
         // A background pull that KEEPS the local state because of a failed
         // push's debt (rev unchanged, server == our baseline, or the dirty
@@ -408,7 +452,7 @@
         // acknowledges (that settles the debt), and an undone edit has
         // already cleared it at the top of pullState.
         function _retryOwedPush() {
-            if (_statePushFailed && !_statePushQueued()) schedulePush();
+            if (_stateOwed() && !_statePushQueued()) schedulePush();
         }
         // The same minus the failed-push debt: something will send by itself.
         function _statePushQueued() {
