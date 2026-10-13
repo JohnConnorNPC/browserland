@@ -263,7 +263,7 @@
             _viewEpoch++;                    // supersede any in-flight boot/rebuild
             stopFastPoll();
             if (_slowPollTimer) { _slowPollTimer.stop(); _slowPollTimer = null; }
-            if (_statePushTimer) { clearTimeout(_statePushTimer); _statePushTimer = null; }
+            _stateParkPendingPush();         // #247 item 3: park the owed edit, never drop it
             pendingOpens.clear();
             restoreKeys.clear();
             for (const win of windows.values()) {
@@ -319,6 +319,10 @@
             hideBecomeActiveOverlay();
             const taskbarEl = document.getElementById('taskbar');
             if (taskbarEl) taskbarEl.style.display = '';
+            // #247 item 3: a parked edit goes out (on its old base) before the
+            // re-adopt; the pull then never adopts over one still unsent (M3).
+            try { await _stateFlushOwed(); } catch (_) {}
+            if (_deactivated || epoch !== _viewEpoch) return;
             try { await pullState(true); } catch (_) {}
             // Superseded mid-rebuild (re-deactivated, or a newer rebuild raced
             // its pullState): bail so we never double-restore or apply an

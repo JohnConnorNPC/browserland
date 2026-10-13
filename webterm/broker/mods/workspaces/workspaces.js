@@ -16,7 +16,12 @@
         // core passes unknown fields through untouched, so it is shared across
         // every browser on this broker with no broker or wire change):
         //   _layout.mods.workspaces = { version:1, activeId,
-        //                               list:[ {id, name?, focusedCol:int} ] }
+        //                               list:[ {id, name?, focusedCol:int,
+        //                                       focusedColId?:str,
+        //                                       focusedColIdAt?:int} ] }
+        //   (#247: focusedColId names the focused column, trusted only while
+        //   focusedCol still equals focusedColIdAt -- a browser without this
+        //   code writes only the index, which then wins.)
         //   _layout.columns[i].wsId = '<workspace id>'   (mod-owned; core
         //                               preserves it and never reads it)
         // An UNSTAMPED column -- one core made while this was off, or one a peer
@@ -216,6 +221,12 @@
                     if (typeof w.name !== 'string' || !w.name.trim()) delete w.name;
                     else w.name = w.name.slice(0, 40);
                     if (!Number.isInteger(w.focusedCol) || w.focusedCol < 0) w.focusedCol = 0;
+                    if (w.focusedColId !== undefined
+                            && (typeof w.focusedColId !== 'string' || !w.focusedColId
+                                || !Number.isInteger(w.focusedColIdAt))) {
+                        delete w.focusedColId;
+                        delete w.focusedColIdAt;
+                    }
                     return true;
                 });
                 if (kept.length !== st.list.length) _wsDirty = true;
@@ -491,6 +502,8 @@
                 if (vi < 0) return null;
                 const neighbor = st.list[(vi > 0) ? vi - 1 : 1];
                 if (!neighbor) return null;
+                // #247 item 8: the focused column, before columns merge in.
+                const keepId = focusedColumnId();
                 for (const col of workspaceColumns(id)) col.wsId = neighbor.id;
                 reassignFloatingWs(id, neighbor.id);
                 const wasActive = (st.activeId === id);
@@ -498,6 +511,13 @@
                 if (wasActive) {
                     st.activeId = neighbor.id;
                     applyWorkspaceView();
+                } else if (keepId) {
+                    // A non-active workspace merged into the active one: its
+                    // columns join the visible set, so the index alone would
+                    // slide focus onto another column. Keep the same column.
+                    const i = visibleColumns().findIndex(function (c) {
+                        return c && c.id === keepId; });
+                    if (i >= 0) getLayout().focusedCol = i;
                 }
                 savePrefs();
                 renderWorkspaces();
@@ -942,8 +962,30 @@
                 const L = getLayout();
                 const entry = activeWorkspaceEntry();
                 const n = workspaceColumns(activeWorkspaceId()).length;
+                // #247 item 8: the remembered column by ID, so a column set that
+                // changed meanwhile (one sent away, a workspace merged in) still
+                // finds it -- trusted only while the index it was recorded with
+                // is unchanged (an index-only writer invalidates it).
+                if (entry && typeof entry.focusedColId === 'string'
+                        && entry.focusedColIdAt === entry.focusedCol) {
+                    const i = visibleColumns().findIndex(function (c) {
+                        return c && c.id === entry.focusedColId; });
+                    if (i >= 0) { L.focusedCol = i; return; }
+                }
                 L.focusedCol = Math.max(0,
                     Math.min(entry ? entry.focusedCol : 0, Math.max(0, n - 1)));
+            }
+            // #247 item 8: the visible column focus is on, by id (or null).
+            function focusedColumnId() {
+                const c = visibleColumns()[getLayout().focusedCol | 0];
+                return (c && typeof c.id === 'string') ? c.id : null;
+            }
+            // Record where focus is in `entry`: the index and, for this code,
+            // the column id with the index it was taken at.
+            function recordFocus(entry, idx, id) {
+                entry.focusedCol = idx;
+                if (id) { entry.focusedColId = id; entry.focusedColIdAt = idx; }
+                else { delete entry.focusedColId; delete entry.focusedColIdAt; }
             }
             // focusedCol means different things to us and to a browser WITHOUT
             // this mod: it writes an index over ALL columns, we read one over the
@@ -984,7 +1026,7 @@
                     for (const k of columnKeys(col)) parkWindow(windows.get(k));
                 }
                 const cur = activeWorkspaceEntry();
-                if (cur) cur.focusedCol = getLayout().focusedCol;   // remember where we were
+                if (cur) recordFocus(cur, getLayout().focusedCol, focusedColumnId());   // remember where we were
                 st.activeId = target.id;
                 applyWorkspaceView();
                 savePrefs();
@@ -1018,6 +1060,9 @@
                 const focusPrecap = (frontId === win.id)
                     ? captureTiledFocusContext(win.id) : null;
                 const L = getLayout();
+                // #247 item 8: where focus is, BEFORE the column set changes.
+                const keepId = focusedColumnId();
+                const keepIdx = L.focusedCol | 0;
                 const shared = (loc.col.rows.length > 1 || rowKeys(loc.row).length > 1);
                 if (shared) {
                     expelToNewColumn(win);        // its own column, adjacent to the old
@@ -1036,13 +1081,21 @@
                     L.columns.splice(from, 1);
                     L.columns.splice(at > from ? at - 1 : at, 0, col);
                 }
-                target.focusedCol = Math.max(0,
-                    workspaceColumns(target.id).indexOf(col));
+                const tIdx = Math.max(0, workspaceColumns(target.id).indexOf(col));
+                recordFocus(target, tIdx, col.id);
                 // applyWorkspaceView below re-applies the ACTIVE entry, which
                 // is only recorded on demand (see syncFocusedCol): record the
-                // current focus first so it is kept (clamped), not rewound.
+                // current focus first so it is kept, not rewound. #247: by the
+                // column focus was on before the move (an index taken now
+                // would point at whatever slid into its slot); if that column
+                // is the one sent away, the clamped old index.
                 const cur = activeWorkspaceEntry();
-                if (cur && cur !== target) cur.focusedCol = L.focusedCol | 0;
+                if (cur && cur !== target) {
+                    const vis = visibleColumns();
+                    let ni = keepId ? vis.findIndex(function (c) { return c && c.id === keepId; }) : -1;
+                    if (ni < 0) ni = Math.max(0, Math.min(keepIdx, vis.length - 1));
+                    recordFocus(cur, ni, (vis[ni] && typeof vis[ni].id === 'string') ? vis[ni].id : null);
+                }
                 savePrefs();
                 parkWindow(win);                  // belongs to a hidden column now
                 // The moved window is no longer visible, so it must not stay the

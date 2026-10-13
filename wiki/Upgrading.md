@@ -19,7 +19,7 @@ desktop:
 ```
 before   { mode, activeWs, workspaces:[ {id, name?, focusedCol, columns:[...]} ] }
 after    { mode, focusedCol, columns:[...],
-           mods: { workspaces: { version:1, activeId, list:[{id,name?,focusedCol}] } } }
+           mods: { workspaces: { version:1, activeId, list:[{id,name?,focusedCol,focusedColId?,focusedColIdAt?}] } } }
 ```
 
 Every column lives in `columns` exactly once. Workspaces are a mod

@@ -90,7 +90,10 @@ function mkWorld() {
         }
         if (/^\d+$/.test(w.putFail || '')) {     // 500, 401, 400, 413 ...
             const st = Number(w.putFail);
-            return { ok: false, status: st, json: async function () { return {}; } };
+            // #247 Z5 (manager ruling): a 400 is the broker's only when it
+            // names its verdict, as the broker's /state PUT does.
+            const b = (st === 400) ? { ok: false, error: 'bad_state' } : {};
+            return { ok: false, status: st, json: async function () { return b; } };
         }
         if (body.baseRev !== w.server.rev) {
             const snap = clone(w.server);
@@ -262,7 +265,8 @@ function mkWorld() {
         return fw.prefs._layout.columns.length === 4
             && fw.prefs._layout.columns[0].id === 'c1';
     }
-    for (const mode of ['500', '401', 'throw']) {
+    // #247 Q2: 'throw' runs first, so E2b below uses a world whose retry lands.
+    for (const mode of ['throw', '500', '401']) {
         w = await failedEdit(mode);
         const s4 = w.api.st();
         ok(w.puts.length === 1 && !s4.timer && !s4.inFlight && !s4.again
@@ -273,9 +277,17 @@ function mkWorld() {
         ok(keptEdit(w), 'E1 (' + mode + ') a failed push keeps the local edit (no adopt)');
         w.api.savePrefs();
         await w.firePush();
-        ok(w.puts.length === 2 && w.puts[1].baseRev === 2
-            && w.puts[1].layout.columns.length === 4 && w.server.rev === 3,
-            'E2 (' + mode + ') the next save retries the failed edit on the rebased rev');
+        if (mode === 'throw') {
+            // #247 Q2 (owner): a THROWN failure may have landed, so its retry
+            // uses the ORIGINAL base: a peer wrote meanwhile, so it yields.
+            ok(w.puts.length === 2 && w.puts[1].baseRev === 1 && w.server.rev === 2
+                && J(w.prefs._layout) === J(L1),
+                'E2 (throw) a thrown failure retries on its original base and yields to the peer (Q2)');
+        } else {
+            ok(w.puts.length === 2 && w.puts[1].baseRev === 2
+                && w.puts[1].layout.columns.length === 4 && w.server.rev === 3,
+                'E2 (' + mode + ') the next save retries the failed edit on the rebased rev');
+        }
     }
     w.prefs._layout.focusedCol = 1;                // dirty, nothing pending
     w.otherTabWrites(L1);
@@ -329,8 +341,10 @@ function mkWorld() {
         w.putFail = mode;
         await w.firePush();
         w.api.bumpEpoch();                         // the lease flip
-        await w.api.pullState(true);               // the rebuild's re-adopt
+        // #247 single-flight: the rebuild's re-adopt waits for the stale PUT.
+        const rebuildPull = w.api.pullState(true);
         releaseG3();
+        await rebuildPull;
         await flush();
         w.gate = null; w.putFail = null;
         ok(w.prefs._layout.columns.length === 3 && !w.api.st().inFlight,
@@ -410,8 +424,10 @@ function mkWorld() {
         w.putFail = mode;
         await w.firePush();
         w.putFail = null;
-        ok(w.puts.length === 1 && keptEdit(w),
-            'P2 precondition (' + mode + '): skipped, then the push was refused');
+        // #247 item 7 (Q4, owner): a rejected save converges AT ONCE.
+        // (#247 Z5: the 400 is the broker's verdict, like the 413.)
+        ok(w.puts.length === 1 && J(w.prefs._layout) === J(L1),
+            'P2 precondition (' + mode + '): skipped, then the push was refused and the tab converged at once (Q4)');
         await w.api.pullState(false);
         ok(J(w.prefs._layout) === J(L1),
             'P2a (' + mode + ') a later poll adopts the skipped rev');
@@ -439,9 +455,10 @@ function mkWorld() {
     w.putFail = '413';
     await w.firePush();                            // the re-push is refused
     w.putFail = null;
+    // #247 item 7 (Q4, owner): the refused re-push converges at once.
     ok(w.puts.length === 2 && w.api.st().rev === 2
-        && w.prefs._layout.columns.length === 5,
-        'P3 precondition: 409 kept the edit at rev 2, its re-push was refused');
+        && J(w.prefs._layout) === J(L1),
+        'P3 precondition: 409 kept the edit at rev 2, its re-push was refused and the tab converged at once (Q4)');
     await w.api.pullState(false);                  // same rev 2
     ok(J(w.prefs._layout) === J(L1), 'P3a a later poll adopts the 409 winner');
 
@@ -456,11 +473,13 @@ function mkWorld() {
         && w.server.rev === 3 && w.server.layout.columns.length === 4,
         'S1a the owed edit retries on the rebased rev without waiting for a save');
     // S2: a broker that keeps refusing costs at most one PUT per poll tick.
+    // #247 item 9 (b, owner): only for the first 3 failures (the fast phase);
+    // test_state_sync_order.py's B cells pin the back-off after it.
     w = await failedEdit('500');
     w.otherTabWrites(L1);
     w.putFail = '500';
-    for (let i = 0; i < 4; i++) { await w.api.pullState(false); await w.firePush(); }
-    ok(w.puts.length === 1 + 4, 'S2 a failing retry repeats once per poll, never more');
+    for (let i = 0; i < 2; i++) { await w.api.pullState(false); await w.firePush(); }
+    ok(w.puts.length === 1 + 2, 'S2 a failing retry repeats once per poll in the fast phase, never more (item 9 b)');
     const before3 = w.puts.length;
     await w.api.pullState(false);
     await w.api.pullState(false);
@@ -615,7 +634,10 @@ def test_a_failed_push_still_owes_the_edit(scenario_run):
     for mode in ("500", "401", "throw"):
         _ok(scenario_run, f"E0 precondition ({mode}): the push failed, nothing re-queued")
         _ok(scenario_run, f"E1 ({mode}) a failed push keeps the local edit (no adopt)")
+    for mode in ("500", "401"):
         _ok(scenario_run, f"E2 ({mode}) the next save retries the failed edit on the rebased rev")
+    # #247 Q2 (owner): a thrown failure retries on its original base.
+    _ok(scenario_run, "E2 (throw) a thrown failure retries on its original base and yields to the peer (Q2)")
     _ok(scenario_run, "E2b once the retry lands, unsaved dirt adopts again")
     _ok(scenario_run, "E3 after an adopt supersedes a failed edit, unsaved dirt adopts again")
 
@@ -646,11 +668,14 @@ def test_a_skipped_rev_is_reconsidered_when_its_push_sends_nothing(scenario_run)
     _ok(scenario_run, "P1 precondition: skipped at rev 2, then the push sent nothing")
     _ok(scenario_run, "P1a a later poll adopts the skipped rev")
     _ok(scenario_run, "P1b the next unrelated save keeps the peer layout on /state")
+    # #247 item 7 (Q4, owner): a broker verdict converges at once (Z5: the
+    # harness 400 now carries the broker's verdict body).
     for mode in ("400", "413"):
-        _ok(scenario_run, f"P2 precondition ({mode}): skipped, then the push was refused")
+        _ok(scenario_run, f"P2 precondition ({mode}): skipped, then the push was refused and the tab converged at once (Q4)")
+    for mode in ("400", "413"):
         _ok(scenario_run, f"P2a ({mode}) a later poll adopts the skipped rev")
         _ok(scenario_run, f"P2b ({mode}) the next unrelated save keeps the peer layout")
-    _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused")
+    _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused and the tab converged at once (Q4)")
     _ok(scenario_run, "P3a a later poll adopts the 409 winner")
 
 
@@ -659,7 +684,7 @@ def test_an_owed_edit_retries_once_the_broker_answers(scenario_run):
     # soon as a pull proves the broker reachable, bounded by the poll tick.
     _ok(scenario_run, "S1 precondition: the failed push left nothing queued")
     _ok(scenario_run, "S1a the owed edit retries on the rebased rev without waiting for a save")
-    _ok(scenario_run, "S2 a failing retry repeats once per poll, never more")
+    _ok(scenario_run, "S2 a failing retry repeats once per poll in the fast phase, never more (item 9 b)")
     _ok(scenario_run, "S2a three polls inside one debounce cost one PUT")
     _ok(scenario_run, "S2b throughout, the owed edit is kept (no adopt)")
     _ok(scenario_run, "S3 a poll during a queued push arms no second retry")
