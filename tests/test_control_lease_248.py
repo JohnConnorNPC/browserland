@@ -408,3 +408,178 @@ def test_one_lease_log_line_per_holder_change(tmp_path, monkeypatch, caplog):
     text = caplog.text
     assert LONG_A not in text and LONG_B not in text
     assert LONG_A[:9] not in text and LONG_B[:9] not in text
+
+
+# ---- atom 6 (A5): a lease-refused drive frame gets ONE not_active hint ----
+
+import pytest  # noqa: E402
+
+from webterm.broker.registry import BrokerRegistry  # noqa: E402
+from tests.test_terminal_control import (  # noqa: E402
+    FakeBrowser, _attach, _producer_frames, _registered)
+from tests.test_terminal_control import _settle as _relay_settle  # noqa: E402
+
+
+class LeaseCtx:
+    def __init__(self, active, gen=1):
+        self.active_client_id = active
+        self.lease_generation = gen
+
+
+def _errors(ws):
+    out = []
+    for raw in ws.sent:
+        if isinstance(raw, str):
+            f = json.loads(raw)
+            if f.get("type") == "error":
+                out.append(f)
+    return out
+
+
+def _hint(entry):
+    return {"type": "error", "reason": "not_active", "session_id": entry.id}
+
+
+DRIVE_FRAMES = [{"type": "input", "data": "x"}, {"type": "paste", "data": "x"},
+                b"x-binary", {"type": "resize", "cols": 40, "rows": 10}]
+
+
+@pytest.mark.parametrize("frame", DRIVE_FRAMES,
+                         ids=["input", "paste", "binary", "resize"])
+def test_a_non_holder_gets_one_hint_per_generation(frame):
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = LeaseCtx("phone", gen=5)
+        entry = await _registered(reg)
+        desk = FakeBrowser()
+        task = _attach(reg, ctx, entry, desk, "desktop")
+        await _relay_settle()
+        desk.push(frame)
+        await _relay_settle()
+        assert _errors(desk) == [_hint(entry)]
+        assert _producer_frames(entry) == []
+        # Same generation: dropped again, no second hint.
+        for f in DRIVE_FRAMES:
+            desk.push(f)
+        await _relay_settle()
+        assert _errors(desk) == [_hint(entry)]
+        # A new generation (another holder change) re-arms it once.
+        ctx.lease_generation = 6
+        ctx.active_client_id = "tablet"
+        desk.push(frame)
+        desk.push(frame)
+        await _relay_settle()
+        assert _errors(desk) == [_hint(entry)] * 2
+        assert _producer_frames(entry) == []
+        desk.hang_up()
+        await task
+    asyncio.run(scenario())
+
+
+def test_the_holder_gets_no_hint():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = LeaseCtx("desktop")
+        entry = await _registered(reg)
+        desk = FakeBrowser()
+        task = _attach(reg, ctx, entry, desk, "desktop")
+        await _relay_settle()
+        for f in DRIVE_FRAMES:
+            desk.push(f)
+        await _relay_settle()
+        assert _errors(desk) == []
+        assert len(_producer_frames(entry)) == 4
+        desk.hang_up()
+        await task
+    asyncio.run(scenario())
+
+
+def test_controller_gated_and_revoked_sockets_get_no_hint():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = LeaseCtx("desktop")
+        entry = await _registered(reg)
+        desk, ctl = FakeBrowser(), FakeBrowser()
+        tasks = [_attach(reg, ctx, entry, desk, "desktop"),
+                 _attach(reg, ctx, entry, ctl, "ext")]
+        await _relay_settle()
+        # A #238 controller holds the terminal: the lease holder's frames
+        # are dropped for the CONTROLLER's sake -- no not_active.
+        ctl.push({"type": "control", "op": "claim", "label": "phone"})
+        await _relay_settle()
+        for f in DRIVE_FRAMES:
+            desk.push(f)
+        await _relay_settle()
+        assert _errors(desk) == []
+        # Revoked: the controller lost the terminal (a POST release); its
+        # socket watches until it claims again -- no not_active either, even
+        # though its clientId does not hold the lease.
+        assert reg.release_by_gen(entry, entry.control_gen) is None
+        for f in DRIVE_FRAMES:
+            ctl.push(f)
+        await _relay_settle()
+        assert [e["reason"] for e in _errors(ctl)] == []
+        assert _producer_frames(entry) == []
+        for ws in (desk, ctl):
+            ws.hang_up()
+        await asyncio.gather(*tasks)
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+def test_a_refusal_under_the_send_lock_hints_too():
+    # Admitted on arrival (it held the lease), dropped at the second gate
+    # because the lease moved while it waited on the send lock: the hint
+    # describes THAT refusal.
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = LeaseCtx("desktop", gen=3)
+        entry = await _registered(reg)
+        desk = FakeBrowser()
+        task = _attach(reg, ctx, entry, desk, "desktop")
+        await _relay_settle()
+        await entry._send_lock.acquire()      # a snapshot/RPC in flight
+        desk.push({"type": "input", "data": "late"})
+        await _relay_settle()                 # admitted, waiting on the lock
+        ctx.active_client_id, ctx.lease_generation = "phone", 4
+        entry._send_lock.release()
+        await _relay_settle()
+        assert _producer_frames(entry) == []
+        assert _errors(desk) == [_hint(entry)]
+        desk.hang_up()
+        await task
+    asyncio.run(scenario())
+
+
+def test_e2e_non_holder_input_gets_one_not_active(broker):
+    from tests.test_terminal_control import _browser, _next_drive, _producer
+    port, base = broker
+
+    async def scenario():
+        wid = 248600
+        prod = await _producer(port, base, wid)
+        holder = await _lease(port, "HINT-B")
+        desk, _ = await _browser(port, wid, "HINT-A")
+        for i in range(3):
+            await desk.send(json.dumps({"type": "input", "data": f"A{i}"}))
+        await desk.send(json.dumps({"type": "resize", "cols": 9, "rows": 9}))
+        # Barrier (tests/test_terminal_control.py _processed), keeping every
+        # frame it reads: once not_controller arrives, the relay has handled
+        # all of desk's frames above.
+        await desk.send(json.dumps({"type": "control", "op": "release"}))
+        frames = []
+        while not frames or frames[-1].get("reason") != "not_controller":
+            raw = await asyncio.wait_for(desk.recv(), 5)
+            if isinstance(raw, str):
+                frames.append(json.loads(raw))
+        mine, _ = await _browser(port, wid, "HINT-B")
+        await mine.send(json.dumps({"type": "input", "data": "B-marker"}))
+        assert await _next_drive(prod) == {"type": "input",
+                                           "data": "B-marker"}
+        hints = [f for f in frames if f.get("type") == "error"
+                 and f.get("reason") == "not_active"]
+        assert hints == [{"type": "error", "reason": "not_active",
+                          "session_id": wid}]
+        for ws in (desk, mine, holder, prod):
+            await ws.close()
+    asyncio.run(scenario())

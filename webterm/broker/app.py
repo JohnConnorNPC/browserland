@@ -4984,7 +4984,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # #248 S7: the statuses go first, all at once: cutting the
                 # losers' terminals awaits each close unbounded, and must not
                 # hold back any page's status. Their input is already gated
-                # on the flipped lease (relay._may_drive).
+                # on the flipped lease (relay._drive_refusal).
                 await _send_all({**losers, client_id: winners})
                 for cid in losers:
                     await ctx.registry.close_clients_terminals(cid, 4409)
