@@ -29,6 +29,10 @@ procs = ["psutil>=5"]
 # `mcp` SDK requires Python >=3.10, while webterm core stays >=3.9 — so this is
 # an optional extra, not a core dependency.
 mcp = ["mcp>=1.2"]
+# The #252 peer proxy (/peer/<id>/...): its upstream HTTP client. Optional,
+# like `mcp`, so core stays websockets + sanic; a broker that names peers
+# without it logs one line and answers /peer/* with 503 proxy_unavailable.
+proxy = ["httpx>=0.27"]
 dev = ["pytest>=7", "pytest-asyncio>=0.24"]
 
 [project.scripts]

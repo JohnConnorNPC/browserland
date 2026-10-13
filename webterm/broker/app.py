@@ -86,7 +86,8 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import auth, modinstall, relay, roles, supervise, update as update_check
+from . import (auth, modinstall, peers, relay, roles, supervise,
+               update as update_check)
 from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
 # the per-window store that validates them (#228), and so are the scope
@@ -4011,6 +4012,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.serve_ui = bool(config.get("serve_ui", True))
     app.ctx.role = roles.role_of(app.ctx.serve_ui)
     app.ctx.terminals = config.get("terminals", True) is not False
+    # #252: the peers this broker relays to under /peer/<id>/. __main__ ran
+    # the same parse before the one-shots (one stderr line, exit 2); this is
+    # the second line of defence for a direct caller, like roles above.
+    peer_cfg, peer_error = peers.parse_peers(
+        config.get("peers"), port, (config.get("host") or "",))
+    if peer_error:
+        raise ValueError(peer_error)
+    app.ctx.peers = peer_cfg
+    app.ctx.peer_proxy = bool(peer_cfg) and peers.proxy_available()
     app.ctx.registry = BrokerRegistry()
     # The Launcher (profiles-only /launch source of truth) is constructed AFTER
     # the state path is resolved, so its sidecar (webterm_profiles.json, #70) can
@@ -4320,6 +4330,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     LOGGER.info("broker identity: %s", app.ctx.broker_id)
     LOGGER.info("broker role: %s - terminals %s", app.ctx.role,
                 "on" if app.ctx.terminals else "off (launches refused)")
+    # #252: ids only. An origin is not a secret (userinfo is refused), but
+    # the ids are what an operator greps for, and one line stays one line.
+    if app.ctx.peers:
+        LOGGER.info("peer proxy: %s", ", ".join(sorted(app.ctx.peers)))
+        if not app.ctx.peer_proxy:
+            LOGGER.warning("peer proxy unavailable: install webterm[proxy] "
+                           "(httpx); /peer/* answers 503 proxy_unavailable")
     # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
     # a set so they aren't GC'd mid-flight; each self-removes on completion.
     app.ctx.bg_tasks = set()
@@ -8679,7 +8696,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # terminal_control push, POST /session/control). Unconditional
                 # like mcp_scopes; a client reads its absence as "no external
                 # control here". The integer is the contract version.
-                "terminal_control": 1}
+                "terminal_control": 1,
+                # #252: the peers this broker relays to, as {id: origin} --
+                # the page keys a proxied host's token on (id, origin) and
+                # drops it when the origin moves. Origins only: never the
+                # `mcp` opt-in, never a credential. `peer_proxy` is the
+                # capability a page keys on (false with no peers, or without
+                # the proxy extra); a broker without the key cannot proxy.
+                "peers": {pid: p["origin"]
+                          for pid, p in app.ctx.peers.items()},
+                "peer_proxy": app.ctx.peer_proxy}
         # #191: the admin-class advertisement. e1ca8e6-style capability
         # reporting -- published ONLY by a build that actually enforces the
         # class (app.ctx.admin_token set), so an old/non-enforcing peer never

@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import auth, roles, supervise
+from . import auth, peers, roles, supervise
 from .app import DEFAULT_PORT, _open_url, create_app, load_config
 
 
@@ -252,6 +252,10 @@ def main() -> int:
     # Same folding for the resolved host, so the startup banner and
     # --print-token can build the ready-to-open URL off the config alone.
     config["host"] = host
+    # #252: the peer list is checked here too, held the same way as a role
+    # refusal (the one-shots below still run on it), so a bad origin is one
+    # line and exit 2 instead of create_app's ValueError as a traceback.
+    _, peer_error = peers.parse_peers(config.get("peers"), port, (host,))
 
     # The one-shot subcommands answer and exit. They deliberately run BEFORE
     # the supervisor split: asking for a token must not spawn a broker, and
@@ -262,10 +266,13 @@ def main() -> int:
         return _scan_recordings(config, ns)
 
     # Before the supervisor split AND before the worker binds: a refused role
-    # is one line on stderr and exit 2, never a supervisor that starts a worker
-    # only to watch it raise.
+    # or peer list is one line on stderr and exit 2, never a supervisor that
+    # starts a worker only to watch it raise.
     if role_error:
         print(role_error, file=sys.stderr)
+        return 2
+    if peer_error:
+        print(peer_error, file=sys.stderr)
         return 2
     if ns.worker:
         return _run_worker(config, host, port)

@@ -293,8 +293,8 @@ def test_package_totals_are_capped():
 def test_installed_css_may_not_reference_an_external_origin():
     # The CSP sets ONLY script-src and frame-ancestors -- no default-src, no
     # style-src -- so a stylesheet's @import / url() is entirely unrestricted
-    # and would be a SILENT egress channel out of a broker whose only outbound
-    # HTTP is the deliberately-closed /status/fetch.
+    # and would be a SILENT egress channel out of a broker whose outbound HTTP
+    # is a closed, pinned inventory (tests/test_egress_pin.py).
     refused = [
         "@import url('https://evil.example/x.css');\n",
         '@import "https://evil.example/x.css";\n',
