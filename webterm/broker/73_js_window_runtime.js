@@ -467,14 +467,35 @@
             if (availW < dims.w || availH < dims.h) return;
             const cols = Math.max(1, Math.floor(availW / dims.w));
             const rows = Math.max(1, Math.floor(availH / dims.h));
-            if (!force && win.lastSentDims
+            // #248 C1: a window marked by reclaimHostSize sends even when its
+            // grid equals lastSentDims -- that dedup records what this page
+            // SENT, and a send the broker dropped (this page did not hold the
+            // lease then) left the PTY at another device's size. The mark is
+            // spent only by an actual send, so a window that could not send
+            // at reclaim time (minimized, another workspace, socket not open)
+            // sends on its next ordinary resize.
+            if (!force && !win.needsReclaim && win.lastSentDims
                 && win.lastSentDims.cols === cols
                 && win.lastSentDims.rows === rows) {
                 return;
             }
             win.lastSentDims = { cols, rows };
-            try { win.ws.send(JSON.stringify({ type: 'resize', cols, rows })); }
-            catch (_) {}
+            try {
+                win.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+                win.needsReclaim = false;
+            } catch (_) {}
+        }
+
+        // #248 C1: this page newly holds `hostId`'s lease (64
+        // _noteLeaseHolding): every terminal of that host re-sends its own
+        // size. Not by clearing lastSentDims (recorder adoptGeom and the
+        // detached tick read it) but by a per-window mark sendResize honours.
+        function reclaimHostSize(hostId) {
+            for (const win of windows.values()) {
+                if (win.disposed || win.type === 'app' || win.hostId !== hostId) continue;
+                win.needsReclaim = true;
+                refitSoon(win);
+            }
         }
 
         function scheduleResize(win) {

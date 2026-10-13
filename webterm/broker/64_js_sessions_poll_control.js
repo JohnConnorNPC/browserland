@@ -526,6 +526,27 @@
             if (rec.hostId === homeHostId()) _clearLostContact();
             onControlStatus(rec.hostId, msg);
             _settleWantActive(rec, msg);
+            _noteLeaseHolding(rec.hostId, msg);
+        }
+
+        // #248 C1: the holder owns the PTY size (owner O1), so a NEW holding
+        // re-sends this page's size for that host's windows -- once per
+        // (host, bootId, gen) held. Keyed on the broker's generation, not on
+        // "a status arrived": a silent re-acquire (this page never torn down,
+        // the auto-claim bumped gen) reclaims, a remote host whose lease came
+        // back without ever being masked reclaims, a broker restart (new
+        // bootId) reclaims; an A2 replacement reporting the SAME holding, or a
+        // repeated status/pong, does not (each reclaim is a forced resize the
+        // agent answers by dropping its #130 keyframe). An older broker sends
+        // no gen/bootId and never reclaims (its behaviour is unchanged).
+        const _leaseHeld = new Map();       // hostId -> 'bootId#gen' reclaimed
+        function _noteLeaseHolding(hostId, msg) {
+            if (!msg.active || typeof msg.gen !== 'number'
+                    || typeof msg.bootId !== 'string') return;
+            const key = msg.bootId + '#' + msg.gen;
+            if (_leaseHeld.get(hostId) === key) return;
+            _leaseHeld.set(hostId, key);
+            if (typeof reclaimHostSize === 'function') reclaimHostSize(hostId);
         }
 
         // The replacement reported: it is now the socket in charge, and the

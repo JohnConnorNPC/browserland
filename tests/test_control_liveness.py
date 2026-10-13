@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 56
+EXPECTED_ASSERTS = 65
 
 _HARNESS = r"""
 'use strict';
@@ -60,7 +60,7 @@ function mkWorld(opts) {
     opts = opts || {};
     const w = { now: 1000000, tid: 1, timers: new Map(), sockets: [],
                 log: [], visCbs: [], notices: [], rpcs: [], views: [],
-                stickies: [] };
+                stickies: [], reclaims: [] };
     class FakeWS {
         constructor(url) {
             this.url = url; this.readyState = 0; this.sent = [];
@@ -153,6 +153,7 @@ function mkWorld(opts) {
         hideBecomeActiveOverlay: function () {},
         _emitModEvent: function (n, p) { w.log.push('lease:' + p.active); },
         onRemoteControlStatus: function (hid, active) { w.log.push('remote:' + hid + ':' + active); },
+        reclaimHostSize: function (hid) { w.reclaims.push(hid); },
     };
     if (opts.env) Object.assign(env, opts.env);
     w.env = env;
@@ -171,6 +172,7 @@ const ST = function (active, extra) {
     return Object.assign({ type: 'status', active: active,
         activeClientId: active ? 'me' : 'other', gen: 1, bootId: 'b1' }, extra || {});
 };
+const J = JSON.stringify;
 const OLD_ST = function (active) {      // a pre-#248 broker: no gen / bootId
     return { type: 'status', active: active, activeClientId: active ? 'me' : 'other' };
 };
@@ -500,6 +502,52 @@ ok(s0.closed, 'N8a precondition: a silent channel is retired after two deadlines
 w.advance(10000);
 ok(lostUp(w) === 1, 'N8 ...and 10 s later, still down, the notice is up');
 
+// ---- C1: reclaim once per (host, bootId, gen) newly held ------------------
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 5 }));
+ok(J(w.reclaims) === J(['local']), 'C1 a first holding reclaims that host once');
+s0._recv(ST(true, { gen: 5 }));
+pong(s0, s0.lastPing().n, { active: true, activeClientId: 'me', gen: 5, bootId: 'b1' });
+ok(w.reclaims.length === 1, 'C2 a repeated status or pong of the same holding reclaims nothing');
+w.advance(10000);                        // A2 replacement
+s1 = w.last(); s1._open(); s1._recv(ST(true, { gen: 5 }));
+ok(w.rec().ws === s1 && w.reclaims.length === 1,
+    'C3 an A2 replacement reporting the same holding reclaims nothing');
+s1._recv(ST(false, { activeClientId: 'phone', gen: 6 }));
+s1._recv(ST(true, { gen: 7 }));
+ok(J(w.reclaims) === J(['local', 'local']),
+    'C4 losing then re-acquiring (a new gen) reclaims again');
+
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 5 }));
+s0._drop(1006);
+w.advance(2000);
+s1 = w.last(); s1._open(); s1._recv(ST(true, { gen: 6 }));
+ok(w.log.indexOf('teardown') === -1 && w.reclaims.length === 2,
+    'C5 a silent re-acquire (never torn down, auto-claim bumped gen) reclaims (S1)');
+
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 1, bootId: 'b1' }));
+s0._drop(1006);
+w.advance(2000);
+s1 = w.last(); s1._open(); s1._recv(ST(true, { gen: 1, bootId: 'b2' }));
+ok(w.reclaims.length === 2, 'C6 a broker restart (new bootId, same gen number) reclaims');
+
+w = mkWorld();
+s0 = connected(w, ST(false));
+ok(w.reclaims.length === 0, 'C7 an inactive status never reclaims');
+
+w = mkWorld();
+w.api.openControlWs(w.env.hostById('rb'));
+s0 = w.last(); s0._open(); s0._recv(ST(true, { gen: 9, bootId: 'bB' }));
+ok(J(w.reclaims) === J(['rb']),
+    'C8 a remote host auto-claim reclaims that host, with no mask involved (M3)');
+
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last(); s0._open(); s0._recv(OLD_ST(true));
+ok(w.reclaims.length === 0, 'C9 an older broker (no gen/bootId) never reclaims');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -635,6 +683,21 @@ def test_take_back_while_reconnecting(run, label):
     "N8 ...and 10 s later, still down, the notice is up",
 ])
 def test_lost_contact_notice(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "C1 a first holding reclaims that host once",
+    "C2 a repeated status or pong of the same holding reclaims nothing",
+    "C3 an A2 replacement reporting the same holding reclaims nothing",
+    "C4 losing then re-acquiring (a new gen) reclaims again",
+    "C5 a silent re-acquire (never torn down, auto-claim bumped gen) reclaims (S1)",
+    "C6 a broker restart (new bootId, same gen number) reclaims",
+    "C7 an inactive status never reclaims",
+    "C8 a remote host auto-claim reclaims that host, with no mask involved (M3)",
+    "C9 an older broker (no gen/bootId) never reclaims",
+])
+def test_reclaim_per_new_holding(run, label):
     _ok(run, label)
 
 
