@@ -14,10 +14,12 @@ boundaries and evaluated inside a ``with (env)`` scope whose outer names
 * L1-L6 -- 76 click time: quick-launch and ``launchProfile`` decide on the
   AWAITED local ``/info``, a null host is the explained modal, and a broker's
   own 403 ``terminals_disabled`` maps to the same modal.
-* I1, M1 -- 76 launch menu: a terminals-off host gets one disabled reason row
-  and no ``/profiles`` fetch.
+* I1, M1-M4 -- 76 launch menu: a terminals-off host gets one disabled reason
+  row and no ``/profiles`` fetch; a host whose answer is not known yet is asked
+  once and the open menu repaints when the answer lands.
 * E1, E2 -- 81 profiles editor: a terminals-off target shows the note.
-* C1 -- 81 ``fetchModCatalog`` records ``terminalsOff`` from a peer's ``/info``.
+* C1, C2 -- 81 ``fetchModCatalog`` records ``terminalsOff`` from a peer's
+  ``/info``; ``primeModCatalog`` hands back that read so the menu can repaint.
 * B1 -- 83 Settings -> Hosts badge survives a null default.
 
 One PASS/FAIL line per assert plus a machine-readable tail; the fixture FAILS
@@ -51,7 +53,7 @@ SLICES = {
               "        const LAUNCH_ROW_TERMINALS_OFF",
               "        function buildLaunchMenuItems(hosts) {"),
     "menu": ("76_js_launch_fullscreen.js",
-             "        function openLaunchMenu(x, y) {",
+             "        // #253: a host whose terminals answer is not known yet",
              "        if (launchBtn) {"),
     "quick": ("76_js_launch_fullscreen.js",
               "            const quickLaunch = async () => {",
@@ -62,12 +64,15 @@ SLICES = {
     "catalog": ("81_js_control_panel.js",
                 "        async function fetchModCatalog(host) {",
                 "        // One /info read of `host` into modCatalogCache"),
+    "prime": ("81_js_control_panel.js",
+              "        // Returns the read's promise (undefined when one is already in",
+              "        // The well-shaped {modId: bool} subset"),
     "badge": ("83_js_broker_identity.js",
               "            const curHost = defaultLaunchHost();",
               "            const storedDefault = getSettings().defaultHost;"),
 }
 
-EXPECTED_ASSERTS = 31
+EXPECTED_ASSERTS = 36
 
 _HARNESS = r"""
 'use strict';
@@ -294,11 +299,32 @@ const launched = (w) => w.fetches.filter(f => f.endsWith(' /launch'));
             launchMenuGen: 0, launchMenuNode: null, launchMenuPaint: null,
             launchMenuStillOurs: () => true,
             launchMenuSig: () => String(Math.random()),
-            renderMenu: () => {},
+            renderMenu: (items) => {
+                w.renders = (w.renders || []).concat([items.map(i => i.label)]);
+            },
             ctxMenu: { firstChild: null },
-            repaintLaunchMenu: () => {},
-            fetchProfiles: (h) => { w.profileFetches.push(h.id); return Promise.resolve(); },
+            // Like 76's: count it, then re-run the open menu's paint.
+            repaintLaunchMenu: () => {
+                w.repaints = (w.repaints || 0) + 1;
+                if (w.env.launchMenuPaint) w.env.launchMenuPaint();
+            },
+            // Like 76's: the answer lands in profilesCache, so a repaint
+            // does not dial again.
+            fetchProfiles: (h) => {
+                w.profileFetches.push(h.id);
+                cached.set(h.id, { profiles: ['p-' + h.id] });
+                return Promise.resolve();
+            },
             appMenuItems: () => [],
+            // The Control Panel's /info read of a peer: records what o.peerInfo
+            // says it answered, like 81's fetchModCatalog does.
+            primeModCatalog: (h) => {
+                w.primes = (w.primes || []).concat([h.id]);
+                return Promise.resolve().then(() => {
+                    const off = (o.peerInfo || {})[h.id];
+                    w.records.set(h.id, { terminalsOff: off === true });
+                });
+            },
         });
         Object.assign(w, load(S.items + '\nfunction buildLaunchMenuItems(hosts) { const items = []; '
             + 'hosts.forEach(h => items.push(...launchHostItems(h))); return items; }\n' + S.menu,
@@ -327,6 +353,69 @@ const launched = (w) => w.fetches.filter(f => f.endsWith(' /launch'));
         w.openLaunchMenu(0, 0);
         ok(w.profileFetches.length === 1 && w.profileFetches[0] === 'a',
            'M1 the open menu fetches /profiles for a launching peer, never for a terminals-off host');
+    }
+    {
+        // A terminals-off peer the Control Panel never probed: no record yet.
+        // Its profiles are cached, so the /info read is the only thing that
+        // can repaint the open menu.
+        const w = mkMenu({ info: { terminals: true }, peers: [peer('a')],
+                           peerInfo: { a: true },
+                           profiles: { local: { profiles: ['cmd'] },
+                                       a: { profiles: ['sh'] } } });
+        w.hostTerminalsOff('local'); await tick();
+        w.env.hostTerminalsOff = w.hostTerminalsOff;
+        w.openLaunchMenu(0, 0);
+        const first = w.renders[0];
+        await tick();
+        const last = w.renders[w.renders.length - 1];
+        ok(JSON.stringify(w.primes) === '["a"]' && w.repaints >= 1
+           && first.indexOf('sh') !== -1
+           && last.indexOf('sh') === -1 && last.indexOf('terminals off — launches nothing here') !== -1,
+           'M2 the open menu asks a cold peer for its /info once and repaints into the reason row');
+    }
+    {
+        // The menu opens before the serving broker's boot /info has settled.
+        const w = mkMenu({ info: { terminals: false },
+                           profiles: { local: { profiles: ['cmd'] } } });
+        w.env.hostTerminalsOff = w.hostTerminalsOff;
+        w.openLaunchMenu(0, 0);
+        const first = w.renders[0];
+        await tick();
+        const last = w.renders[w.renders.length - 1];
+        ok(first.indexOf('cmd') !== -1 && w.repaints >= 1
+           && last.indexOf('terminals off — launches nothing here') !== -1,
+           'M3 a menu opened before the local /info settled repaints when it lands');
+    }
+    {
+        // Opened before anything asked for the local /info at all: the
+        // memo does not exist yet, so the menu's own ask creates it.
+        const w = mkMenu({ profiles: { local: { profiles: ['cmd'] } } });
+        w.env.hostTerminalsOff = w.hostTerminalsOff;
+        w.env.localInfo = function lazy() {
+            if (!lazy._p) lazy._p = Promise.resolve({ terminals: false });
+            return lazy._p;
+        };
+        // The predicate reads localInfo._p through env too.
+        const f = load(S.pred, w.env, ['hostTerminalsOff']);
+        w.env.hostTerminalsOff = f.hostTerminalsOff;
+        w.openLaunchMenu(0, 0);
+        await tick();
+        const last = w.renders[w.renders.length - 1];
+        ok(last.indexOf('terminals off — launches nothing here') !== -1,
+           'M5 a menu opened before the local /info memo existed still repaints into the reason row');
+    }
+    {
+        // Both hosts' profiles are cached, so any repaint would be ours.
+        const w = mkMenu({ info: { terminals: true }, peers: [peer('a')],
+                           records: { a: { terminalsOff: false } },
+                           profiles: { local: { profiles: ['cmd'] },
+                                       a: { profiles: ['sh'] } } });
+        w.hostTerminalsOff('local'); await tick();
+        w.env.hostTerminalsOff = w.hostTerminalsOff;
+        w.openLaunchMenu(0, 0);
+        await tick();
+        ok(!w.primes && !w.repaints,
+           'M4 a host whose answer is known is never re-asked and nothing repaints for it');
     }
 
     // ---- E: profiles editor ------------------------------------------------
@@ -385,6 +474,27 @@ const launched = (w) => w.fetches.filter(f => f.endsWith(' /launch'));
         ok(off.terminalsOff === true && on.terminalsOff === false && old.terminalsOff === false
            && noMods.terminalsOff === true,
            'C1 fetchModCatalog records terminalsOff from a literal false only, with or without mods');
+    }
+
+    {
+        const fetching = new Set();
+        let release;
+        const env = {
+            modCatalogFetching: fetching,
+            fetchModCatalog: () => new Promise(r => { release = r; }),
+            currentSettingsTab: null,
+            renderModPolicy: () => {},
+        };
+        const f = load(S.prime, env, ['primeModCatalog']);
+        const p1 = f.primeModCatalog({ id: 'a' });
+        const p2 = f.primeModCatalog({ id: 'a' });
+        let landed = false;
+        if (p1 && p1.then) p1.then(() => { landed = true; });
+        release();
+        await tick();
+        ok(!!(p1 && typeof p1.then === 'function') && p2 === undefined && landed
+           && !fetching.has('a'),
+           'C2 primeModCatalog hands back its read (undefined while one is in flight)');
     }
 
     // ---- B: the Settings -> Hosts badge ------------------------------------
@@ -563,9 +673,14 @@ def test_253_click_time_launch(run, label):
 @pytest.mark.parametrize("label", [
     "I1 a terminals-off host gets one disabled reason row instead of its profiles",
     "M1 the open menu fetches /profiles for a launching peer, never for a terminals-off host",
+    "M2 the open menu asks a cold peer for its /info once and repaints into the reason row",
+    "M3 a menu opened before the local /info settled repaints when it lands",
+    "M4 a host whose answer is known is never re-asked and nothing repaints for it",
+    "M5 a menu opened before the local /info memo existed still repaints into the reason row",
     "E1 a terminals-off target shows the note, disables Add/Detect and fetches nothing",
     "E2 a launching target loads its profiles as before",
     "C1 fetchModCatalog records terminalsOff from a literal false only, with or without mods",
+    "C2 primeModCatalog hands back its read (undefined while one is in flight)",
     "B1 a null START default leaves no badge instead of throwing",
 ])
 def test_253_menus_editor_badge(run, label):
@@ -578,3 +693,17 @@ def test_every_scenario_passed_and_node_exited_clean(run):
     assert len(run["results"]) == EXPECTED_ASSERTS
     assert run["rc"] == 0, run["stderr"]
     assert "HARNESS CRASH" not in run["stdout"], run["stdout"]
+
+
+def test_the_page_posts_launch_from_launch_profile_only():
+    """Every launch affordance (START, the menu rows, the keybinding, the
+    update mod's fresh terminal) reaches the broker through launchProfile, so
+    its click-time refusal covers them all. Pin that: the assembled page --
+    shipped mods included -- names the /launch route exactly once, inside
+    launchProfile."""
+    from webterm.broker.ui import INDEX_HTML
+    hits = [m.start() for m in re.finditer(r"""['"`]/launch['"`]""", INDEX_HTML)]
+    assert len(hits) == 1, f"/launch named {len(hits)}x in the page"
+    start = INDEX_HTML.index("async function launchProfile(host, name, cwd) {")
+    end = INDEX_HTML.index("// /profiles is static per broker run", start)
+    assert start < hits[0] < end, "the one /launch POST is not in launchProfile"

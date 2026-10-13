@@ -509,6 +509,22 @@
         // Hoisted out of the if(launchBtn) block (#149) so the taskbar's
         // aggregate broker badge (75) can open the menu too — the badge must
         // work even on a page whose launch button is missing.
+        // #253: a host whose terminals answer is not known yet (hostTerminals-
+        // Off null) gets it asked for, once, and the open menu repaints when
+        // it lands — otherwise a terminals-off peer the Control Panel never
+        // probed (the taskbar primes only peers with attached windows) would
+        // keep showing profiles. The serving broker's answer is the boot
+        // /info memo; a peer's is primeModCatalog (81), de-duplicated there
+        // and cached even on failure, so a repaint never re-dials. Paint only.
+        function learnTerminalsThenRepaint(host) {
+            if (hostTerminalsOff(host.id) !== null) return;
+            let p;
+            if (host.id === 'local') p = localInfo();
+            else p = primeModCatalog(host);
+            if (p && typeof p.then === 'function') {
+                p.then(() => repaintLaunchMenu(), () => {});
+            }
+        }
         function openLaunchMenu(x, y) {
             const hosts = allHosts();
             const gen = ++launchMenuGen;
@@ -530,6 +546,12 @@
                 // funnels through repaintLaunchMenu, i.e. always repaints
                 // the menu that is open NOW, never a retired one.
                 for (const host of hosts) {
+                    if (!host.hidden) {
+                        const hs0 = hostMenuState(pollStateFor(host.id));
+                        if (hs0 !== 'auth' && hs0 !== 'down') {
+                            learnTerminalsThenRepaint(host);
+                        }
+                    }
                     if (profilesCache.has(host.id)
                             || profilesFailedRecently(host.id)) {
                         continue;

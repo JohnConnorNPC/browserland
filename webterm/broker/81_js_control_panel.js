@@ -972,10 +972,12 @@
         // capability prime (75). Either one's in-flight read therefore repaints
         // for the other, instead of leaving "reading this broker's mods…" on
         // screen until the tab is clicked again.
+        // Returns the read's promise (undefined when one is already in
+        // flight), so the launch menu (76, #253) can repaint when it lands.
         function primeModCatalog(host) {
             if (!host || modCatalogFetching.has(host.id)) return;
             modCatalogFetching.add(host.id);
-            fetchModCatalog(host).then(() => {
+            return fetchModCatalog(host).then(() => {
                 modCatalogFetching.delete(host.id);
                 if (currentSettingsTab === host.id) renderModPolicy();
             }).catch(() => { modCatalogFetching.delete(host.id); });
