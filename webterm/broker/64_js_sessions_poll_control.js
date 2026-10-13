@@ -991,8 +991,8 @@
         // peer browsers converge through the debounced /state push) plus one
         // explicit pushState() flush BEFORE the reply, so an acknowledged op
         // has already been offered to /state under our lease. It runs only
-        // while this browser holds its lease -- the _deactivated re-check
-        // after each await answers lost_lease rather than landing a
+        // while this browser holds its lease -- the lease re-check
+        // (desktopLeaseLost) after each await answers lost_lease rather than landing a
         // half-applied op -- never waits on animation, and applies each rid
         // exactly once via a small answered-rid cache.
         //
@@ -1070,8 +1070,32 @@
         function desktopWsSend(ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
         }
-        function desktopLeaseLost() {
-            try { return _deactivated === true; } catch (_) { return false; }
+        // Whether an rpc from host `hid` (run `boot`, lease generation `gen`)
+        // may no longer be applied. Re-checked at entry and after every
+        // await (#250):
+        //  1. the home view is torn down (it takes every window with it);
+        //  2. a REMOTE host's lease was lost -- that only masks the host
+        //     (pollStateFor(hid).leaseInactive), it never sets _deactivated;
+        //  3. this host's newest status, of the rpc's run, is a newer
+        //     generation than the one the rpc was sent under;
+        //  4. this host's newest status is of ANOTHER run: the caller of a
+        //     dead run is gone, so fail closed.
+        function desktopLeaseLost(hid, rec, boot, gen) {
+            try { if (_deactivated === true) return true; } catch (_) {}
+            if (typeof hid === 'string' && typeof homeHostId === 'function'
+                    && hid !== homeHostId()
+                    && typeof pollStateFor === 'function') {
+                const ps = pollStateFor(hid);
+                if (ps && ps.leaseInactive === true) return true;
+            }
+            if (rec && boot) {
+                if (typeof rec.leaseBoot === 'string'
+                        && rec.leaseBoot !== boot) return true;
+                if (Number.isSafeInteger(gen) && rec.leaseBoot === boot
+                        && typeof rec.leaseGen === 'number'
+                        && rec.leaseGen > gen) return true;
+            }
+            return false;
         }
         function desktopReply(rec, ws, rid, payload) {
             // Socket identity: a reply rides the socket that delivered the
@@ -1403,7 +1427,10 @@
         async function handleDesktopRpc(hid, rec, ws, msg) {
             let out = null;
             let rid = msg ? msg.rid : undefined;
-            let ckey = null, settle = null;
+            let ckey = null, settle = null, boot = '', gen = null;
+            const lost = function () {
+                return desktopLeaseLost(hid, rec, boot, gen);
+            };
             try {
                 if (!Number.isInteger(rid)
                         || !msg || typeof msg.op !== 'string') {
@@ -1413,7 +1440,8 @@
                     return;
                 }
                 // The call's identity, resolved before any await (#250).
-                const boot = _desktopRpcBoot(ws, msg);
+                boot = _desktopRpcBoot(ws, msg);
+                gen = msg.gen;      // validated by desktopLeaseLost
                 ckey = JSON.stringify([hid, boot, rid]);
                 const cached = _desktopAppliedRids.get(ckey);
                 if (cached !== undefined) {
@@ -1444,7 +1472,7 @@
                     }
                     return [];
                 };
-                if (desktopLeaseLost()) {
+                if (lost()) {
                     out = { ok: false, error: 'lost_lease' };
                 } else if (_DESKTOP_OPS[msg.op] === true) {
                     const args = argsOf();
@@ -1458,7 +1486,7 @@
                         if (typeof _execModCommand === 'function') {
                             wsr = await _execModCommand('workspaces:list');
                         }
-                        if (desktopLeaseLost()) {
+                        if (lost()) {
                             out = { ok: false, error: 'lost_lease' };
                         } else {
                             out = { ok: true,
@@ -1469,10 +1497,10 @@
                         if (out.ok) {
                             // Flush before ack: success means the /state
                             // write was attempted under our lease.
-                            if (!desktopLeaseLost()) {
+                            if (!lost()) {
                                 try { await pushState(); } catch (_) {}
                             }
-                            if (desktopLeaseLost()) {
+                            if (lost()) {
                                 out = { ok: false, error: 'lost_lease' };
                             }
                         }
@@ -1500,7 +1528,7 @@
                             r = await _execModCommand(msg.op, args);
                         }
                         if (r !== null) {
-                            out = desktopLeaseLost()
+                            out = lost()
                                 ? { ok: false, error: 'lost_lease' }
                                 : desktopCommandResult(r);
                             // Flush before ack, exactly as the core branch
@@ -1509,10 +1537,10 @@
                             // the lease is re-checked after the flush.
                             if (out.ok === true
                                     && msg.op !== 'workspaces:list') {
-                                if (!desktopLeaseLost()) {
+                                if (!lost()) {
                                     try { await pushState(); } catch (_) {}
                                 }
-                                if (desktopLeaseLost()) {
+                                if (lost()) {
                                     out = { ok: false, error: 'lost_lease' };
                                 }
                             }

@@ -25,7 +25,7 @@ _LIVE_CUT = "// ---- A2: pings, the deadline, make-before-break"
 
 # Every ok() each script makes; pinned so a dropped scenario cannot pass by
 # absence.
-EXPECTED_RPC_ASSERTS = 13
+EXPECTED_RPC_ASSERTS = 23
 EXPECTED_LIVE_ASSERTS = 2
 
 _RPC_SCENARIOS = r"""
@@ -135,6 +135,76 @@ _RPC_SCENARIOS = r"""
     await call7('remoteX', mkSock(), Object.assign({ rid: 72 }, F(5)));
     ok(countMut('reveal') === 4,
         'K7c a named run, and another host, keep their answers');
+
+    // ---- N: the rpc's generation and run against this host's newest status
+    function held(boot, gen) {          // rec + its socket, as after a status
+        const w = sock(boot);
+        return { r: { leaseBoot: boot, leaseGen: gen, ws: w }, w: w };
+    }
+    resetWorld();
+    let h = held('bL', 5);
+    let a = await call('local', h.w, Object.assign({ rid: 80, gen: 4 }, F(7)), h.r);
+    ok(a && a.error === 'lost_lease' && countMut('reveal') === 0,
+        'N1 an rpc of an older generation (same run) answers lost_lease, applies nothing');
+    resetWorld();
+    h = held('bL', 5);
+    a = await call('local', h.w, Object.assign({ rid: 81, gen: 5 }, F(7)), h.r);
+    ok(a && a.ok === true && countMut('reveal') === 1,
+        'N2 an rpc of the current generation applies');
+    resetWorld();
+    h = held('bL', 5);
+    h.r.leaseBoot = 'OTHER';
+    a = await call('local', h.w, Object.assign({ rid: 82, gen: 5 }, F(7)), h.r);
+    ok(a && a.error === 'lost_lease' && countMut('reveal') === 0,
+        'N3 an rpc of a run that is not the newest status\'s answers lost_lease');
+    resetWorld();
+    h = held('bL', 9);
+    a = await call('local', h.w, Object.assign({ rid: 83 }, F(7)), h.r);
+    ok(a && a.ok === true, 'N4 a frame with no gen (older broker) skips the gen check');
+    resetWorld();
+    rearmPush(false);
+    h = held('bL', 5);
+    const pN5 = api.handleDesktopRpc('local', h.r, h.w,
+        { rid: 84, op: 'float', gen: 5, args: { id: 7, visible: null } });
+    await Promise.resolve(); await Promise.resolve();
+    h.r.leaseGen = 6;                     // a newer status landed mid-flush
+    pushResolve(); await pN5;
+    a = h.w.sent[h.w.sent.length - 1];
+    ok(a && a.error === 'lost_lease', 'N5 a newer generation seen during the flush answers lost_lease');
+    rearmPush(true);
+    resetWorld();
+    h = held('bL', 5);
+    a = await call('local', h.w, Object.assign({ rid: 85, gen: 4.5 }, F(7)), h.r);
+    ok(a && a.ok === true, 'N6 a non-integer gen is treated as absent');
+
+    // ---- H: a REMOTE host's lease, which never sets _deactivated
+    const ps = {};
+    env.pollStateFor = function (x) { return ps[x] || (ps[x] = {}); };
+    resetWorld();
+    ps.remoteX = { leaseInactive: true };
+    a = await call('remoteX', sock('bR'), Object.assign({ rid: 90 }, F(5)));
+    ok(a && a.error === 'lost_lease' && countMut('reveal') === 0,
+        'H1 a host whose lease this page lost answers lost_lease, applies nothing');
+    // home's lease is _deactivated's: a per-host mask on the home id is not read
+    ps.local = { leaseInactive: true };
+    a = await call('local', sock('bL'), Object.assign({ rid: 91 }, F(7)));
+    ok(a && a.ok === true && countMut('reveal') === 1,
+        'H2 ...while the home host still applies');
+    a = await call('remoteY', sock('bY'), { rid: 93, op: 'get', args: { visible: null } });
+    ok(a && a.ok === true, 'H4 ...and so does another remote host');
+    delete ps.remoteX; delete ps.local;
+    resetWorld();
+    rearmPush(false);
+    const wH3 = sock('bR');
+    const pH3 = api.handleDesktopRpc('remoteX', { ws: wH3 }, wH3,
+        { rid: 92, op: 'float', args: { id: 5, visible: null } });
+    await Promise.resolve(); await Promise.resolve();
+    ps.remoteX = { leaseInactive: true };
+    pushResolve(); await pH3;
+    a = wH3.sent[wH3.sent.length - 1];
+    ok(a && a.error === 'lost_lease', 'H3 a remote host masked during the flush answers lost_lease');
+    rearmPush(true);
+    delete ps.remoteX;
 
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
