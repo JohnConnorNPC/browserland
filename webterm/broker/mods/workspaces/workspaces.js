@@ -849,8 +849,16 @@
             // to another workspace paints where you are and flicks away a tick later,
             // and an unassigned window born on ws A just before a switch to B is
             // stamped B (switchWorkspace sets activeId BEFORE it applies visibility).
-            function adoptFloatWorkspace(win) {
+            function adoptFloatWorkspace(win, hint) {
                 if (!win || win.disposed || win.tiled) return;
+                // #251: a tiled window an adopted layout floated belongs to the
+                // workspace its column was on, not the active one: one parked on
+                // a hidden workspace stays hidden instead of popping in here.
+                // A stamp left over from an older float is stale, so the hint wins.
+                const liveWsIds = new Set(wsList().map(w => w.id));
+                if (hint && typeof hint.wsId === 'string' && liveWsIds.has(hint.wsId)) {
+                    setWindowWs(win, hint.wsId, false);
+                }
                 const wsId = windowWsId(win);
                 // Reconcile membership exactly as applyWorkspaceVisibility does, or
                 // the creation stamp and the poll disagree for two seconds: an
@@ -861,7 +869,6 @@
                 // poll would fix it a tick later, turning "paints then vanishes"
                 // into "does nothing, then appears", which is worse in a throttled
                 // background tab.
-                const liveWsIds = new Set(wsList().map(w => w.id));
                 if (wsId === undefined
                     || (typeof wsId === 'string' && !liveWsIds.has(wsId))) {
                     setWindowWs(win, activeWorkspaceId(), false);   // masked below

@@ -470,6 +470,7 @@
         // against re-pushing what we just adopted (_stateApplying).
         function _applyServerState(srv) {
             _stateApplying = true;
+            const prevLayout = prefs._layout;   // #251: where floated keys were
             try {
                 prefs._settings = (srv.settings && typeof srv.settings === 'object'
                     && !Array.isArray(srv.settings)) ? srv.settings : {};
@@ -495,6 +496,11 @@
                 // #148 layout-rendered seam next frame, which is where that
                 // repaint now lives -- no named workspace call in core.
                 requestRelayout();
+                // #251: a tiled window whose column the adopted layout dropped
+                // was floated elsewhere: float it here (locally, no push)
+                // BEFORE that relayout removes its column element.
+                try { reconcileWindowRoles(prevLayout); }
+                catch (e) { console.error('[tiling] reconcileWindowRoles threw', e); }
                 // A remote browser may have edited the section library; re-render
                 // any open Sections panel + AGENTS.md checklist (last-writer-wins).
                 try { refreshOpenSectionUIs(); } catch (_) {}

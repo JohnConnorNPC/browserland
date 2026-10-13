@@ -15,6 +15,14 @@ boundaries and evaluated inside a ``with (env)`` scope whose outer names
   that feeds them (A1): a key open but in no column opens as a float, a brand
   new key still follows the tiling default, and a minimized tiled window keeps
   its column so it is never mistaken for a float.
+* F7-F9, F11-F13, F15 -- an adopt through 52's real ``_applyServerState``
+  that drops a tiled window's column floats it on this device (62a
+  ``reconcileWindowRoles``/``floatLocally``, A2): its own box, no push, the
+  placement hook told once with the workspace its column was on (the
+  workspaces mod's real ``adoptFloatWorkspace`` stamps it there), and a
+  window closed elsewhere, a disposed one, an app window or the detached
+  surface untouched; tabbed and split rows, a minimized window and the front
+  window (F16, F17).
 
 One PASS/FAIL line per assert plus a machine-readable tail; the fixture FAILS
 if a boundary vanishes. Skipped when node is absent.
@@ -52,6 +60,24 @@ SLICES = {
     "minimize": ("73_js_window_runtime.js",
                  "        function minimizeWindow(id) {",
                  "        function restoreWindow(id) {"),
+    "apply": ("52_js_state_sync.js",
+              "        function _applyServerState(srv) {",
+              "        // Pull /state. initial=true"),
+    "roles": ("62a_js_strip_and_layers.js",
+              "        // #251: an ADOPTED layout can drop",
+              "        // ---- parking (off-screen custody)"),
+    "hooks": ("62a_js_strip_and_layers.js",
+              "        const _PLACEMENT_HOOKS = ",
+              "        // Its key will never be seen again"),
+    "refit": ("73_js_window_runtime.js",
+              "        function refitSoon(win) {",
+              "        function maybeSendInitialResize(win) {"),
+    "resizable": ("73_js_window_runtime.js",
+                  "        function isResizable(win) {",
+                  "        function sendResize(win, force) {"),
+    "wsAdopt": ("mods/workspaces/workspaces.js",
+                "            function windowOffActiveWs(win) {",
+                "            // Mask floating windows that don't belong"),
     "rowKeys": ("57_js_tiling_model.js",
                 "        function rowKeys(row) {",
                 "        // Keyed mirror of normalizeRowWidths"),
@@ -60,7 +86,7 @@ SLICES = {
            "            for (const k of Object.keys(prefs)) {"),
 }
 
-EXPECTED_ASSERTS = 10
+EXPECTED_ASSERTS = 19
 
 _HARNESS = r"""
 'use strict';
@@ -121,7 +147,7 @@ function mkWorld(o) {
         },
         layoutRemoveKey: (k) => { if (env.removeKeyFromLayout(k)) env.savePrefs(); },
         requestRelayout: () => {},
-        requestAnimationFrame: () => {},
+        requestAnimationFrame: (cb) => cb(),
         updateTaskbarActive: () => {},
         captureTiledFocusContext: () => null,
         reconcileTiledFocus: () => {},
@@ -134,7 +160,46 @@ function mkWorld(o) {
     // 67 openWindow's capture, run exactly as shipped for (win, id).
     w.capture = load('function capture(win, id) {\n' + S.capture + '\nreturn knownFloat;\n}',
         env, ['capture']).capture;
+    // A2: the adopt (52), the role reconcile and placement hooks (62a), the
+    // refit path (73) and the workspaces mod's float stamp.
+    w.resizes = []; w.placed = []; w.z = 0; w.floatWs = {}; w.fronted = [];
+    w.desktopKids = [];
+    Object.assign(env, {
+        _stateApplying: false, _stateLastSerialized: null, _stateRecentSends: [],
+        _stateRevSkipped: false,
+        getSettings: () => {}, _stateSerialize: () => '', _stateSettleAll: () => {},
+        isSizeLocked: () => false, applyDisplaySettings: () => {}, refreshOpenSectionUIs: () => {},
+        document: { body: { classList: { toggle: () => {} } },
+                    getElementById: (id) => id === 'desktop'
+                        ? { appendChild: (dom) => { dom.parent = 'desktop'; w.desktopKids.push(dom); } } : null },
+        clampGeom: (g) => Object.assign({}, g),
+        defaultGeom: () => ({ left: 5, top: 6, width: 720, height: 480 }),
+        applyGeomToWindow: (win, g) => { if (!win.tiled) win.geom = Object.assign({}, g); },
+        floatZIndex: () => ++w.z,
+        bringToFront: (id) => { w.fronted.push(id); },
+        sendResize: (win) => { if (env.isResizable(win)) w.resizes.push(win.id); },
+        ModConflictError: (m) => new Error(m),
+        // the workspaces mod's world: W1 active, W2 hidden
+        wsList: () => [{ id: 'W1' }, { id: 'W2' }],
+        activeWorkspaceId: () => 'W1',
+        windowWsId: (win) => win ? w.floatWs[win.id] : undefined,
+        setWindowWs: (win, wsId) => { w.floatWs[win.id] = wsId; },
+        applyTaskbarWorkspace: () => {},
+    });
+    const a2 = ['_applyServerState', 'reconcileWindowRoles', 'floatLocally', '_columnHolding',
+        'registerPlacementHooks', 'notifyWindowPlaced', 'refitSoon', 'isResizable'];
+    Object.assign(w, load(S.apply + S.roles + S.hooks + S.refit + S.resizable, env, a2));
+    for (const n of a2) env[n] = w[n];
+    w.adoptFloatWorkspace = load(S.wsAdopt, env, ['adoptFloatWorkspace']).adoptFloatWorkspace;
+    w.adopt = (layout) => w._applyServerState({ settings: {}, layout: clone(layout) });
     return w;
+}
+function tiledWin(w, id, o) {
+    const win = mkWin(id, Object.assign({ tiled: true, cls: ['tiled'],
+        body: { getBoundingClientRect: () => ({ width: 400, height: 300 }) } }, o || {}));
+    win.dom.parent = 'strip';
+    w.env.windows.set(id, win);
+    return win;
 }
 function mkWin(id, o) {
     const cls = new Set((o && o.cls) || []);
@@ -220,6 +285,94 @@ function mkWin(id, o) {
         'F14 a minimized tiled window keeps its column, so it is never a known float');
 })();
 
+// ---- A2: an adopt that drops a tiled window's column floats it here --------
+(function () {
+    const L0 = { mode: 'tiling', columns: [col('h:1', 'W1'), col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] };
+    // F7: through 52's real adopt: floated at its own floatGeom, no push,
+    // placement announced once, refit at this device's size.
+    let w = mkWorld(L0);
+    w.registerPlacementHooks({ placed: (win, hint) => w.placed.push([win.id, hint]) });
+    const t1 = tiledWin(w, 'h:1', { floatGeom: { left: 1, top: 2, width: 300, height: 200 } });
+    const t2 = tiledWin(w, 'h:2');
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    ok(t1.tiled === false && !t1.dom.cls.has('tiled') && t1.dom.parent === 'desktop'
+        && J(t1.geom) === J({ left: 1, top: 2, width: 300, height: 200 })
+        && w.env.getPref('h:1').tiled === false && w.saves === 0 && w.localSaves >= 1
+        && J(w.placed) === J([['h:1', { wsId: 'W1' }]]) && J(w.resizes) === J(['h:1'])
+        && t1.dom.style.zIndex === '1' && w.env.frontId === null && w.fronted.length === 0,
+        'F7 an adopt that drops a tiled window\'s column floats it here at its own box, pushes nothing and announces it once');
+    // F8: no floatGeom -> the device pref's box, else the default box.
+    w = mkWorld({ mode: 'tiling', columns: [col('h:1'), col('h:3'), col('h:2')], openTerms: ['h:1', 'h:2', 'h:3'] });
+    const g8 = tiledWin(w, 'h:1'); const d8 = tiledWin(w, 'h:3');
+    w.env.getPref('h:1').geom = { left: 40, top: 50, width: 640, height: 400 };
+    w.adopt({ mode: 'tiling', columns: [col('h:2')], openTerms: ['h:1', 'h:2', 'h:3'] });
+    ok(J(g8.geom) === J({ left: 40, top: 50, width: 640, height: 400 })
+        && J(d8.geom) === J({ left: 5, top: 6, width: 720, height: 480 }) && !g8.tiled && !d8.tiled,
+        'F8 with no floatGeom it floats at this device\'s saved box, else the default box');
+    // F9: still in a column -> untouched; disposed -> untouched.
+    w = mkWorld({ mode: 'tiling', columns: [col('h:1', 'W1'), col('h:2', 'W1'), col('app:1', 'W1')],
+                  openTerms: ['h:1', 'h:2', 'app:1'] });
+    const k9 = tiledWin(w, 'h:2'); const x9 = tiledWin(w, 'h:1', { disposed: true });
+    const a9 = tiledWin(w, 'app:1', { type: 'app' });
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2', 'app:1'] });
+    ok(k9.tiled === true && k9.dom.parent === 'strip' && x9.tiled === true
+        && x9.dom.parent === 'strip' && a9.tiled === true && a9.dom.parent === 'strip'
+        && w.resizes.length === 0,
+        'F9 a tiled window still in a column, a disposed one and an app window are untouched');
+    // F11: gone from the columns AND openTerms (closed elsewhere) -> untouched.
+    w = mkWorld(L0);
+    w.registerPlacementHooks({ placed: (win, hint) => w.placed.push([win.id, hint]) });
+    const c11 = tiledWin(w, 'h:1');
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:2'] });
+    ok(c11.tiled === true && c11.dom.parent === 'strip' && w.placed.length === 0,
+        'F11 a window closed elsewhere (gone from openTerms too) is not floated');
+    // F12: the column was on hidden workspace W2 -> the mod stamps W2 (over a
+    // stale W1 stamp) and masks it; it is not the front window.
+    w = mkWorld({ mode: 'tiling', columns: [col('h:1', 'W2'), col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    w.registerPlacementHooks({ placed: w.adoptFloatWorkspace });
+    const p12 = tiledWin(w, 'h:1'); w.floatWs['h:1'] = 'W1'; w.env.frontId = 'h:1';
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    ok(p12.tiled === false && w.floatWs['h:1'] === 'W2' && p12.dom.cls.has('ws-hidden')
+        && w.env.frontId === null,
+        'F12 a window floated by an adopt joins the workspace its column was on, hidden there, not the active one');
+    // F13: the detached surface never reconciles (its layout is fixed).
+    w = mkWorld({ detached: true, columns: [], openTerms: ['h:1'] });
+    const d13 = tiledWin(w, 'h:1');
+    w.reconcileWindowRoles({ mode: 'tiling', columns: [col('h:1')], openTerms: ['h:1'] });
+    ok(d13.tiled === true && d13.dom.parent === 'strip',
+        'F13 the detached surface never floats a window on adopt');
+    // F15: a #239 controlled window floats but sends no resize.
+    w = mkWorld({ mode: 'tiling', columns: [col('h:1'), col('h:3'), col('h:2')], openTerms: ['h:1', 'h:2', 'h:3'] });
+    const c15 = tiledWin(w, 'h:1', { controlled: true }); tiledWin(w, 'h:3');
+    w.adopt({ mode: 'tiling', columns: [col('h:2')], openTerms: ['h:1', 'h:2', 'h:3'] });
+    ok(c15.tiled === false && J(w.resizes) === J(['h:3']),
+        'F15 a controlled window floated by an adopt sends no resize');
+    // F16: an inactive tab of a tabbed row and a pane of a split row, both on
+    // hidden W2; the pane is minimized.
+    w = mkWorld({ mode: 'tiling', openTerms: ['h:1', 'h:4', 'h:5', 'h:6'], columns: [
+        { id: 'ct', wsId: 'W2', rows: [{ mode: 'tabbed', keys: ['h:1', 'h:4'], activeTab: 'h:4' }] },
+        { id: 'cs', wsId: 'W2', rows: [{ mode: 'split', cells: [{ id: 'a', keys: ['h:5'] },
+                                                               { id: 'b', keys: ['h:6'] }] }] }] });
+    w.registerPlacementHooks({ placed: w.adoptFloatWorkspace });
+    const tab16 = tiledWin(w, 'h:1', { cls: ['tiled', 'tab-hidden'] });
+    const pane16 = tiledWin(w, 'h:5', { minimized: true });
+    const keep16 = tiledWin(w, 'h:6');
+    w.adopt({ mode: 'tiling', openTerms: ['h:1', 'h:4', 'h:5', 'h:6'], columns: [
+        { id: 'ct', wsId: 'W2', rows: [{ mode: 'single', keys: ['h:4'] }] },
+        { id: 'cs', wsId: 'W2', rows: [{ mode: 'single', keys: ['h:6'] }] }] });
+    ok(!tab16.tiled && !tab16.dom.cls.has('tab-hidden') && w.floatWs['h:1'] === 'W2'
+        && !pane16.tiled && pane16.minimized === true && w.floatWs['h:5'] === 'W2'
+        && keep16.tiled === true && w.resizes.indexOf('h:5') === -1,
+        'F16 a tab of a tabbed row and a minimized pane of a split row float into their column\'s workspace');
+    // F17: the front window, on the active workspace, stays front.
+    w = mkWorld(L0);
+    w.registerPlacementHooks({ placed: w.adoptFloatWorkspace });
+    const f17 = tiledWin(w, 'h:1'); tiledWin(w, 'h:2'); w.env.frontId = 'h:1';
+    w.adopt({ mode: 'tiling', columns: [col('h:2', 'W1')], openTerms: ['h:1', 'h:2'] });
+    ok(!f17.tiled && !f17.dom.cls.has('ws-hidden') && J(w.fronted) === J(['h:1']),
+        'F17 the front window floated by an adopt stays front (focus restored)');
+})();
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -288,6 +441,21 @@ def test_251_gc_keeps_the_invariant(run, label):
     "F14 a minimized tiled window keeps its column, so it is never a known float",
 ])
 def test_251_decide_tiled_reads_shared_membership(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "F7 an adopt that drops a tiled window's column floats it here at its own box, pushes nothing and announces it once",
+    "F8 with no floatGeom it floats at this device's saved box, else the default box",
+    "F9 a tiled window still in a column, a disposed one and an app window are untouched",
+    "F11 a window closed elsewhere (gone from openTerms too) is not floated",
+    "F12 a window floated by an adopt joins the workspace its column was on, hidden there, not the active one",
+    "F13 the detached surface never floats a window on adopt",
+    "F15 a controlled window floated by an adopt sends no resize",
+    "F16 a tab of a tabbed row and a minimized pane of a split row float into their column's workspace",
+    "F17 the front window floated by an adopt stays front (focus restored)",
+])
+def test_251_adopt_floats_a_dropped_column_locally(run, label):
     _ok(run, label)
 
 

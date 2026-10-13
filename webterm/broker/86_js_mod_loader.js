@@ -618,6 +618,7 @@
                 //                      HERE, before anyone reads a visible index
                 //                      back, or it is born invisible.
                 //   onPlaced(fn)       a window was just placed as a FLOAT.
+                //                      fn(win, hint): {wsId} if an adopt floated it (#251).
                 //   onForgotten(fn)    fn(key) -- a window was CLOSED and its
                 //                      key is gone for good; prune anything
                 //                      keyed off it. A reload is NOT this.
