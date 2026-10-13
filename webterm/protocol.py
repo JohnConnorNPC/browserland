@@ -445,6 +445,18 @@ def error_frame(reason: str, session_id: int) -> str:
     })
 
 
+def not_active_frame(session_id: int) -> str:
+    """#248: broker -> browser on a terminal /ws, the advisory answer to an
+    input/paste/binary/resize frame dropped because this browser does not
+    hold the single-active-browser lease. The key is ``session`` (the #248
+    wire contract), not error_frame's ``session_id``."""
+    return json.dumps({
+        "type": "error",
+        "reason": "not_active",
+        "session": session_id,
+    })
+
+
 def mcp_activity_frame(kind: str) -> str:
     """Transient per-window MCP-touch pulse (#33): the broker emits this on an
     MCP read/write so the browser can briefly flash that window's robot icon
@@ -461,19 +473,46 @@ def mcp_activity_frame(kind: str) -> str:
 # Each browser carries a stable ``clientId``; the broker tracks the one
 # ``active`` client per broker and tears down the others' terminal views.
 #   broker -> client: {"type": "status", "active": <bool>,
-#                      "activeClientId": <id|null>}
+#                      "activeClientId": <id|null>, "gen": <int>,
+#                      "bootId": <str>}
 #                     {"type": "terminal_control", ...}  (#238, below)
+#                     {"type": "pong", "n": <int|null>, + the status fields}
 #   client -> broker: {"type": "become_active"}
+#                     {"type": "ping", "n": <int>}  (#248)
 # ---------------------------------------------------------------------------
 
 def control_status_frame(active: bool,
-                         active_client_id: Optional[str]) -> str:
+                         active_client_id: Optional[str],
+                         gen: int, boot_id: str) -> str:
     """Broker -> client on /control: whether THIS client holds the lease, plus
-    who currently does (``None`` when nobody is active)."""
+    who currently does (``None`` when nobody is active). #248: ``gen`` is the
+    broker's lease generation (it bumps on every holder change) and
+    ``bootId`` names the broker run, so a page can key "a NEW holding" on
+    (bootId, gen) -- a generation alone restarts with the broker."""
     return json.dumps({
         "type": "status",
         "active": bool(active),
         "activeClientId": active_client_id,
+        "gen": int(gen),
+        "bootId": str(boot_id),
+    })
+
+
+def control_pong_frame(n: Optional[int], active: bool,
+                       active_client_id: Optional[str],
+                       gen: int, boot_id: str) -> str:
+    """#248: broker -> client on /control, the answer to ``{type:'ping',
+    n}`` on the same socket. Echoes the ping's nonce (``None`` when the ping
+    carried no integer ``n``) and carries the live lease exactly as a status
+    frame does, so a page whose status went missing re-learns its lease from
+    any ping."""
+    return json.dumps({
+        "type": "pong",
+        "n": n,
+        "active": bool(active),
+        "activeClientId": active_client_id,
+        "gen": int(gen),
+        "bootId": str(boot_id),
     })
 
 
