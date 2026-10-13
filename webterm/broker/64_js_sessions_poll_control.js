@@ -1028,9 +1028,10 @@
                 _desktopAppliedRids.delete(_desktopAppliedRids.keys().next().value);
             }
         }
-        // The ONE ws.send call site in this fragment (the terminal-funnel
-        // enumeration pins the count): both the control-ping keepalive and
-        // every desktop_result reply ride it.
+        // One of the TWO /control send sites in this fragment (the
+        // terminal-funnel enumeration pins each count: `ws.send` here and
+        // `rec.ws.send` in sendBecomeActive). Every nonce'd ping and every
+        // desktop_result reply ride this one; become_active is the other.
         function desktopWsSend(ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
         }
