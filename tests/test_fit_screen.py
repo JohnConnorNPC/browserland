@@ -36,7 +36,7 @@ CUTS = [
     (str(KB), "        function buildCtxMenu(x, y) {", "        // Per-chip taskbar menu:"),
 ]
 
-EXPECTED_ASSERTS = 12
+EXPECTED_ASSERTS = 13
 
 _HARNESS = r"""
 'use strict';
@@ -73,7 +73,7 @@ function mkWorld() {
         windows: w.windows, WebSocket: { OPEN: 1 },
         readCellDims: function () { return { w: 10, h: 20 }; },
         requestAnimationFrame: function (fn) { fn(); },
-        isDetachedSurface: function () { return false; },
+        isDetachedSurface: function () { return w.detachedSurface === true; },
         defaultPixelSize: function () { return { width: 1012, height: 498 }; },
         applyGeomToWindow: function (win, g) {
             w.geoms.push(g);
@@ -95,9 +95,11 @@ function mkWorld() {
         closeFrontWindow: function () {}, minimizeWindow: function () {}, toggleFullscreen: function () {},
         toggleControlPanelWindow: function () {}, detachWindow: function () {},
     };
+    w.detachedSurface = false;
     w.api = new Function('env', 'with (env) {\n' + code +
         '\nvar __a = { fit: fitToThisScreen, fitAll: fitAllToThisScreen, sendResize: sendResize,\n' +
         '  actions: CORE_KEY_ACTIONS, buildCtxMenu: buildCtxMenu };\n}\nreturn __a;\n')(env);
+    w.api.__setDetached = function (v) { w.detachedSurface = v; };
     return w;
 }
 const R = function (win) { return win.ws.sent.filter(m => m.type === 'resize'); };
@@ -159,6 +161,13 @@ w.api.buildCtxMenu(0, 0);
 item = (w.menu || []).find(x => x.label === 'Fit all to this screen');
 ok(!!item && item.enabled === false, 'X12 ...disabled when no terminal is open');
 
+w = mkWorld();
+let ds = w.mk('local:9');
+w.api.__setDetached(true);
+w.api.fit(ds);
+ok(w.geoms.length === 0 && R(ds).length === 1,
+    'X13 on the detached surface (#226) the window refits from the viewport, no box reset');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -201,6 +210,7 @@ def run(tmp_path_factory):
     "X10 ...which fits every terminal",
     "X11 ...right before Control panel",
     "X12 ...disabled when no terminal is open",
+    "X13 on the detached surface (#226) the window refits from the viewport, no box reset",
 ])
 def test_fit_to_this_screen(run, label):
     got = run["results"].get(label)

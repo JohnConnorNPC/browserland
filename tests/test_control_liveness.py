@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 65
+EXPECTED_ASSERTS = 73
 
 _HARNESS = r"""
 'use strict';
@@ -131,6 +131,8 @@ function mkWorld(opts) {
         showNotice: function (t, o) {
             w.notices.push(t);
             if (o && o.sticky) {
+                // the real showNotice (66) dedupes identical sticky text
+                if (w.stickies.some(n => !n.removed && n._noticeText === t)) return;
                 w.stickies.push({ _noticeText: t, removed: false,
                                   remove: function () { this.removed = true; } });
             }
@@ -474,7 +476,7 @@ s0 = connected(w, ST(true));
 s0._drop(1006);
 w.advance(2000);
 s1 = w.last(); s1._open(); s1._recv(ST(true));
-w.advance(20000);
+for (let i = 0; i < 20; i++) { w.advance(1000); pong(s1, s1.lastPing().n); }
 ok(lostUp(w) === 0, 'N4 a channel back within 10 s shows nothing');
 
 w = mkWorld();
@@ -547,6 +549,60 @@ w = mkWorld();
 w.api.openControlWs(w.env.localHost());
 s0 = w.last(); s0._open(); s0._recv(OLD_ST(true));
 ok(w.reclaims.length === 0, 'C9 an older broker (no gen/bootId) never reclaims');
+
+// ---- codex review round 1 ----------------------------------------------------
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(10000);                        // miss 1 -> replacement
+s1 = w.last(); s1._open();               // opens, never reports
+s0._drop(1006);                          // the old one dies meanwhile
+w.advance(5000);
+ok(s1.closed && w.rec().cand === null && w.rec().reattachTimer !== null,
+    'K1 an OPEN replacement that never reports is abandoned at 5 s and the host re-dials (no deadlock)');
+
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last(); s0._open();               // opens, never reports
+w.advance(5000);
+ok(s0.closed && w.rec().ws === null && w.rec().reattachTimer !== null,
+    'K2 an OPEN first socket that never reports is abandoned at 5 s too');
+
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 5 }));
+w.advance(10000);                        // replacement dialing
+s1 = w.last(); s1._open();
+s0._recv(ST(false, { activeClientId: 'phone', gen: 6 }));   // old socket: the flip
+const tdBefore = w.log.filter(x => x === 'teardown').length;
+s1._recv(ST(true, { gen: 5 }));          // replacement: its older connect status
+ok(w.rec().ws === s1 && w.log.filter(x => x === 'rebuild').length === 0
+    && w.env._homeActive === false && tdBefore === 1,
+    'K3 a replacement older-gen first status promotes it but cannot undo the newer flip');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+const resetsAtOpen = w.log.filter(x => x === 'reset:local').length;
+w.advance(10000);
+s1 = w.last(); s1._open();
+ok(w.log.filter(x => x === 'reset:local').length === resetsAtOpen,
+    'K4a a replacement opening does not reset the #239 control baselines');
+s1._recv(ST(true));
+ok(w.log.filter(x => x === 'reset:local').length === resetsAtOpen + 1,
+    'K4 ...its promotion does, once');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(19999);
+ok(lostUp(w) === 0 && !s0.closed, 'K5a precondition: no notice before 10 s after the first missed deadline');
+w.advance(1);
+ok(lostUp(w) === 1, 'K5 a silent channel shows the notice 10 s after its FIRST missed deadline');
+
+w = mkWorld();
+s0 = connected(w, ST(true, { gen: 40, bootId: 'b1' }));
+s0._drop(1006);
+w.advance(2000);
+s1 = w.last(); s1._open(); s1._recv(ST(false, { activeClientId: 'phone', gen: 2, bootId: 'b2' }));
+ok(w.log.indexOf('teardown') !== -1,
+    'K6 a restarted broker (new bootId, lower gen) is not mistaken for a stale status');
 
 console.log(pass + ' passed, ' + fail + ' failed');
 """
@@ -698,6 +754,20 @@ def test_lost_contact_notice(run, label):
     "C9 an older broker (no gen/bootId) never reclaims",
 ])
 def test_reclaim_per_new_holding(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "K1 an OPEN replacement that never reports is abandoned at 5 s and the host re-dials (no deadlock)",
+    "K2 an OPEN first socket that never reports is abandoned at 5 s too",
+    "K3 a replacement older-gen first status promotes it but cannot undo the newer flip",
+    "K4a a replacement opening does not reset the #239 control baselines",
+    "K4 ...its promotion does, once",
+    "K5a precondition: no notice before 10 s after the first missed deadline",
+    "K5 a silent channel shows the notice 10 s after its FIRST missed deadline",
+    "K6 a restarted broker (new bootId, lower gen) is not mistaken for a stale status",
+])
+def test_codex_round1(run, label):
     _ok(run, label)
 
 

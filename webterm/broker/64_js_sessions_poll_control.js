@@ -387,23 +387,27 @@
             };
             if (role === 'cur') { rec.cur = st; rec.ws = ws; }
             else rec.cand = st;
+            // The watchdog covers the first STATUS, not just the upgrade: a
+            // socket that opened but never reports (a broker or proxy that
+            // accepted the upgrade and then went silent) would otherwise sit
+            // as a replacement forever, with no deadline (capability comes
+            // from that status) and every probe refused while it is pending.
             st.connectTimer = setTimeout(() => {
                 st.connectTimer = null;
-                if (!st.done && ws.readyState === WebSocket.CONNECTING) {
-                    _controlSocketGone(st, null);
-                }
+                if (!st.done && !st.statusSeen) _controlSocketGone(st, null);
             }, CONTROL_CONNECT_TIMEOUT_MS);
             ws.onopen = () => {
                 if (st.done) { try { ws.close(); } catch (_) {} return; }
-                if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 if (st.role === 'cur') rec.attempts = 0;
                 rec.lastOpenAt = Date.now();
                 // #239: a new /control socket may be a new broker run, whose
                 // control gens are re-seeded from its clock: forget this
                 // host's, so its next view per terminal is taken whatever its
                 // gen. (A 1012 close for a stalled send lands here too, via
-                // scheduleControlReattach.)
-                resetControlBaselines(hid);
+                // scheduleControlReattach.) #248: a replacement is not
+                // authoritative until it reports -- the old socket may still
+                // deliver a newer view -- so it resets them on promotion.
+                if (st.role === 'cur') resetControlBaselines(hid);
                 // The first ping goes out now, so a broker that pongs is
                 // checked from the start; then one per CONTROL_PING_MS, which
                 // also keeps the pipe warm through idle proxies.
@@ -502,8 +506,10 @@
                 _controlSocketGone(st, null);
                 return;
             }
-            // First miss on the socket in charge: dial the replacement now and
-            // give the old socket a second chance with a fresh ping.
+            // First miss on the socket in charge: the channel is suspect, so
+            // the O2 notice starts counting now (any status clears it); dial
+            // the replacement and give the old socket a second chance.
+            if (rec.hostId === homeHostId() && rec.lastOpenAt) _armLostContact();
             if (!rec.cand && !rec.closedByUs) {
                 const h = hostById(rec.hostId);
                 if (h) _dialControl(rec, h, 'cand');
@@ -516,6 +522,7 @@
             const rec = st.rec;
             if (!st.statusSeen) {
                 st.statusSeen = true;
+                if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 // Capability from the FIRST status, per socket: a broker that
                 // stamps gen + bootId answers pings.
                 st.capable = typeof msg.gen === 'number'
@@ -524,6 +531,16 @@
                 if (st.role === 'cand') _promoteControl(st);
             }
             if (rec.hostId === homeHostId()) _clearLostContact();
+            // Two sockets of one replacement can deliver statuses out of the
+            // broker's order (the replacement's connect status was built
+            // before a flip the old socket already reported). Within one
+            // broker run gen only rises, so an older gen is stale: drop it.
+            // A new bootId (a restarted broker) starts over.
+            if (typeof msg.gen === 'number' && typeof msg.bootId === 'string') {
+                if (rec.leaseBoot === msg.bootId && msg.gen < rec.leaseGen) return;
+                rec.leaseBoot = msg.bootId;
+                rec.leaseGen = msg.gen;
+            }
             onControlStatus(rec.hostId, msg);
             _settleWantActive(rec, msg);
             _noteLeaseHolding(rec.hostId, msg);
@@ -561,6 +578,7 @@
             rec.attempts = 0;
             if (rec.reattachTimer) { clearTimeout(rec.reattachTimer); rec.reattachTimer = null; }
             if (old && old !== st) _retireControlSocket(old);
+            resetControlBaselines(rec.hostId);
         }
 
         // Stop everything `st` owns and close its socket. Idempotent.
