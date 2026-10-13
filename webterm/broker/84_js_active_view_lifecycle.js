@@ -226,6 +226,13 @@
             await _stateReadyPromise;
             // Superseded (deactivated, or a later boot/rebuild) mid-boot — abort.
             if (_deactivated || epoch !== _viewEpoch) return;
+            // #248 B3: the load-time pull (85) may be long stale by now -- a
+            // page that sat inactive behind the overlay and is activated much
+            // later (the takeover device in #248) restored the openTerms of
+            // its LOAD and showed no terminals. Re-pull, exactly as
+            // rebuildView does, and re-check the epoch across the await.
+            try { await pullState(true); } catch (_) {}
+            if (_deactivated || epoch !== _viewEpoch) return;
             // #226: the detached surface boots one window and none of the
             // desktop below (no app windows, no deep link, no restore queue).
             if (isDetachedSurface()) { await bootDetachedView(epoch); return; }

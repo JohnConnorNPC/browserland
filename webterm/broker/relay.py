@@ -15,37 +15,49 @@ resize reach the producer (the lease holder's included are dropped); with no
 controller the single-active-browser lease rule applies, unchanged. Output,
 the snapshot request and mouse (a no-op) are never gated. A socket attaching
 reads ``resized`` then the terminal's control view, then gets the snapshot.
+
+#248: a frame dropped by the LEASE rule (not by a controller or a revoke) is
+answered with ``{type:'error', reason:'not_active', session}``, at most once
+per socket per lease generation, so the page re-checks its lease.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
 from .. import protocol
-from .registry import BrokerRegistry
+from .registry import CONTROL_SEND_TIMEOUT, BrokerRegistry
 
 LOGGER = logging.getLogger(__name__)
 
+# A lease generation no socket has been hinted for yet (#248 A5).
+_NEVER = object()
 
-def _may_drive(entry, ws, client_id: str, ctx) -> bool:
-    """Whether ``ws`` may send input/resize to ``entry``'s producer NOW. Read
-    fresh per frame, and again under the send lock (send_to_producer_if)."""
+
+def _drive_refusal(entry, ws, client_id: str, ctx) -> Optional[str]:
+    """Why ``ws`` may NOT send input/resize to ``entry``'s producer now, or
+    None when it may: ``"revoked"``, ``"controller"`` (#238) or ``"lease"``
+    (the single-active-browser lease). Read fresh per frame, and again under
+    the send lock (send_to_producer_if)."""
     if ws in entry.revoked:
         # Lost the terminal (POST release / another claim): it watches, even
         # if its clientId holds the lease, until it claims again.
-        return False
+        return "revoked"
     ctl = entry.controller
     if ctl is not None:
-        return ctl.ws is ws
+        return None if ctl.ws is ws else "controller"
     # Single-active-client backstop: only the browser that currently holds
     # the lease may DRIVE this PTY. A fresh atomic read of the live lease per
     # message closes the race between the lease flip and this socket's 4409
     # close actually landing -- an id-less or non-active socket watches but
-    # its input/resize is silently dropped. Absent ctx (defensive) -> no
-    # lease tracked, so every socket is inactive.
-    return bool(client_id) and (
-        ctx is not None and ctx.active_client_id == client_id)
+    # its input/resize is dropped (#248: with one not_active hint). Absent
+    # ctx (defensive) -> no lease tracked, so every socket is inactive.
+    if bool(client_id) and (
+            ctx is not None and ctx.active_client_id == client_id):
+        return None
+    return "lease"
 
 
 async def _control_op(registry: BrokerRegistry, entry, ws, data) -> None:
@@ -86,8 +98,8 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
 
     # The browser's stable single-active-lease id (see app.py /control). A
     # socket dialed without it can still watch the stream but its input is
-    # dropped (the lease backstop in _may_drive). Absent ctx (defensive) -> no
-    # lease tracked, so the backstop treats every socket as inactive.
+    # dropped (the lease backstop in _drive_refusal). Absent ctx (defensive)
+    # -> no lease tracked, so the backstop treats every socket as inactive.
     client_id = request.args.get("clientId", "").strip()
 
     try:
@@ -118,21 +130,52 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
         # Fresh snapshot so this browser sees current state immediately.
         await entry.request_snapshot()
 
+        # #248 A5: the refusal reason and the lease generation are taken in
+        # the SAME synchronous step as each gate decision (on arrival, and
+        # again under the send lock), so a hint never describes a different
+        # moment than the drop it reports.
+        last = {"reason": None, "gen": None}
+        hinted = {"gen": _NEVER}
+
         def may() -> bool:
-            return _may_drive(entry, ws, client_id, ctx)
+            last["reason"] = _drive_refusal(entry, ws, client_id, ctx)
+            last["gen"] = getattr(ctx, "lease_generation", None)
+            return last["reason"] is None
+
+        async def refused() -> None:
+            # Advisory only: a frame dropped because this socket's client
+            # does not hold the lease is answered with ONE error per lease
+            # generation, so the page can re-check its lease instead of
+            # typing into nothing. Never for a controller-gated or revoked
+            # socket: the #239 controlled view already tells that page.
+            # Bounded, so a stalled socket cannot wedge this read loop; the
+            # generation counts as hinted only once a hint was delivered.
+            if last["reason"] != "lease" or hinted["gen"] == last["gen"]:
+                return
+            gen = last["gen"]
+            try:
+                await asyncio.wait_for(
+                    ws.send(protocol.not_active_frame(entry.id)),
+                    CONTROL_SEND_TIMEOUT)
+            except Exception as exc:
+                LOGGER.debug("send not_active failed: %r", exc)
+                return
+            hinted["gen"] = gen
 
         # Browser -> broker -> producer. Every input/resize frame passes the
-        # gate (_may_drive) on arrival AND again under the send lock: a frame
-        # admitted just before a claim or revoke must not land after it.
+        # gate (_drive_refusal) on arrival AND again under the send lock: a
+        # frame admitted just before a claim or revoke must not land after it.
         # Output (broadcast) is never gated, so every viewer sees the stream.
         async for message in ws:
             if isinstance(message, (bytes, bytearray)):
                 if not may():
+                    await refused()
                     continue
                 # Bare binary from the browser = raw input bytes.
                 text = bytes(message).decode("utf-8", errors="replace")
-                await entry.send_to_producer_if(
-                    protocol.input_frame(text), may)
+                if not await entry.send_to_producer_if(
+                        protocol.input_frame(text), may):
+                    await refused()
                 continue
             data = protocol.parse(message)
             if data is None:
@@ -144,19 +187,23 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
             # test_broker_e2e.py::test_large_frame_relay.
             if mtype in ("input", "paste"):
                 if not may():
+                    await refused()
                     continue
-                await entry.send_to_producer_if(protocol.input_frame(
-                    str(data.get("data", ""))), may)
+                if not await entry.send_to_producer_if(protocol.input_frame(
+                        str(data.get("data", ""))), may):
+                    await refused()
             elif mtype == "resize":
                 if not may():
+                    await refused()
                     continue
                 try:
                     cols = int(data.get("cols", 80))
                     rows = int(data.get("rows", 24))
                 except (TypeError, ValueError):
                     continue
-                await entry.send_to_producer_if(
-                    protocol.resize_frame(cols, rows), may)
+                if not await entry.send_to_producer_if(
+                        protocol.resize_frame(cols, rows), may):
+                    await refused()
             elif mtype == "control":
                 await _control_op(registry, entry, ws, data)
             elif mtype == "mouse":
