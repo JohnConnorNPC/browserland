@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import auth, supervise
+from . import auth, roles, supervise
 from .app import DEFAULT_PORT, _open_url, create_app, load_config
 
 
@@ -197,9 +197,18 @@ def main() -> int:
     parser.add_argument("--config", default=None,
                         help="path to broker_config.json "
                              "(default: $WEB_TERMINAL_CONFIG, then repo root)")
+    parser.add_argument("--role", choices=roles.ROLES, default=None,
+                        help="hub = serve the desktop page; node = serve the "
+                             "JSON/WS API only, for another Browserland to "
+                             "reach (overrides serve_ui / role in config)")
     parser.add_argument("--headless", action="store_true",
-                        help="serve the JSON/WS API only — no desktop page or "
-                             "help corpus (overrides serve_ui in config)")
+                        help="alias of --role node: no desktop page or help "
+                             "corpus (contradicts --role hub)")
+    parser.add_argument("--no-terminals", action="store_true",
+                        help="host no terminals: refuse /launch, MCP launch "
+                             "and profile edits (sets terminals: false; "
+                             "existing sessions are untouched; a node may "
+                             "not use it)")
     parser.add_argument("--print-token", action="store_true",
                         help="print this broker's auth token and the URL to "
                              "open, then exit (never mints one)")
@@ -230,8 +239,14 @@ def main() -> int:
     # CLI wins over config, matching --host/--port precedence. Fold into the
     # config dict so create_app's single config.get("serve_ui") read is the one
     # source of truth. There's no --no-headless; to default headless use the key.
-    if ns.headless:
-        config["serve_ui"] = False
+    # roles.resolve (#253) is that fold: --role / --headless / a config `role`
+    # alias land in serve_ui, --no-terminals in terminals. A refusal (a node
+    # with terminals off, or a contradiction) is held until the server path
+    # below: the one-shots bind nothing, and a secrets audit must not be
+    # blocked by a role setting.
+    role_error = roles.resolve(config, cli_role=ns.role,
+                               cli_headless=ns.headless,
+                               cli_no_terminals=ns.no_terminals)
     # Same folding for the resolved host, so the startup banner and
     # --print-token can build the ready-to-open URL off the config alone.
     config["host"] = host
@@ -244,6 +259,12 @@ def main() -> int:
     if ns.scan_recordings:
         return _scan_recordings(config, ns)
 
+    # Before the supervisor split AND before the worker binds: a refused role
+    # is one line on stderr and exit 2, never a supervisor that starts a worker
+    # only to watch it raise.
+    if role_error:
+        print(role_error, file=sys.stderr)
+        return 2
     if ns.worker:
         return _run_worker(config, host, port)
     # No --worker: be the supervisor. sys.argv[1:] (not the parsed namespace)

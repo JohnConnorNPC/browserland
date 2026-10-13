@@ -150,9 +150,13 @@ def test_headless_serves_api_but_not_page_or_help(tmp_path, monkeypatch):
     _, response = authed(app).get("/info")
     assert response.status == 200
     assert response.json["serve_ui"] is False
+    assert response.json["role"] == "node"       # #253: derived from serve_ui
+    assert response.json["terminals"] is True
     _, page = authed(app).get("/")
     assert page.status == 200
-    assert page.json == {"ui": False}            # self-describing, not the page
+    # self-describing, not the page; #253 names the role (R1: the one body
+    # that changes, `ui` stays so a ui === false probe keeps working)
+    assert page.json == {"ui": False, "role": "node"}
     _, corpus = authed(app).get("/help-corpus.json")
     assert corpus.status == 404                  # route not registered
     _, sessions = authed(app).get("/sessions")

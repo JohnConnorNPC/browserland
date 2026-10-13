@@ -349,7 +349,8 @@ def test_the_docstrings_enumerate_every_public_route():
 
 def test_headless_root_still_answers_for_health_probes(tmp_path):
     """Headless installs are documented as unaffected by #142 — GET / keeps
-    answering 200 {"ui": false} with no token, so existing probes keep working."""
+    answering 200 {"ui": false} with no token, so existing probes keep working.
+    #253 adds the derived role to that body; `ui` is unchanged."""
     global _seq
     _seq += 1
     app = create_app(
@@ -358,7 +359,7 @@ def test_headless_root_still_answers_for_health_probes(tmp_path):
         name=f"webterm-policy-headless-{_seq}")
     _, r = app.test_client.get("/")
     assert r.status == 200
-    assert r.json == {"ui": False}
+    assert r.json == {"ui": False, "role": "node"}
 
 
 def test_loopback_is_not_an_exemption(tmp_path):

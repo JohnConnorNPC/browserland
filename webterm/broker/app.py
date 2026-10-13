@@ -86,7 +86,7 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import auth, modinstall, relay, supervise, update as update_check
+from . import auth, modinstall, relay, roles, supervise, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
 # the per-window store that validates them (#228), and so are the scope
@@ -3916,7 +3916,9 @@ async def _help_corpus(request: Request):
 async def _index_headless(request: Request):
     # Headless broker (serve_ui=False, #87): no desktop page is served. JSON so a
     # client hitting GET / can tell the UI is intentionally absent, not just missing.
-    return sanic_json({"ui": False})
+    # #253: and names the role -- a broker with no page is a node. `ui` stays,
+    # so a probe that checks ui === false keeps working.
+    return sanic_json({"ui": False, "role": "node"})
 
 
 async def _handle_404(request: Request, exception):
@@ -3981,7 +3983,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # not the desktop page (GET /) or the in-app Help corpus, and skips
     # assembling both UI constants entirely. Defaults ON so existing deploys are
     # unchanged. The --headless CLI flag folds into config before we read it.
+    # #253: roles.resolve is that fold (__main__ ran it with the CLI flags; it
+    # is idempotent). Re-run here so a direct caller cannot build the refused
+    # node-with-no-terminals broker, and so a config `role` alias still lands
+    # in serve_ui. `role` is derived, never stored; `terminals` defaults ON.
+    role_error = roles.resolve(config)
+    if role_error:
+        raise ValueError(role_error)
     app.ctx.serve_ui = bool(config.get("serve_ui", True))
+    app.ctx.role = roles.role_of(app.ctx.serve_ui)
+    app.ctx.terminals = config.get("terminals", True) is not False
     app.ctx.registry = BrokerRegistry()
     # The Launcher (profiles-only /launch source of truth) is constructed AFTER
     # the state path is resolved, so its sidecar (webterm_profiles.json, #70) can
@@ -4289,6 +4300,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.broker_id = _load_or_create_broker_id(
         app.ctx.state_path.parent / "webterm_identity.json")
     LOGGER.info("broker identity: %s", app.ctx.broker_id)
+    LOGGER.info("broker role: %s - terminals %s", app.ctx.role,
+                "on" if app.ctx.terminals else "off (launches refused)")
     # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
     # a set so they aren't GC'd mid-flight; each self-removes on completion.
     app.ctx.bg_tasks = set()
@@ -8582,6 +8595,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "version": app.ctx.version,
                 "mods_enabled": app.ctx.mods_enabled,
                 "serve_ui": app.ctx.serve_ui,
+                # #253: `role` is derived from serve_ui (hub serves the
+                # page, node does not); `terminals` false means this broker
+                # refuses new launches. An older broker omits both, which a
+                # client reads as an ordinary broker that launches.
+                "role": app.ctx.role,
+                "terminals": app.ctx.terminals,
                 "mods": app.ctx.mod_catalog,
                 "mod_policy": dict(app.ctx.mod_policy),
                 # `source` + `mutable` exist so a client can say WHY

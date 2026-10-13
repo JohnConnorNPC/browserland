@@ -1809,7 +1809,7 @@ def test_headless_subprocess_serves_api_not_page():
         # and it answers UNAUTHENTICATED, so health probes keep working (#142).
         status, payload = _http("GET", f"{base}/")
         assert status == 200
-        assert payload == {"ui": False}
+        assert payload == {"ui": False, "role": "node"}    # #253 names it
         # /help-corpus.json route is not registered -> falls through to 404.
         status, _, _ = _request("GET", f"{base}/help-corpus.json")
         assert status == 404
@@ -1821,6 +1821,9 @@ def test_headless_subprocess_serves_api_not_page():
         status, info = _http("GET", f"{base}/info?token={TOKEN}")
         assert status == 200
         assert info["serve_ui"] is False
+        # #253: --headless is the alias of --role node; a node hosts terminals.
+        assert info["role"] == "node"
+        assert info["terminals"] is True
     finally:
         proc.terminate()
         try:
