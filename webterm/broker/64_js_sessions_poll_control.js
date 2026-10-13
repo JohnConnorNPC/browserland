@@ -523,6 +523,7 @@
                 _armPongDeadline(st);
                 if (st.role === 'cand') _promoteControl(st);
             }
+            if (rec.hostId === homeHostId()) _clearLostContact();
             onControlStatus(rec.hostId, msg);
             _settleWantActive(rec, msg);
         }
@@ -585,6 +586,7 @@
                 return;
             }
             if (rec.closedByUs) return;          // closeControlWs / host removed
+            if (rec.hostId === homeHostId() && rec.lastOpenAt) _armLostContact();
             // A replacement in flight takes charge when it reports; its own
             // failure re-dials (above).
             if (rec.cand) return;
@@ -608,6 +610,36 @@
                 }
             }
         });
+        // #248 B2 (owner O2): the page stays usable while its HOME lease
+        // channel is down -- the overlay comes only from a real {active:
+        // false} -- but after 10 s without one it says so. Only for a channel
+        // that was up once (the startup guard in 85 owns "never reached"),
+        // and not for a 4401 (the auth overlay owns that). Cleared by the
+        // next home status.
+        const LOST_CONTACT_NOTICE = 'lost contact with this broker — retrying…';
+        const CONTROL_LOST_NOTICE_MS = 10000;
+        let _lostContactTimer = null;
+        function _armLostContact() {
+            if (_lostContactTimer) return;
+            _lostContactTimer = setTimeout(() => {
+                _lostContactTimer = null;
+                // (A home status in between cleared this timer.)
+                const rec = controlSockets.get(homeHostId());
+                if (!rec || rec.closedByUs) return;
+                showNotice(LOST_CONTACT_NOTICE, { sticky: true, type: 'error' });
+            }, CONTROL_LOST_NOTICE_MS);
+        }
+        function _clearLostContact() {
+            if (_lostContactTimer) { clearTimeout(_lostContactTimer); _lostContactTimer = null; }
+            try {
+                const host = document.getElementById('notice-host');
+                if (!host) return;
+                for (const n of Array.from(host.querySelectorAll('.notice-sticky'))) {
+                    if (n._noticeText === LOST_CONTACT_NOTICE) n.remove();
+                }
+            } catch (_) {}
+        }
+
         // Bring a backed-off re-dial forward. Only a channel that is WAITING
         // to re-dial: a 4401'd one has no timer and waits for the auth form.
         function _redialNow(rec) {

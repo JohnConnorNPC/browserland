@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 47
+EXPECTED_ASSERTS = 56
 
 _HARNESS = r"""
 'use strict';
@@ -59,7 +59,8 @@ function ok(cond, label) {
 function mkWorld(opts) {
     opts = opts || {};
     const w = { now: 1000000, tid: 1, timers: new Map(), sockets: [],
-                log: [], visCbs: [], notices: [], rpcs: [], views: [] };
+                log: [], visCbs: [], notices: [], rpcs: [], views: [],
+                stickies: [] };
     class FakeWS {
         constructor(url) {
             this.url = url; this.readyState = 0; this.sent = [];
@@ -127,7 +128,18 @@ function mkWorld(opts) {
         pollStateFor: function () { return w.poll || (w.poll = {}); },
         showAuthOverlay: function () { w.log.push('auth'); },
         renderHostStatus: function () {},
-        showNotice: function (t, o) { w.notices.push(t); },
+        showNotice: function (t, o) {
+            w.notices.push(t);
+            if (o && o.sticky) {
+                w.stickies.push({ _noticeText: t, removed: false,
+                                  remove: function () { this.removed = true; } });
+            }
+        },
+        document: { getElementById: function (id) {
+            return id !== 'notice-host' ? null : { querySelectorAll: function () {
+                return w.stickies.filter(n => !n.removed);
+            } };
+        } },
         onVisibility: function (fn) { w.visCbs.push(fn); return function () {}; },
         registerHostCache: function () {},
         _leaseAffordance: { armed: false, asked: false },
@@ -441,6 +453,53 @@ s1 = w.last();
 if (s1) { s1._open(); s1._recv(ST(false)); }
 ok(!!s1 && BA(s1) === 1, 'B8 ...and takes over when it reports');
 
+// ---- B2: the lost-contact notice (O2) --------------------------------------
+const LOST = 'lost contact with this broker — retrying…';
+const lostUp = function (w) { return w.stickies.filter(n => !n.removed && n._noticeText === LOST).length; };
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._drop(1006);
+w.advance(9999);
+ok(lostUp(w) === 0, 'N1 no notice before 10 s without a home channel');
+w.advance(1);
+// the backoff re-dial (2 s) is still CONNECTING: no status yet
+ok(lostUp(w) === 1, 'N2 after 10 s without a home channel the sticky notice is up');
+s1 = w.last(); s1._open(); s1._recv(ST(true));
+ok(lostUp(w) === 0, 'N3 the next home status takes it down');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._drop(1006);
+w.advance(2000);
+s1 = w.last(); s1._open(); s1._recv(ST(true));
+w.advance(20000);
+ok(lostUp(w) === 0, 'N4 a channel back within 10 s shows nothing');
+
+w = mkWorld();
+w.api.openControlWs(w.env.hostById('rb'));
+s0 = w.last(); s0._open(); s0._recv(ST(true));
+s0._drop(1006);
+w.advance(20000);
+ok(lostUp(w) === 0, 'N5 a remote host drop shows nothing');
+
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());   // never opens: the startup guard owns it
+w.advance(20000);
+ok(lostUp(w) === 0, 'N6 a channel that never opened shows nothing');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._drop(4401);
+w.advance(20000);
+ok(lostUp(w) === 0, 'N7 a 4401 park shows nothing (the auth overlay owns it)');
+
+w = mkWorld();
+s0 = connected(w, ST(true));
+w.advance(20000);                        // two missed deadlines: retired
+ok(s0.closed, 'N8a precondition: a silent channel is retired after two deadlines');
+w.advance(10000);
+ok(lostUp(w) === 1, 'N8 ...and 10 s later, still down, the notice is up');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -561,6 +620,21 @@ def test_probe_control(run, label):
     "B8 ...and takes over when it reports",
 ])
 def test_take_back_while_reconnecting(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "N1 no notice before 10 s without a home channel",
+    "N2 after 10 s without a home channel the sticky notice is up",
+    "N3 the next home status takes it down",
+    "N4 a channel back within 10 s shows nothing",
+    "N5 a remote host drop shows nothing",
+    "N6 a channel that never opened shows nothing",
+    "N7 a 4401 park shows nothing (the auth overlay owns it)",
+    "N8a precondition: a silent channel is retired after two deadlines",
+    "N8 ...and 10 s later, still down, the notice is up",
+])
+def test_lost_contact_notice(run, label):
     _ok(run, label)
 
 
