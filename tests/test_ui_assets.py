@@ -30698,8 +30698,8 @@ def test_the_detached_surface_never_writes_shared_or_browser_state():
     for fn in ("function addOpenTerm(key) {", "function removeOpenTerm(key) {"):
         body = muts[muts.index(fn):muts.index(fn) + 200]
         assert "if (isDetachedSurface()) return;" in body, fn
-    decide = muts[muts.index("function decideTiled(key) {"):
-                  muts.index("function decideTiled(key) {") + 200]
+    decide = muts[muts.index("function decideTiled(key, knownFloat) {"):
+                  muts.index("function decideTiled(key, knownFloat) {") + 200]
     assert "if (isDetachedSurface()) return false;" in decide
     startup = _src226("85_js_startup.js")
     assert "if (isDetachedSurface()) return;   // #226" in startup

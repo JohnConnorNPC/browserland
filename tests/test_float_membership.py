@@ -11,6 +11,10 @@ boundaries and evaluated inside a ``with (env)`` scope whose outer names
 (``prefs``, ``windows``, the DOM, ``savePrefs``) are stubs:
 
 * G1 -- 75's layout GC drops a dead key from ``openTerms`` with its column (A0).
+* F1-F6, F10, F14 -- 58 ``isKnownFloat``/``decideTiled`` and the 67 capture
+  that feeds them (A1): a key open but in no column opens as a float, a brand
+  new key still follows the tiling default, and a minimized tiled window keeps
+  its column so it is never mistaken for a float.
 
 One PASS/FAIL line per assert plus a machine-readable tail; the fixture FAILS
 if a boundary vanishes. Skipped when node is absent.
@@ -38,7 +42,16 @@ SLICES = {
                   "        // The one desktop (#148)."),
     "findKey": ("58_js_layout_mutators.js",
                 "        function findKeyInLayout(key) {",
-                "        function isTilingMode() {"),
+                "        // ---- _layout mutators"),
+    "decide": ("58_js_layout_mutators.js",
+               "        // #251: is this key a FLOAT somewhere?",
+               "        // ---- consume / expel"),
+    "capture": ("67_js_window_lifecycle.js",
+                "            // #251: read the SHARED float membership first.",
+                "            // #153: the OSC 52"),
+    "minimize": ("73_js_window_runtime.js",
+                 "        function minimizeWindow(id) {",
+                 "        function restoreWindow(id) {"),
     "rowKeys": ("57_js_tiling_model.js",
                 "        function rowKeys(row) {",
                 "        // Keyed mirror of normalizeRowWidths"),
@@ -47,7 +60,7 @@ SLICES = {
            "            for (const k of Object.keys(prefs)) {"),
 }
 
-EXPECTED_ASSERTS = 1
+EXPECTED_ASSERTS = 10
 
 _HARNESS = r"""
 'use strict';
@@ -92,14 +105,43 @@ function mkWorld(o) {
         savePrefsLocal: () => { w.localSaves++; },
         getPref: (id) => { const k = String(id); if (!w.prefs[k]) w.prefs[k] = {}; return w.prefs[k]; },
         windows: new Map(),
+        frontId: null,
+        removeKeyFromLayout: (k) => {
+            const L = w.prefs._layout;
+            for (const c of L.columns) for (const r of c.rows) {
+                const i = r.keys.indexOf(k);
+                if (i !== -1) {
+                    r.keys.splice(i, 1);
+                    c.rows = c.rows.filter(x => x.keys.length);
+                    L.columns = L.columns.filter(x => x.rows.length);
+                    return {};
+                }
+            }
+            return null;
+        },
+        layoutRemoveKey: (k) => { if (env.removeKeyFromLayout(k)) env.savePrefs(); },
+        requestRelayout: () => {},
+        requestAnimationFrame: () => {},
+        updateTaskbarActive: () => {},
+        captureTiledFocusContext: () => null,
+        reconcileTiledFocus: () => {},
     };
     w.env = env;
-    Object.assign(w, load(S.openTerms + S.findKey + S.rowKeys, env,
-        ['getOpenTerms', 'addOpenTerm', 'removeOpenTerm', 'findKeyInLayout', 'rowKeys']));
-    Object.assign(env, { getOpenTerms: w.getOpenTerms, addOpenTerm: w.addOpenTerm,
-        removeOpenTerm: w.removeOpenTerm, findKeyInLayout: w.findKeyInLayout,
-        rowKeys: w.rowKeys });
+    const names = ['getOpenTerms', 'addOpenTerm', 'removeOpenTerm', 'findKeyInLayout',
+        'isTilingMode', 'rowKeys', 'isKnownFloat', 'decideTiled', 'minimizeWindow'];
+    Object.assign(w, load(S.openTerms + S.findKey + S.rowKeys + S.decide + S.minimize, env, names));
+    for (const n of names) env[n] = w[n];
+    // 67 openWindow's capture, run exactly as shipped for (win, id).
+    w.capture = load('function capture(win, id) {\n' + S.capture + '\nreturn knownFloat;\n}',
+        env, ['capture']).capture;
     return w;
+}
+function mkWin(id, o) {
+    const cls = new Set((o && o.cls) || []);
+    return Object.assign({ id: id, type: 'term', tiled: false, minimized: false, disposed: false,
+        dom: { classList: { add: c => cls.add(c), remove: c => cls.delete(c),
+                            contains: c => cls.has(c), toggle: (c, on) => on ? cls.add(c) : cls.delete(c) },
+               style: {}, cls: cls } }, o || {});
 }
 
 // ---- G1 (A0): the layout GC prunes openTerms with the column ---------------
@@ -114,25 +156,68 @@ function mkWorld(o) {
         pendingOpens: new Map([['h:3', {}]]),         // h:3 is opening
         layoutGcMiss: new Map([['h:1', old], ['h:2', old], ['h:3', old]]),
         LAYOUT_GC_GRACE_MS: 120000,
-        removeKeyFromLayout: (k) => {
-            const L = w.layout();
-            for (const c of L.columns) for (const r of c.rows) {
-                const i = r.keys.indexOf(k);
-                if (i !== -1) {
-                    r.keys.splice(i, 1);
-                    c.rows = c.rows.filter(x => x.keys.length);
-                    L.columns = L.columns.filter(x => x.rows.length);
-                    return {};
-                }
-            }
-            return null;
-        },
     });
     const gc = load('function runGc() {\n' + S.gc + '\nreturn layoutDropped;\n}', w.env, ['runGc']);
     const dropped = gc.runGc();
     ok(dropped === 1 && J(w.colKeys()) === J(['h:2', 'h:3'])
         && J(w.layout().openTerms) === J(['h:2', 'h:3', 'h:9']) && w.saves >= 1,
         'G1 the layout GC drops a dead key from openTerms with its column; live, pending and float keys stay');
+})();
+
+// ---- A1: decideTiled reads the shared float membership --------------------
+(function () {
+    // F1: open in the shared layout, in no column, no local role -> a float.
+    let w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1', 'h:2'] });
+    const kf1 = w.isKnownFloat('h:2');
+    ok(kf1 === true && w.decideTiled('h:2', kf1) === false && w.saves === 0
+        && J(w.colKeys()) === J(['h:1']),
+        'F1 a key open in the shared layout but in no column opens as a float, and nothing is written');
+    // F2: not in openTerms -> the tiling default.
+    w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1'] });
+    const kf2 = w.isKnownFloat('h:5');
+    ok(kf2 === false && w.decideTiled('h:5', kf2) === true,
+        'F2 a key the shared layout does not list as open follows the tiling default');
+    // F3: a column wins, whatever the local role or the float hint.
+    w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1'] });
+    w.env.getPref('h:1').tiled = false;
+    ok(w.isKnownFloat('h:1') === false && w.decideTiled('h:1', w.isKnownFloat('h:1')) === true
+        && w.decideTiled('h:1', true) === true,
+        'F3 a key in a column opens tiled, whatever the local role or openTerms');
+    // F4: the shared membership beats a stale local "tiled" role.
+    w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1', 'h:2'] });
+    w.env.getPref('h:2').tiled = true;
+    ok(w.decideTiled('h:2', w.isKnownFloat('h:2')) === false,
+        'F4 a stale local tiled role does not re-tile a window floated elsewhere');
+    // F5: floating mode, unknown key -> a float (unchanged).
+    w = mkWorld({ mode: 'floating', columns: [], openTerms: [] });
+    ok(w.decideTiled('h:5', w.isKnownFloat('h:5')) === false,
+        'F5 in floating mode an unknown key opens as a float (unchanged)');
+    // F6: through 67's own capture: a brand-new key tiles even though the
+    // capture's addOpenTerm lists it in openTerms.
+    w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1'] });
+    const kf6 = w.capture(mkWin('h:7'), 'h:7');
+    ok(kf6 === false && w.layout().openTerms.indexOf('h:7') !== -1
+        && w.decideTiled('h:7', kf6) === true,
+        "F6 through openWindow's capture a brand-new window still tiles, though the capture lists it as open");
+    // F6b: ...and a key already open elsewhere, in no column, floats.
+    w = mkWorld({ columns: [col('h:1')], openTerms: ['h:1', 'h:8'] });
+    const kf6b = w.capture(mkWin('h:8'), 'h:8');
+    ok(kf6b === true && w.decideTiled('h:8', kf6b) === false
+        && J(w.layout().openTerms) === J(['h:1', 'h:8']),
+        "F6b through openWindow's capture a window open elsewhere in no column floats");
+    // F10: the detached surface floats, always.
+    w = mkWorld({ detached: true, columns: [col('h:1')], openTerms: ['h:1'] });
+    ok(w.decideTiled('h:1', w.isKnownFloat('h:1')) === false,
+        'F10 the detached surface opens its window as a float, as before');
+    // F14: minimizing a tiled window keeps its column, so a restore never
+    // mistakes it for a float.
+    w = mkWorld({ columns: [col('h:1'), col('h:2')], openTerms: ['h:1', 'h:2'] });
+    const win = mkWin('h:1', { tiled: true });
+    w.env.windows.set('h:1', win); w.env.frontId = 'h:1';
+    w.minimizeWindow('h:1');
+    ok(win.minimized === true && !!w.findKeyInLayout('h:1') && w.isKnownFloat('h:1') === false
+        && w.decideTiled('h:1', w.isKnownFloat('h:1')) === true && w.saves === 0,
+        'F14 a minimized tiled window keeps its column, so it is never a known float');
 })();
 
 console.log(pass + ' passed, ' + fail + ' failed');
@@ -188,6 +273,21 @@ def _ok(run, label):
     "G1 the layout GC drops a dead key from openTerms with its column; live, pending and float keys stay",
 ])
 def test_251_gc_keeps_the_invariant(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "F1 a key open in the shared layout but in no column opens as a float, and nothing is written",
+    "F2 a key the shared layout does not list as open follows the tiling default",
+    "F3 a key in a column opens tiled, whatever the local role or openTerms",
+    "F4 a stale local tiled role does not re-tile a window floated elsewhere",
+    "F5 in floating mode an unknown key opens as a float (unchanged)",
+    "F6 through openWindow's capture a brand-new window still tiles, though the capture lists it as open",
+    "F6b through openWindow's capture a window open elsewhere in no column floats",
+    "F10 the detached surface opens its window as a float, as before",
+    "F14 a minimized tiled window keeps its column, so it is never a known float",
+])
+def test_251_decide_tiled_reads_shared_membership(run, label):
     _ok(run, label)
 
 
