@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 62
+EXPECTED_ASSERTS = 66
 
 _HARNESS = r"""
 'use strict';
@@ -493,6 +493,37 @@ function mkWorld() {
     w.edit(['C']); await w.firePush(); await flush(); await w.firePush(); await flush();
     ok(w.srv() === J(['A1']) && w.putsLog().indexOf('PUT@4:["C"]') === -1,
         'F10 a peer revert to an older send of ours is not taken for our write: the edit yields (R2)');
+    // F11 (codex B1): an adopt in between -- the next edit is built on the
+    // ADOPTED state, so a peer that restores our last send is a peer write.
+    w = mkWorld(); await w.boot();
+    w.edit(['B']); await w.firePush();                                 // lands at 2
+    w.server = { rev: 3, settings: {}, layout: { cols: ['P'] } };
+    await w.api.pullState(false); await flush();                       // adopts P
+    w.server = { rev: 4, settings: {}, layout: { cols: ['B'] } };      // a peer restores B
+    w.edit(['C']); await w.firePush(); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['B']) && w.cols() === J(['B']) && w.putsLog().indexOf('PUT@4:["C"]') === -1,
+        'F11 after an adopt, a peer restoring our last send is a peer write: the edit yields');
+    // F12 (codex B2): retries of one edit never evict its parent.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'commitThrow'; w.edit(['E1']); await w.firePush();    // lands at 2, reply lost
+    w.putMode = '500'; w.edit(['E2']); await w.firePush();             // E2 fails ...
+    for (let i = 0; i < 3; i++) { w.api.savePrefs(); await w.firePush(); }   // ... 3 more times (no pull)
+    w.putMode = null; w.perf += 60000;
+    w.api.savePrefs(); await w.firePush(); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['E2']) && w.cols() === J(['E2']),
+        'F12 four failed sends of one edit keep its parent: the late 409 on our own write rebases and lands');
+    // F13 (codex B3): our parent shown at a LOWER rev (a rollback) is the base.
+    w = mkWorld(); await w.boot();
+    w.server.rev = 9; await w.api.pullState(false); await flush();     // same bytes, rev 9
+    w.putMode = 'commitThrow'; w.edit(['E1']); await w.firePush();    // lands at 10, reply lost
+    w.putMode = 'throw'; w.edit(['E2']); await w.firePush();          // thrown, base 9
+    w.putMode = null;
+    w.server = { rev: 1, settings: {}, layout: { cols: ['E1'] } };     // the store rolled back
+    const f13 = w.puts.length;
+    w.api.savePrefs(); await w.firePush(); await flush();
+    for (let i = 0; i < 4; i++) { await w.firePush(); await flush(); }
+    ok(w.srv() === J(['E2']) && w.puts.length - f13 <= 2,
+        'F13 a rollback showing our parent at a lower rev rebases onto it: no 409 loop (' + (w.puts.length - f13) + ' PUTs)');
     // D6b (M3, completed): the parked edit of D6 lands once the channel recovers.
     w = mkWorld(); await w.boot();
     w.putMode = 'hangBody'; w.edit(['P1']); await w.firePush(); w.putMode = null;
@@ -544,6 +575,16 @@ function mkWorld() {
     const a4 = w.adopts;
     await w.release(); w.putMode = null; await flush();
     ok(w.adopts === a4 && w.notices.length === 0, 'V4 a 413 answered after a teardown converges nothing');
+    // V4b (codex S4): ...and the parked edit is not dropped silently: the next
+    // view re-sends it once and, refused again, converges WITH the notice.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '413'; w.edit(['TOO-BIG']); await w.firePush();
+    w.holdPut = false;
+    w.api.teardown();
+    await w.release(); await flush();
+    await w.rebuild(); await flush(); await w.firePush(); await flush();
+    ok(w.cols() === J(['A']) && J(w.notices) === J([REJ]) && w.puts.length === 2,
+        'V4b the parked edit refused across the teardown is re-sent once by the next view and converges with the notice');
 
     // ---- 247-9 (item 9 b + S6): the retry ladder ---------------------------
     // One "tick" = a poll + the debounce firing, at the current performance.now.
@@ -743,6 +784,8 @@ def test_247_3_84_wiring():
     "F8 a byte-identical save during a PUT does not re-push over the 409 winner (S4)",
     "F9 a 409 whose winner is our own previous write rebases on it and lands",
     "F10 a peer revert to an older send of ours is not taken for our write: the edit yields (R2)",
+    "F11 after an adopt, a peer restoring our last send is a peer write: the edit yields",
+    "F12 four failed sends of one edit keep its parent: the late 409 on our own write rebases and lands",
     "D6b ...and lands once the channel recovers (it never yields to our own P1)",
     "E5b after a hung PUT the next edit lands without waiting for a poll",
 ])
@@ -756,6 +799,7 @@ def test_247_5_thrown_failures_and_own_writes(run, label):
     "V2b a proxy 400 does not discard the edit",
     "V3 a 413 for an older payload lets the newer edit land (no converge, no notice)",
     "V4 a 413 answered after a teardown converges nothing",
+    "V4b the parked edit refused across the teardown is re-sent once by the next view and converges with the notice",
 ])
 def test_247_7_rejected_save_converges(run, label):
     _ok(run, label)
@@ -774,6 +818,12 @@ def test_247_7_rejected_save_converges(run, label):
 ])
 def test_247_9_retry_ladder(run, label):
     _ok(run, label)
+
+
+def test_247_codex_rollback_rebases_without_a_loop(run):
+    hits = [k for k, v in run["results"].items()
+            if k.startswith("F13 a rollback showing our parent at a lower rev rebases onto it")]
+    assert len(hits) == 1 and run["results"][hits[0]] is True, run["stdout"]
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):

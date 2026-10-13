@@ -102,8 +102,14 @@
         // rev rather than yield to our own write (found re-probing M3 x Q2).
         // R2: only the DIRECT parent counts -- the newest send older than the
         // edit. A peer that reverts to an OLDER send's bytes is a peer write.
+        // One entry per gen (retries of one edit never evict its parent), and
+        // an adopt empties it: an edit made after that is built on the adopted
+        // state, so no earlier send of ours is its parent.
         const _stateRecentSends = [];
         function _stateNoteSend(bytes, gen) {
+            for (let i = _stateRecentSends.length - 1; i >= 0; i--) {
+                if (_stateRecentSends[i].gen === gen) _stateRecentSends.splice(i, 1);
+            }
             _stateRecentSends.push({ bytes: bytes, gen: gen });
             if (_stateRecentSends.length > 4) _stateRecentSends.shift();
         }
@@ -114,14 +120,17 @@
             }
             return best;
         }
+        // The server shows our direct parent at `rev`: that rev is the base,
+        // even a LOWER one (a rollback) -- a base left above it would 409
+        // against the same winner on every re-push.
         function _stateSawOwnWrite(bytes, rev) {
             if (_stateFail) {
                 const par = _stateDirectParent(_stateFail.gen);
-                if (par && par.bytes === bytes && _stateFail.baseRev < rev) _stateFail.baseRev = rev;
+                if (par && par.bytes === bytes) _stateFail.baseRev = rev;
             }
             if (_stateParked && _stateParkBase !== null) {
                 const par = _stateDirectParent(_stateParkGen);
-                if (par && par.bytes === bytes && _stateParkBase < rev) _stateParkBase = rev;
+                if (par && par.bytes === bytes) _stateParkBase = rev;
             }
         }
         // #246 review: a rev was taken WITHOUT adopting its state (a pull
@@ -400,6 +409,14 @@
                     _stateSettleSent(gen);
                     _stateRevSkipped = false;
                 } else if (out.status === 400 || out.status === 413) {
+                    // A verdict that outlived its view: a PARKED edit stays
+                    // owed, so the next view re-sends it and, refused again,
+                    // converges WITH the notice there (one more PUT). Settling
+                    // it here would let the rebuild pull drop it silently.
+                    if (epoch !== _viewEpoch && _stateParked && gen === _stateParkGen) {
+                        _stateParkedFailure(gen);
+                        return;
+                    }
                     // A verdict on this payload (which carries any older
                     // failed edit too): it can never land, so nothing is owed.
                     _stateSettleSent(gen);
@@ -454,6 +471,7 @@
                 savePrefsLocal();               // cache, do NOT push
                 _stateLastSerialized = _stateSerialize();
                 _stateSettleAll();              // the adopted state supersedes it
+                _stateRecentSends.length = 0;   // ... and no send of ours is a parent
                 _stateRevSkipped = false;
                 document.body.classList.toggle('size-locked', isSizeLocked());
                 applyDisplaySettings();
