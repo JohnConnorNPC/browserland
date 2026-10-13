@@ -1027,15 +1027,18 @@
         // answer without re-applying. Bounded; oldest evicted.
         //
         // #250: a rid is unique only per BROKER RUN, so the key is
-        // JSON [hostId, bootId, rid]: another broker's rid N, or a restarted
-        // broker's, is a different call. The bootId is the frame's own (the
-        // run that numbered the rid), else the delivering socket's -- never
-        // rec.leaseBoot, which moves -- else '' for a broker that names no
-        // run. An rpc still being applied sits in _desktopInflight, so a
-        // duplicate that arrives meanwhile waits for its answer instead of
-        // applying the op a second time.
+        // JSON [hostId, bootId, epoch, rid]: another broker's rid N, or a
+        // restarted broker's, is a different call. The bootId is the frame's
+        // own (the run that numbered the rid), else the delivering socket's
+        // -- never rec.leaseBoot, which moves -- else '' for a broker that
+        // names no run; for those the epoch (bumped per new socket, see
+        // _desktopForgetRun) stands in for the run, else it is 0. An rpc
+        // still being applied sits in _desktopInflight, so a duplicate that
+        // arrives meanwhile waits for its answer instead of applying the op
+        // a second time.
         const _desktopAppliedRids = new Map();
         const _desktopInflight = new Map();
+        const _desktopRunlessEpoch = new Map();     // hostId -> int
         const _DESKTOP_RID_CACHE_MAX = 128;
         function _desktopRememberRid(key, payload) {
             _desktopAppliedRids.delete(key);
@@ -1053,15 +1056,20 @@
             } catch (_) {}
             return (st && typeof st.bootId === 'string') ? st.bootId : '';
         }
+        function _desktopRpcKey(hid, boot, rid) {
+            const epoch = boot === '' ? (_desktopRunlessEpoch.get(hid) || 0) : 0;
+            return JSON.stringify([hid, boot, epoch, rid]);
+        }
         // #250: a broker that names no run (pre-#248) numbers rids from 1
         // again after a restart, and a new socket to it is the only sign of
         // one (it never pongs, so the page never dials a replacement beside
-        // a live socket): its first status forgets that host's answers.
+        // a live socket): its first status starts a new epoch for that host.
+        // An old-run op still in flight keeps the key it was given at
+        // receipt, so the new run's rid N neither waits for it nor is
+        // overwritten by its late answer; the old answers age out of the
+        // bounded cache.
         function _desktopForgetRun(hid) {
-            const pre = JSON.stringify([hid, '']).slice(0, -1) + ',';
-            for (const k of Array.from(_desktopAppliedRids.keys())) {
-                if (k.indexOf(pre) === 0) _desktopAppliedRids.delete(k);
-            }
+            _desktopRunlessEpoch.set(hid, (_desktopRunlessEpoch.get(hid) || 0) + 1);
         }
         // One of the TWO /control send sites in this fragment (the
         // terminal-funnel enumeration pins each count: `ws.send` here and
@@ -1442,7 +1450,7 @@
                 // The call's identity, resolved before any await (#250).
                 boot = _desktopRpcBoot(ws, msg);
                 gen = msg.gen;      // validated by desktopLeaseLost
-                ckey = JSON.stringify([hid, boot, rid]);
+                ckey = _desktopRpcKey(hid, boot, rid);
                 const cached = _desktopAppliedRids.get(ckey);
                 if (cached !== undefined) {
                     desktopReply(rec, ws, rid, cached);

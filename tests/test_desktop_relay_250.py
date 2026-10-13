@@ -25,7 +25,7 @@ _LIVE_CUT = "// ---- A2: pings, the deadline, make-before-break"
 
 # Every ok() each script makes; pinned so a dropped scenario cannot pass by
 # absence.
-EXPECTED_RPC_ASSERTS = 23
+EXPECTED_RPC_ASSERTS = 25
 EXPECTED_LIVE_ASSERTS = 2
 
 _RPC_SCENARIOS = r"""
@@ -135,6 +135,31 @@ _RPC_SCENARIOS = r"""
     await call7('remoteX', mkSock(), Object.assign({ rid: 72 }, F(5)));
     ok(countMut('reveal') === 4,
         'K7c a named run, and another host, keep their answers');
+
+    // K8 a run-less op still in flight when the host's new socket reports:
+    // the new run's rid 1 neither waits for it nor is overwritten by the
+    // old op's LATER answer (the old op is a get held on its one await).
+    resetWorld();
+    let release8 = null;
+    execNext = function () { return new Promise(function (res) { release8 = res; }); };
+    const w8a = mkSock(), w8b = mkSock();
+    const p8a = k7.h('local', { ws: w8a }, w8a,
+        { rid: 1, op: 'get', args: { visible: null } });
+    await Promise.resolve(); await Promise.resolve();
+    k7.forget('local');                   // the restarted broker's first status
+    execNext = null;
+    await k7.h('local', { ws: w8b }, w8b,
+        { rid: 1, op: 'float', args: { id: 9, visible: null } });
+    ok(countMut('detachToFloat') === 1 && w8b.sent.length === 1 && w8a.sent.length === 0,
+        'K8a the new run\'s rid 1 is applied while the old run\'s is in flight');
+    release8({ ok: true, value: { active: 0, items: [] } });
+    await p8a;
+    const w8c = mkSock();
+    await k7.h('local', { ws: w8c }, w8c,
+        { rid: 1, op: 'float', args: { id: 9, visible: null } });
+    ok(countMut('detachToFloat') === 1 && w8a.sent.length === 1
+        && JSON.stringify(w8c.sent[0]) === JSON.stringify(w8b.sent[0]),
+        'K8b a replay of the new run gets the new run\'s answer, not the old op\'s');
 
     // ---- N: the rpc's generation and run against this host's newest status
     function held(boot, gen) {          // rec + its socket, as after a status
