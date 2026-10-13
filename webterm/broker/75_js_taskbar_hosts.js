@@ -909,6 +909,10 @@
                     if (since === undefined) { layoutGcMiss.set(k, now); continue; }
                     if (now - since < LAYOUT_GC_GRACE_MS) continue;
                     if (removeKeyFromLayout(k)) layoutDropped += 1;
+                    // #251: ...and from openTerms. A key open but in no column
+                    // is a FLOAT to every restorer, so a dead tiled key left
+                    // there would come back floating if its agent re-registers.
+                    removeOpenTerm(k);
                     layoutGcMiss.delete(k);
                 }
             }

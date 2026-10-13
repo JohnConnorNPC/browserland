@@ -517,16 +517,26 @@ def control_pong_frame(n: Optional[int], active: bool,
 
 
 def desktop_rpc_frame(rid: int, op: str,
-                      args: Optional[Dict[str, Any]] = None) -> str:
+                      args: Optional[Dict[str, Any]] = None,
+                      gen: Optional[int] = None,
+                      boot_id: Optional[str] = None) -> str:
     """Broker -> lease-holding browser on /control (#244): one desktop op to
     run against the layout. ``rid`` is unique per broker run; the browser
     applies it exactly once and answers exactly one ``desktop_result`` with
     the same rid (the frames' full contract lives in the broker's desktop
     relay: design/broker.md ## Wire contract). ``args.visible`` carries the
     caller's visible window ids (null for an admin) for the browser's own
-    visibility refusal."""
-    return json.dumps({"type": "desktop_rpc", "rid": int(rid),
-                       "op": str(op), "args": args or {}})
+    visibility refusal. #250: ``gen`` (the lease generation the call was
+    made under) and ``bootId`` (the broker run that numbered ``rid``) are
+    added only when given, so the browser can key its answered-rid cache on
+    (host, run, rid) and refuse an rpc of a generation it has seen pass."""
+    frame: Dict[str, Any] = {"type": "desktop_rpc", "rid": int(rid),
+                             "op": str(op), "args": args or {}}
+    if gen is not None:
+        frame["gen"] = int(gen)
+    if boot_id is not None:
+        frame["bootId"] = str(boot_id)
+    return json.dumps(frame)
 
 
 # ---------------------------------------------------------------------------

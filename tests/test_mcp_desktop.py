@@ -239,7 +239,8 @@ def test_outcome_mapping_table(tmp_path, monkeypatch):
         ({"ok": False, "error": "unknown_window"}, 404,
          {"error": "unknown_or_off"}),
         ({"ok": False, "error": "not_home"}, 409, {"error": "not_home"}),
-        ({"ok": False, "error": "lost_lease"}, 409, {"error": "lost_lease"}),
+        ({"ok": False, "error": "lost_lease"}, 409,
+         {"error": "lost_lease", "dispatched": True}),
         ({"ok": False, "error": "needs_confirm",
           "detail": {"count": 3}}, 409,
          {"error": "needs_confirm", "count": 3}),
@@ -833,15 +834,18 @@ def test_result_from_non_holder_ignored(broker):
             f"&token={TEST_TOKEN}")
         json.loads(await asyncio.wait_for(other.recv(), 5))   # its status
         try:
-            await other.send(json.dumps({
-                "type": "desktop_result", "rid": 1, "ok": True,
-                "value": "spoofed"}))
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(_post, f"{base}/mcp/desktop",
                                      {"op": "focus",
                                       "args": {"id": 1}}, ADMIN_AUTH)
                 frame = await _until(holder, lambda f: f.get("type")
                                      == "desktop_rpc")
+                # #250: rids start at a random offset per run, so the spoof
+                # names the LIVE call's rid, sent while it is pending.
+                await other.send(json.dumps({
+                    "type": "desktop_result", "rid": frame["rid"],
+                    "ok": True, "value": "spoofed"}))
+                await asyncio.sleep(0.2)
                 await holder.send(json.dumps({
                     "type": "desktop_result", "rid": frame["rid"],
                     "ok": True, "value": "real"}))

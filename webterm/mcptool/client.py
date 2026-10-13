@@ -85,8 +85,13 @@ _ERROR_MESSAGES = {
     "not_home": "The lease-holding browser's HOME is another broker, and "
                 "workspace data belongs to a browser's home desktop — run "
                 "workspace ops from the home broker's host.",
-    "lost_lease": "The browser lost the control lease mid-op and nothing "
-                  "was half-applied — check the screen and retry.",
+    # #250: the broker's lost_lease body says whether the op was handed to
+    # a browser ("dispatched"). Only dispatched:false promises nothing was
+    # applied; true -- or a broker too old to say -- uses this text.
+    "lost_lease": "The browser lost the control lease mid-op. The op may "
+                  "still have applied on the browser that lost it: run "
+                  "get_desktop (the desktop `get` op) to check before "
+                  "retrying, or a retry may apply it twice.",
     "needs_confirm": "That workspace is not empty: pass force=true to remove "
                      "it (its windows move to the adjacent workspace).",
     "last_workspace": "The last workspace cannot be removed.",
@@ -95,6 +100,11 @@ _ERROR_MESSAGES = {
     "bad_op": "Unknown desktop op.",
     "bad_args": "The desktop op's arguments are invalid.",
 }
+
+# lost_lease with dispatched:false: no browser was ever sent the op.
+_LOST_LEASE_NOT_DISPATCHED = ("The browser lost the control lease before "
+                              "the op reached it, so nothing was applied — "
+                              "it is safe to retry.")
 
 
 def _error_detail(body: Optional[Dict[str, Any]]) -> str:
@@ -200,6 +210,8 @@ class BrowserlandClient:
             pass
         if code is not None:
             message = _ERROR_MESSAGES.get(code, f"Broker error: {code}")
+            if code == "lost_lease" and parsed.get("dispatched") is False:
+                message = _LOST_LEASE_NOT_DISPATCHED
             message = f"{message} (HTTP {r.status_code})"
             extra = _error_detail(parsed)
             if extra:

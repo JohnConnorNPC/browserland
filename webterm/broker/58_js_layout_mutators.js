@@ -117,11 +117,21 @@
             // for close/minimize. Focus on a surviving column is left unchanged.
             if (removeKeyFromLayout(key)) savePrefs();
         }
-        // Should a window with this key open tiled? Membership wins; else the
+        // #251: is this key a FLOAT somewhere? The synced layout lists it as
+        // open but it is in no column, which is how any device's float looks.
+        // Ask BEFORE the opening window adds itself to openTerms.
+        function isKnownFloat(key) {
+            key = String(key);
+            return getOpenTerms().indexOf(key) !== -1 && !findKeyInLayout(key);
+        }
+        // Should a window with this key open tiled? Membership wins; else a
+        // float the shared layout already knows (`knownFloat`, from
+        // isKnownFloat) stays one, beating a stale local role (#251); else the
         // remembered per-window role; else follow the global desktop mode.
-        function decideTiled(key) {
+        function decideTiled(key, knownFloat) {
             if (isDetachedSurface()) return false; // #226: one float, always
             if (findKeyInLayout(key)) return true;
+            if (knownFloat === true) return false;
             const role = getPref(key).tiled;
             if (role === true) return true;
             if (role === false) return false;

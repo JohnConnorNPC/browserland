@@ -541,6 +541,9 @@
                 // the socket's life, so it still names where an rpc came from
                 // after the socket is promoted away.
                 st.bootId = typeof msg.bootId === 'string' ? msg.bootId : null;
+                if (st.bootId === null && typeof _desktopForgetRun === 'function') {
+                    _desktopForgetRun(rec.hostId);
+                }
                 if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 // Capability from the FIRST status, per socket: a broker that
                 // stamps gen + bootId answers pings.
@@ -988,8 +991,8 @@
         // peer browsers converge through the debounced /state push) plus one
         // explicit pushState() flush BEFORE the reply, so an acknowledged op
         // has already been offered to /state under our lease. It runs only
-        // while this browser holds its lease -- the _deactivated re-check
-        // after each await answers lost_lease rather than landing a
+        // while this browser holds its lease -- the lease re-check
+        // (desktopLeaseLost) after each await answers lost_lease rather than landing a
         // half-applied op -- never waits on animation, and applies each rid
         // exactly once via a small answered-rid cache.
         //
@@ -1017,18 +1020,56 @@
          'workspaces:send-window'].forEach(function (k) {
             _DESKTOP_WS_OPS[k] = true;
         });
-        // rid -> the desktop_result payload already sent. The broker sends
-        // each rpc to ONE designated socket, so a duplicate frame should be
-        // rare; this cache is the belt -- a replayed rid re-serves its answer
-        // without re-applying. Bounded; oldest evicted.
+        // The call's identity -> the desktop_result payload already sent. The
+        // broker sends each rpc to ONE designated socket, so a duplicate frame
+        // should be rare; this cache is the belt (best-effort duplicate
+        // suppression, not exactly-once) -- a replayed rpc re-serves its
+        // answer without re-applying. Bounded; oldest evicted.
+        //
+        // #250: a rid is unique only per BROKER RUN, so the key is
+        // JSON [hostId, bootId, epoch, rid]: another broker's rid N, or a
+        // restarted broker's, is a different call. The bootId is the frame's
+        // own (the run that numbered the rid), else the delivering socket's
+        // -- never rec.leaseBoot, which moves -- else '' for a broker that
+        // names no run; for those the epoch (bumped per new socket, see
+        // _desktopForgetRun) stands in for the run, else it is 0. An rpc
+        // still being applied sits in _desktopInflight, so a duplicate that
+        // arrives meanwhile waits for its answer instead of applying the op
+        // a second time.
         const _desktopAppliedRids = new Map();
+        const _desktopInflight = new Map();
+        const _desktopRunlessEpoch = new Map();     // hostId -> int
         const _DESKTOP_RID_CACHE_MAX = 128;
-        function _desktopRememberRid(rid, payload) {
-            _desktopAppliedRids.delete(rid);
-            _desktopAppliedRids.set(rid, payload);
+        function _desktopRememberRid(key, payload) {
+            _desktopAppliedRids.delete(key);
+            _desktopAppliedRids.set(key, payload);
             while (_desktopAppliedRids.size > _DESKTOP_RID_CACHE_MAX) {
                 _desktopAppliedRids.delete(_desktopAppliedRids.keys().next().value);
             }
+        }
+        function _desktopRpcBoot(ws, msg) {
+            if (typeof msg.bootId === 'string') return msg.bootId;
+            let st = null;
+            try {
+                if (typeof _ctlSockState !== 'undefined' && ws
+                        && typeof ws === 'object') st = _ctlSockState.get(ws);
+            } catch (_) {}
+            return (st && typeof st.bootId === 'string') ? st.bootId : '';
+        }
+        function _desktopRpcKey(hid, boot, rid) {
+            const epoch = boot === '' ? (_desktopRunlessEpoch.get(hid) || 0) : 0;
+            return JSON.stringify([hid, boot, epoch, rid]);
+        }
+        // #250: a broker that names no run (pre-#248) numbers rids from 1
+        // again after a restart, and a new socket to it is the only sign of
+        // one (it never pongs, so the page never dials a replacement beside
+        // a live socket): its first status starts a new epoch for that host.
+        // An old-run op still in flight keeps the key it was given at
+        // receipt, so the new run's rid N neither waits for it nor is
+        // overwritten by its late answer; the old answers age out of the
+        // bounded cache.
+        function _desktopForgetRun(hid) {
+            _desktopRunlessEpoch.set(hid, (_desktopRunlessEpoch.get(hid) || 0) + 1);
         }
         // One of the TWO /control send sites in this fragment (the
         // terminal-funnel enumeration pins each count: `ws.send` here and
@@ -1037,8 +1078,32 @@
         function desktopWsSend(ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
         }
-        function desktopLeaseLost() {
-            try { return _deactivated === true; } catch (_) { return false; }
+        // Whether an rpc from host `hid` (run `boot`, lease generation `gen`)
+        // may no longer be applied. Re-checked at entry and after every
+        // await (#250):
+        //  1. the home view is torn down (it takes every window with it);
+        //  2. a REMOTE host's lease was lost -- that only masks the host
+        //     (pollStateFor(hid).leaseInactive), it never sets _deactivated;
+        //  3. this host's newest status, of the rpc's run, is a newer
+        //     generation than the one the rpc was sent under;
+        //  4. this host's newest status is of ANOTHER run: the caller of a
+        //     dead run is gone, so fail closed.
+        function desktopLeaseLost(hid, rec, boot, gen) {
+            try { if (_deactivated === true) return true; } catch (_) {}
+            if (typeof hid === 'string' && typeof homeHostId === 'function'
+                    && hid !== homeHostId()
+                    && typeof pollStateFor === 'function') {
+                const ps = pollStateFor(hid);
+                if (ps && ps.leaseInactive === true) return true;
+            }
+            if (rec && boot) {
+                if (typeof rec.leaseBoot === 'string'
+                        && rec.leaseBoot !== boot) return true;
+                if (Number.isSafeInteger(gen) && rec.leaseBoot === boot
+                        && typeof rec.leaseGen === 'number'
+                        && rec.leaseGen > gen) return true;
+            }
+            return false;
         }
         function desktopReply(rec, ws, rid, payload) {
             // Socket identity: a reply rides the socket that delivered the
@@ -1370,6 +1435,10 @@
         async function handleDesktopRpc(hid, rec, ws, msg) {
             let out = null;
             let rid = msg ? msg.rid : undefined;
+            let ckey = null, settle = null, boot = '', gen = null;
+            const lost = function () {
+                return desktopLeaseLost(hid, rec, boot, gen);
+            };
             try {
                 if (!Number.isInteger(rid)
                         || !msg || typeof msg.op !== 'string') {
@@ -1378,11 +1447,24 @@
                         { ok: false, error: 'bad_args', detail: 'rid' });
                     return;
                 }
-                const cached = _desktopAppliedRids.get(rid);
+                // The call's identity, resolved before any await (#250).
+                boot = _desktopRpcBoot(ws, msg);
+                gen = msg.gen;      // validated by desktopLeaseLost
+                ckey = _desktopRpcKey(hid, boot, rid);
+                const cached = _desktopAppliedRids.get(ckey);
                 if (cached !== undefined) {
                     desktopReply(rec, ws, rid, cached);
                     return;
                 }
+                const pending = _desktopInflight.get(ckey);
+                if (pending !== undefined) {
+                    const first = await pending;
+                    if (first !== null) desktopReply(rec, ws, rid, first);
+                    return;
+                }
+                _desktopInflight.set(ckey, new Promise(function (res) {
+                    settle = res;
+                }));
                 const argsOf = function () {
                     return (msg.args && typeof msg.args === 'object'
                         && !Array.isArray(msg.args)) ? msg.args : {};
@@ -1398,7 +1480,7 @@
                     }
                     return [];
                 };
-                if (desktopLeaseLost()) {
+                if (lost()) {
                     out = { ok: false, error: 'lost_lease' };
                 } else if (_DESKTOP_OPS[msg.op] === true) {
                     const args = argsOf();
@@ -1412,7 +1494,7 @@
                         if (typeof _execModCommand === 'function') {
                             wsr = await _execModCommand('workspaces:list');
                         }
-                        if (desktopLeaseLost()) {
+                        if (lost()) {
                             out = { ok: false, error: 'lost_lease' };
                         } else {
                             out = { ok: true,
@@ -1423,10 +1505,10 @@
                         if (out.ok) {
                             // Flush before ack: success means the /state
                             // write was attempted under our lease.
-                            if (!desktopLeaseLost()) {
+                            if (!lost()) {
                                 try { await pushState(); } catch (_) {}
                             }
-                            if (desktopLeaseLost()) {
+                            if (lost()) {
                                 out = { ok: false, error: 'lost_lease' };
                             }
                         }
@@ -1454,7 +1536,7 @@
                             r = await _execModCommand(msg.op, args);
                         }
                         if (r !== null) {
-                            out = desktopLeaseLost()
+                            out = lost()
                                 ? { ok: false, error: 'lost_lease' }
                                 : desktopCommandResult(r);
                             // Flush before ack, exactly as the core branch
@@ -1463,10 +1545,10 @@
                             // the lease is re-checked after the flush.
                             if (out.ok === true
                                     && msg.op !== 'workspaces:list') {
-                                if (!desktopLeaseLost()) {
+                                if (!lost()) {
                                     try { await pushState(); } catch (_) {}
                                 }
-                                if (desktopLeaseLost()) {
+                                if (lost()) {
                                     out = { ok: false, error: 'lost_lease' };
                                 }
                             }
@@ -1479,8 +1561,16 @@
                 out = { ok: false, error: 'error',
                         detail: String((e && e.message) || e) };
             }
-            if (out !== null) {
-                _desktopRememberRid(rid, out);
-                desktopReply(rec, ws, rid, out);
+            try {
+                if (out !== null) {
+                    _desktopRememberRid(ckey, out);
+                    desktopReply(rec, ws, rid, out);
+                }
+            } finally {
+                // Remembered first, so a duplicate never finds neither.
+                if (settle !== null) {
+                    _desktopInflight.delete(ckey);
+                    settle(out);
+                }
             }
         }

@@ -4312,7 +4312,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # is loop-confined like the rest of the relay state.
     app.ctx.lease_generation = 0
     app.ctx.desktop_rpcs = {}
-    app.ctx.desktop_rid = itertools.count(1)
+    # #250: each run starts its rids at a random offset. A page that
+    # survives a broker restart may still run JS that caches answers by rid
+    # alone; a run counting from 1 again would be served the old run's
+    # answers. Positive and far below 2**53, so the page's
+    # Number.isInteger and _desktop_result's rid > 0 both still hold.
+    app.ctx.desktop_rid = itertools.count(secrets.randbelow(2 ** 40) + 1)
     app.ctx.desktop_rpc_timeout_s = DESKTOP_RPC_TIMEOUT_S
 
     async def _bounded(coro, timeout):
@@ -7918,9 +7923,35 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # snapshot above and the registration below -- an await here opens a
         # window where a deposed holder is sent the call.
         frame = protocol.desktop_rpc_frame(rid, op, dict(args,
-                                                         visible=visible))
+                                                         visible=visible),
+                                           gen=generation,
+                                           boot_id=ctxd.boot_id)
         future = loop.create_future()
         ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
+        # #250 A6: whether ANY send of the frame was started. A browser that
+        # read the rpc before it learned it was deposed may have applied (and
+        # even persisted) the op, so a lost_lease after dispatch cannot
+        # promise "not applied"; dispatched:false can (no browser was ever
+        # handed the frame), and the client tells the agent which.
+        dispatched = False
+
+        def _lost_lease():
+            return {"http": sanic_json({"error": "lost_lease",
+                                        "dispatched": dispatched},
+                                       status=409)}
+
+        async def _send_rpc(sock):
+            nonlocal dispatched
+            # #250: a takeover can land between the registration above and
+            # this task's first step (wait_for schedules it; a become_active
+            # already queued runs first), so the holder may be deposed by
+            # now. Write only while the call's generation is still the live
+            # one -- read in the send task itself, with no lock: every bump
+            # changes lease_generation before its status send starts.
+            if ctxd.lease_generation != generation:
+                raise _DesktopLeaseLost()
+            dispatched = True
+            await sock.send(frame)
         try:
             sent = False
             stalled = False
@@ -7936,9 +7967,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # The last socket gets everything that remains.
                 budget = remaining / (len(sockets) - i)
                 try:
-                    await asyncio.wait_for(sock.send(frame), budget)
+                    await asyncio.wait_for(_send_rpc(sock), budget)
                     sent = True
                     break
+                except _DesktopLeaseLost:
+                    # The bump already failed the future (it runs under
+                    # lease_lock); retrieve it so asyncio never logs "Future
+                    # exception was never retrieved".
+                    if future.done():
+                        future.exception()
+                    return _lost_lease()
                 except asyncio.TimeoutError:
                     stalled = True   # this socket stalled: try the next
                     # #248: a send cancelled mid-frame leaves the socket
@@ -7956,14 +7994,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if stalled:
                     return {"http": sanic_json(
                         {"error": "desktop_timeout"}, status=504)}
-                return {"http": sanic_json({"error": "lost_lease"},
-                                           status=409)}
+                return _lost_lease()
             try:
                 return await asyncio.wait_for(
                     future, max(0.0, deadline - loop.time()))
             except _DesktopLeaseLost:
-                return {"http": sanic_json({"error": "lost_lease"},
-                                           status=409)}
+                return _lost_lease()
             except asyncio.TimeoutError:
                 return {"http": sanic_json({"error": "desktop_timeout"},
                                            status=504)}
@@ -7987,7 +8023,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if code == "bad_args":
             return sanic_json({"error": "bad_args",
                                "detail": outcome.get("detail")}, status=400)
-        if code == "not_home" or code == "lost_lease":
+        if code == "lost_lease":
+            # #250 A6: the BROWSER answered, so it was handed the op (the same
+        # "dispatched" as a send that was started).
+            return sanic_json({"error": code, "dispatched": True},
+                              status=409)
+        if code == "not_home":
             return sanic_json({"error": code}, status=409)
         if code == "needs_confirm":
             # The wire contract's detail is {count: int}; the HTTP answer is
