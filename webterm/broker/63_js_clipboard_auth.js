@@ -533,7 +533,9 @@
         })();
 
         // Every fetch / WS dial goes through these: same-origin for the local
-        // host, the stored origin for remotes, each host's own token attached.
+        // host, the stored origin for remotes, each host's own token attached
+        // -- and, for a host reached through this broker (#252), this
+        // origin's /peer/<id>/ prefix with both tokens (see _peerFetch).
         //
         // HTTP sends the token as `Authorization: Bearer`, never in the query
         // string (#144). A URL credential leaks everywhere a header does not:
@@ -551,10 +553,28 @@
         // the CORS sense (that needs credentials:'include'), so `*` remains
         // legal and a wrong token still returns a READABLE 401 rather than an
         // opaque failure — which is what keeps the login overlay working.
+        // #252: the proxy's browser gate. The page sends THIS broker's token
+        // as the bearer, the proxied host's token in PEER_TOKEN_HEADER, and
+        // the origin that token was paired with in PEER_ORIGIN_HEADER. The
+        // names are spelled once here; webterm/broker/peers.py holds the
+        // server's copy and a test pins the two equal.
+        const PEER_TOKEN_HEADER = 'X-Browserland-Peer-Token';
+        const PEER_ORIGIN_HEADER = 'X-Browserland-Peer-Origin';
+        const PROXY_UNAVAILABLE_MSG = 'this broker cannot proxy';
         function hostUrl(host, path) {
+            // A proxied host is reached through THIS origin's /peer/ prefix.
+            // Its url is never dialed: that is the point of the mode. (The
+            // via test is spelled out, not hostIsProxied from 56, so this
+            // door still runs when a harness slices it alone.)
+            if (host && host.via === 'server') {
+                return '/peer/' + encodeURIComponent(host.peerId) + path;
+            }
             return ((host && host.url) ? host.url : '') + path;
         }
         function hostFetch(host, path, opts) {
+            if (host && host.via === 'server') {
+                return _peerFetch(host, path, opts);
+            }
             const o = Object.assign({}, opts || {});
             // Headers(), NOT Object.assign: a caller passing a real Headers
             // instance (or an array of pairs) would spread to {} and SILENTLY
@@ -627,7 +647,63 @@
                 }
             });
         }
+        // #252: a proxied host's HTTP. Fails CLOSED: a broker that cannot
+        // proxy (no peers, no proxy extra, or a build before #252), or does
+        // not publish this peer, answers a synthetic 503 here and nothing is
+        // dialed -- never a silent fall back to host.url, which would hand
+        // the host's token straight to the host this mode exists to avoid.
+        // A failed read of this broker's /info rejects like a down host.
+        async function _peerFetch(host, path, opts) {
+            const info = await localPeers();
+            if (!info.proxy || typeof info.peers[host.peerId] !== 'string') {
+                return new Response(JSON.stringify({
+                    ok: false, error: 'proxy_unavailable',
+                    message: PROXY_UNAVAILABLE_MSG }), {
+                    status: 503,
+                    headers: { 'Content-Type': 'application/json' } });
+            }
+            const o = Object.assign({}, opts || {});
+            const headers = new Headers(o.headers || undefined);
+            // The bearer is THIS broker's token, set by hostFetch below from
+            // the transport host; never one a caller slipped in.
+            headers.delete('Authorization');
+            if (host.token) headers.set(PEER_TOKEN_HEADER, host.token);
+            else headers.delete(PEER_TOKEN_HEADER);
+            headers.set(PEER_ORIGIN_HEADER, host.peerOrigin || '');
+            o.headers = headers;
+            // Same origin, this broker's token, the /peer/<id> path: the one
+            // door's own header and deadline handling, unchanged.
+            const r = await hostFetch({ url: '', token: localHost().token },
+                                      hostUrl(host, path), o);
+            if (r.status !== 409) return r;
+            // 409 is also an answer B can give (a mod-store revision clash),
+            // so only THIS broker's pairing refusal is acted on.
+            let j = null;
+            try { j = await r.clone().json(); } catch (_) {}
+            if (!j || j.error !== 'peer_origin_changed') return r;
+            // This broker now publishes the peer somewhere else: the token
+            // was paired with the old origin. Drop it, re-read /info (which
+            // re-pairs), and answer as a 401 so the login overlay and the
+            // amber chip take over exactly as for a rotated password.
+            forgetLocalPeers();
+            const live = hostById(host.id);
+            if (live && hostIsProxied(live)) {
+                live.token = '';
+                live.peerOrigin = '';
+                savePrefs();
+                try { invalidateHost(live.id); } catch (_) {}
+            }
+            try { await localPeers(); } catch (_) {}
+            return new Response(JSON.stringify({
+                ok: false, error: 'auth_required' }), {
+                status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
         function hostWsUrl(host, path) {
+            // #252 phase 1: a proxied host's sockets are not relayed yet
+            // (phase 2 brings a ticketed /ws and /control). null means "do
+            // not connect": every dial site checks it, and a proxied host's
+            // url is never dialed, so B's token never rides a URL to B.
+            if (host && host.via === 'server') return null;
             let base;
             if (host && host.url) {
                 base = host.url.replace(/^http/, 'ws');
@@ -709,6 +785,7 @@
             if (authSubmitting) return;   // Enter + click: one probe, not two
             const gen = authGeneration;   // see authGeneration above
             let resp;
+            let probe = null;
             authSubmitting = true;
             const prevLabel = authSubmitBtn ? authSubmitBtn.textContent : '';
             if (authSubmitBtn) {
@@ -722,8 +799,18 @@
                 // header, so a leftover query token would silently win over
                 // the header and make a correct password look wrong -- and the
                 // probe URL would land in Resource Timing like any other.
-                resp = await hostFetch({ url: host.url, token: candidate },
-                                       '/sessions');
+                // #252: a proxied host is probed through the prefix, and the
+                // candidate is paired with the origin this broker publishes
+                // for it right now -- the pairing stored below with it.
+                probe = { url: host.url, token: candidate };
+                if (host.via === 'server') {
+                    const info = await localPeers();
+                    const origin = info.peers[host.peerId];
+                    probe = Object.assign({}, host, {
+                        token: candidate,
+                        peerOrigin: typeof origin === 'string' ? origin : '' });
+                }
+                resp = await hostFetch(probe, '/sessions');
             } catch (err) {
                 if (gen !== authGeneration) return;   // dialog already dismissed
                 // hostFetch's deadline surfaces as a TimeoutError DOMException.
@@ -761,6 +848,7 @@
                 return;
             }
             host.token = candidate;
+            if (host.via === 'server') host.peerOrigin = probe.peerOrigin;
             savePrefs();
             authPrompted.delete(host.id);   // future failures may pop again
             const st = hostPolls.get(host.id);

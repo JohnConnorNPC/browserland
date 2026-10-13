@@ -24246,7 +24246,7 @@ _TERM_FUNNEL_EXPECTED = {
     ("67_js_window_lifecycle.js", "win.ws.send"): (1, "input"),
     ("67_js_window_lifecycle.js", "term.paste"): (1, "input"),
     ("67_js_window_lifecycle.js", "term.onData"): (1, "input"),
-    ("73_js_window_runtime.js", "win.term.write"): (7, "output"),
+    ("73_js_window_runtime.js", "win.term.write"): (8, "output"),
     ("73_js_window_runtime.js", "win.term.resize"): (1, "resize-apply"),
     ("73_js_window_runtime.js", "win.ws.send"): (1, "resize-wire"),
 }
@@ -25144,7 +25144,7 @@ def test_every_core_write_site_reaches_a_tap_exactly_once(taps_harness):
                         for _a, _b, line, text in _write_dispatch_pairs()])
     r = _run_taps(taps_harness, "every_write_site", pairs)
     assert r["errors"] == []
-    assert len(r["sites"]) == 7
+    assert len(r["sites"]) == 8
     for s in r["sites"]:
         assert s["err"] is None, s
         assert s["writes"] == 1 and s["taps"] == 1, s

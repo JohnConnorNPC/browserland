@@ -19,6 +19,16 @@
                 if (typeof h.token !== 'string') h.token = '';
                 if (typeof h.hidden !== 'boolean') h.hidden = false;
                 if (typeof h.color !== 'string') h.color = '';
+                // #252: a proxied host keeps its three fields only as a set;
+                // anything else is an ordinary direct host.
+                if (h.via === 'server' && typeof h.peerId === 'string'
+                        && h.peerId) {
+                    if (typeof h.peerOrigin !== 'string') h.peerOrigin = '';
+                } else {
+                    delete h.via;
+                    delete h.peerId;
+                    delete h.peerOrigin;
+                }
                 clean.push(h);
             }
             if (!local) local = { id: 'local' };
@@ -31,11 +41,83 @@
             prefs._hosts = clean;
             return clean;
         }
+        // #252: is this host reached through this broker's /peer/ prefix?
+        function hostIsProxied(h) {
+            return !!(h && h.via === 'server');
+        }
         function allHosts() { return getHosts(); }
         function localHost() { return getHosts()[0]; }
         function hostById(id) {
             for (const h of getHosts()) { if (h.id === id) return h; }
             return null;
+        }
+
+        // ---- hosts reached THROUGH this broker (#252, "from server") ---------
+        // A record with via: 'server' + peerId is a broker this page reaches
+        // through /peer/<peerId>/ on its OWN origin (hostFetch, 63): the
+        // phone or browser dials only this broker. `peerId` names an entry in
+        // this broker's `peers` config; its origin lives there, not here.
+        // `url` is display only (and the OSC 52 key), kept equal to the origin
+        // this broker publishes. `peerOrigin` is the origin the stored token
+        // was PAIRED with: the token belongs to (peerId, origin), and a peer
+        // this broker now publishes elsewhere loses it (rePairPeers).
+        // (hostIsProxied sits beside getHosts, above.)
+        // This broker's published peers ({id: origin}) and whether it can
+        // proxy at all, from same-origin /info. Only an OK answer is
+        // memoized: a failed read is asked again by the next caller (on the
+        // host polls' own cadence, never a loop), so one bad moment at boot
+        // does not leave every proxied host reading "cannot proxy" until a
+        // reload. A broker without `peer_proxy` predates the feature: proxy
+        // false, which fails every proxied host CLOSED.
+        let _localPeersP = null;
+        function localPeers() {
+            if (!_localPeersP) {
+                const p = (async function () {
+                    const r = await hostFetch(localHost(), '/info');
+                    if (!r.ok) throw new Error('/info: HTTP ' + r.status);
+                    const j = await r.json();
+                    const peers = Object.create(null);
+                    const raw = (j && typeof j.peers === 'object'
+                        && !Array.isArray(j.peers)) ? j.peers : null;
+                    if (raw) {
+                        for (const k of Object.keys(raw)) {
+                            if (typeof raw[k] === 'string') peers[k] = raw[k];
+                        }
+                    }
+                    return { proxy: !!(j && j.peer_proxy === true),
+                             peers: peers };
+                })();
+                _localPeersP = p;
+                p.catch(function () {
+                    if (_localPeersP === p) _localPeersP = null;
+                });
+            }
+            return _localPeersP.then(function (info) {
+                rePairPeers(info);
+                return info;
+            });
+        }
+        // Drop the memo, so the next caller reads /info again (a 409
+        // peer_origin_changed says the memo is stale).
+        function forgetLocalPeers() { _localPeersP = null; }
+        // Runs on every resolve: a proxied host whose peer is now published
+        // at a DIFFERENT origin than its token was paired with loses the
+        // token (it was entered for another machine), and its display url
+        // follows the published origin. A peer that is not published at all
+        // is left alone: hostFetch fails it closed without dialing.
+        function rePairPeers(info) {
+            for (const h of getHosts()) {
+                if (!hostIsProxied(h)) continue;
+                const origin = info.peers[h.peerId];
+                if (typeof origin !== 'string' || h.peerOrigin === origin) {
+                    continue;
+                }
+                h.token = '';
+                h.peerOrigin = origin;
+                h.url = origin;
+                savePrefs();
+                try { invalidateHost(h.id); } catch (_) {}
+            }
         }
         // #190: a host added after this page's boot can't be reached until
         // reload. The CSP is per-document — a loaded page keeps the
@@ -90,6 +172,11 @@
             const seen = new Set();
             for (const h of getHosts()) {
                 if (out.length >= CSP_COOKIE_MAX_ORIGINS) break;
+                // #252: a proxied host is reached through THIS origin, so its
+                // url is never a connect-src this page needs. Skipping it also
+                // makes a call site that bypassed hostFetch's proxy branch
+                // fail closed once the full CSP enforces.
+                if (hostIsProxied(h)) continue;
                 const raw = (h && typeof h.url === 'string') ? h.url.trim() : '';
                 if (!raw) continue;          // the local host is '' = same-origin
                 let u;

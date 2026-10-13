@@ -31,6 +31,20 @@
             const url = hostWsUrl(host,
                 '/ws?session=' + encodeURIComponent(win.sid)
                 + '&clientId=' + encodeURIComponent(CLIENT_ID));
+            if (url === null) {
+                // #252 phase 1: a host reached through this broker has no
+                // terminal socket yet. Say so once per window, and do not
+                // dial: nothing is scheduled, so nothing reconnects.
+                if (!win.proxyNoticeShown) {
+                    win.proxyNoticeShown = true;
+                    const _note = 'proxied terminals arrive in the next phase';
+                    try {
+                        win.term.write(_note + '\r\n');
+                        dispatchTermOut(win, _note + '\r\n');
+                    } catch (_) {}
+                }
+                return;
+            }
             const ws = new WebSocket(url);
             ws.binaryType = 'arraybuffer';
             win.ws = ws;

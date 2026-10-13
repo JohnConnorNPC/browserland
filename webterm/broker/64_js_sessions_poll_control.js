@@ -347,6 +347,9 @@
 
         function openControlWs(host) {
             if (!host) return;
+            // #252 phase 1: a proxied host has no /control yet (hostWsUrl
+            // answers null). No socket, no record, and so no reattach timer.
+            if (hostWsUrl(host, '/control') === null) return;
             const hid = host.id;
             const existing = controlSockets.get(hid);
             if (existing && existing.ws && (
@@ -377,6 +380,7 @@
                 url = hostWsUrl(host, '/control?clientId='
                     + encodeURIComponent(CLIENT_ID));
             } catch (e) { return null; }
+            if (url === null) return null;     // #252: do not connect
             let ws;
             try { ws = new WebSocket(url); }
             catch (e) {

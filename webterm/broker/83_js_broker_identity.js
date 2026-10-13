@@ -6,7 +6,7 @@
         // is stored on the host record under `brokerId` (browser-local — never
         // pushed to /state, see _stateBlob) and is best-effort: an older broker
         // (404) or an auth/transport miss simply leaves it unknown.
-        async function probeBrokerId(url, token, out) {
+        async function probeBrokerId(url, token, out, host) {
             // Cross-origin /info probe. Returns the broker_id string, or null on
             // any failure (404 older broker, 401 wrong token, network) — caller
             // treats null as "unknown identity, allow with no warning".
@@ -16,8 +16,12 @@
             // all, `out.timedOut` = hostFetch's deadline fired. The return value
             // is unchanged, so callers that pass nothing (the background identity
             // refresh) behave exactly as before.
+            // #252: `host`, when given, is the RECORD being probed, so a host
+            // reached through this broker goes through hostFetch's proxy
+            // branch (a bare {url, token} would dial its url directly).
+            const target = host ? Object.assign({}, host) : { url, token };
             try {
-                const r = await hostFetch({ url, token }, '/info');
+                const r = await hostFetch(target, '/info');
                 if (out) out.reached = true;
                 if (!r.ok) {
                     if (out) out.status = r.status;
@@ -70,7 +74,8 @@
                     if (h.id === 'local' || h.brokerId) continue;
                     // The url this answer is ABOUT, captured before the await.
                     const probedUrl = h.url;
-                    const id = await probeBrokerId(h.url, h.token);
+                    const id = await probeBrokerId(h.url, h.token,
+                                                   undefined, h);
                     // #200: only write it back if the record still points where
                     // it pointed when we asked. A repoint DURING the probe would
                     // otherwise land the old broker's verified identity on the
