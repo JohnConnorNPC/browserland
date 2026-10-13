@@ -560,6 +560,9 @@
         // server's copy and a test pins the two equal.
         const PEER_TOKEN_HEADER = 'X-Browserland-Peer-Token';
         const PEER_ORIGIN_HEADER = 'X-Browserland-Peer-Origin';
+        // Set only by THIS broker on its own /peer/* refusals; a relayed
+        // answer can never carry it (peers.py's response allowlist).
+        const PEER_REFUSAL_HEADER = 'X-Browserland-Peer-Refusal';
         const PROXY_UNAVAILABLE_MSG = 'this broker cannot proxy';
         function hostUrl(host, path) {
             // A proxied host is reached through THIS origin's /peer/ prefix.
@@ -667,32 +670,43 @@
             // The bearer is THIS broker's token, set by hostFetch below from
             // the transport host; never one a caller slipped in.
             headers.delete('Authorization');
-            if (host.token) headers.set(PEER_TOKEN_HEADER, host.token);
+            // What this request carried, so a late refusal can tell whether
+            // the record still holds it (a newer password must survive).
+            const sentToken = host.token || '';
+            const sentOrigin = host.peerOrigin || '';
+            if (sentToken) headers.set(PEER_TOKEN_HEADER, sentToken);
             else headers.delete(PEER_TOKEN_HEADER);
-            headers.set(PEER_ORIGIN_HEADER, host.peerOrigin || '');
+            headers.set(PEER_ORIGIN_HEADER, sentOrigin);
             o.headers = headers;
             // Same origin, this broker's token, the /peer/<id> path: the one
             // door's own header and deadline handling, unchanged.
             const r = await hostFetch({ url: '', token: localHost().token },
                                       hostUrl(host, path), o);
-            if (r.status !== 409) return r;
             // 409 is also an answer B can give (a mod-store revision clash),
-            // so only THIS broker's pairing refusal is acted on.
-            let j = null;
-            try { j = await r.clone().json(); } catch (_) {}
-            if (!j || j.error !== 'peer_origin_changed') return r;
+            // and B writes B's bodies: only THIS broker's marker header says
+            // the pairing was refused.
+            if (r.status !== 409
+                    || r.headers.get(PEER_REFUSAL_HEADER)
+                        !== 'peer_origin_changed') {
+                return r;
+            }
             // This broker now publishes the peer somewhere else: the token
-            // was paired with the old origin. Drop it, re-read /info (which
-            // re-pairs), and answer as a 401 so the login overlay and the
-            // amber chip take over exactly as for a rotated password.
+            // was paired with the old origin. Drop it -- unless the record
+            // has moved on since this request left (a password entered
+            // meanwhile must not be erased by a stale answer) -- re-read
+            // /info (which re-pairs), and answer as a 401 so the login
+            // overlay and the amber chip take over as for a rotated password.
             forgetLocalPeers();
             const live = hostById(host.id);
-            if (live && hostIsProxied(live)) {
-                live.token = '';
-                live.peerOrigin = '';
-                savePrefs();
-                try { invalidateHost(live.id); } catch (_) {}
+            if (!live || !hostIsProxied(live)
+                    || (live.token || '') !== sentToken
+                    || (live.peerOrigin || '') !== sentOrigin) {
+                return r;
             }
+            live.token = '';
+            live.peerOrigin = '';
+            savePrefs();
+            try { invalidateHost(live.id); } catch (_) {}
             try { await localPeers(); } catch (_) {}
             return new Response(JSON.stringify({
                 ok: false, error: 'auth_required' }), {

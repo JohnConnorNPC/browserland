@@ -37,6 +37,11 @@
             if (typeof local.token !== 'string') local.token = '';
             if (typeof local.hidden !== 'boolean') local.hidden = false;
             if (typeof local.color !== 'string') local.color = '';
+            // #252: the local host IS this broker; it is never reached through
+            // itself (hostFetch would loop through localPeers).
+            delete local.via;
+            delete local.peerId;
+            delete local.peerOrigin;
             clean.unshift(local);
             prefs._hosts = clean;
             return clean;

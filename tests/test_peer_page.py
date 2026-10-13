@@ -86,7 +86,9 @@ async function fetch(url, o) {
     }
     if (peerAnswer) {
         const a = peerAnswer;
-        return new Response(JSON.stringify(a.body), { status: a.status });
+        if (a.hook) a.hook();
+        return new Response(JSON.stringify(a.body), {
+            status: a.status, headers: a.headers || {} });
     }
     return new Response('[]', { status: 200 });
 }
@@ -227,7 +229,9 @@ def test_a_pairing_409_clears_the_token_and_reads_as_401(tmp_path):
     out = _run(tmp_path, _prefs(), """
 infoAnswers = [INFO, INFO];
 peerAnswer = { status: 409, body: { ok: false,
-                                     error: 'peer_origin_changed' } };
+                                     error: 'peer_origin_changed' },
+               headers: { 'X-Browserland-Peer-Refusal':
+                          'peer_origin_changed' } };
 const r = await hostFetch(hostById('rb'), '/sessions');
 const j = await r.json();
 return { status: r.status, body: j, host: hostById('rb'),
@@ -397,5 +401,52 @@ def test_header_names_match_the_server():
     assert f"const PEER_TOKEN_HEADER = '{peers.PEER_TOKEN_HEADER}';" in s63
     assert f"const PEER_ORIGIN_HEADER = '{peers.PEER_ORIGIN_HEADER}';" in s63
     page = "".join(_src(n) for n in ui._ORDERED if n.endswith(".js"))
-    for name in (peers.PEER_TOKEN_HEADER, peers.PEER_ORIGIN_HEADER):
+    assert (f"const PEER_REFUSAL_HEADER = '{peers.PEER_REFUSAL_HEADER}';"
+            in s63)
+    for name in (peers.PEER_TOKEN_HEADER, peers.PEER_ORIGIN_HEADER,
+                 peers.PEER_REFUSAL_HEADER):
         assert page.count(name) == 1, name
+
+
+def test_a_peer_cannot_forge_the_pairing_refusal(tmp_path):
+    """B writes B's bodies: the reserved error string in a relayed 409,
+    without THIS broker's marker header, must not cost the token."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO];
+peerAnswer = { status: 409, body: { ok: false,
+                                     error: 'peer_origin_changed' } };
+const r = await hostFetch(hostById('rb'), '/sessions');
+return { status: r.status, host: hostById('rb') };
+""".replace("INFO", json.dumps(INFO)))
+    assert out["status"] == 409
+    assert out["host"]["token"] == B_TOKEN
+
+
+def test_a_stale_refusal_cannot_erase_a_newer_password(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO];
+peerAnswer = { status: 409, body: {},
+               headers: { 'X-Browserland-Peer-Refusal':
+                          'peer_origin_changed' },
+               // the user re-entered the password while this was in flight
+               hook: () => { hostById('rb').token = 'NEWER'; } };
+const r = await hostFetch(hostById('rb'), '/sessions');
+return { status: r.status, host: hostById('rb') };
+""".replace("INFO", json.dumps(INFO)))
+    assert out["status"] == 409
+    assert out["host"]["token"] == "NEWER"
+
+
+def test_the_local_host_is_never_proxied(tmp_path):
+    prefs = _prefs()
+    prefs["_hosts"][0].update(via="server", peerId="b", peerOrigin="x")
+    out = _run(tmp_path, prefs, """
+infoAnswers = [INFO];
+const local = localHost();
+const r = await hostFetch(local, '/info');
+return { local: local, status: r.status, calls: calls };
+""".replace("INFO", json.dumps(INFO)))
+    for key in ("via", "peerId", "peerOrigin"):
+        assert key not in out["local"]
+    assert out["status"] == 200
+    assert [c["url"] for c in out["calls"]] == ["/info"]
