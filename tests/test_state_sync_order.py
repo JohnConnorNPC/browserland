@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 75
+EXPECTED_ASSERTS = 76
 
 _HARNESS = r"""
 'use strict';
@@ -90,6 +90,7 @@ function mkWorld() {
         else if (mode === '413') resp = { ok: false, status: 413, json: async () => ({ ok: false, error: 'too_large' }) };
         else if (mode === '400verdict') resp = { ok: false, status: 400, json: async () => ({ ok: false, error: 'bad_json' }) };
         else if (mode === '400proxy') resp = { ok: false, status: 400, json: async () => { throw new Error('html'); } };
+        else if (mode === '400json') resp = { ok: false, status: 400, json: async () => ({ ok: false, error: 'proxy_error' }) };
         else if (mode === '500') resp = { ok: false, status: 500, json: async () => ({}) };
         else if (mode === '409empty') resp = { ok: false, status: 409, json: async () => ({}) };
         else if (mode === '409revonly') resp = { ok: false, status: 409, json: async () => ({ rev: 9 }) };
@@ -730,6 +731,16 @@ function mkWorld() {
     await tick(w);
     ok(z5b === 4 && w.puts.length === 4 && w.cols() === J(['KEEP']) && w.notices.length === 0,
         'Z5b repeated proxy 400s ride the retry ladder (3 fast retries, then back-off)');
+    // Z5c: a JSON-bodied 400 naming no broker verdict is a proxy 400 too:
+    // only the verdict allowlist settles, so it rides the ladder and lands.
+    w = mkWorld(); await w.boot();
+    w.putMode = '400json'; w.edit(['KEEP']); await w.firePush();
+    for (let i = 0; i < 3; i++) await tick(w);
+    await tick(w);                                                     // backed off: no 5th PUT
+    const z5cHeld = w.puts.length === 4 && w.cols() === J(['KEEP']) && w.notices.length === 0;
+    w.putMode = null; w.perf += 4000; await tick(w);
+    ok(z5cHeld && w.puts.length === 5 && w.srv() === J(['KEEP']) && w.cols() === J(['KEEP']) && w.notices.length === 0,
+        'Z5c a 400 whose JSON names no broker verdict is a proxy 400: kept, on the ladder, then lands');
 
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
@@ -931,6 +942,7 @@ def test_247_z4_superseded_initial_pull(run, label):
 @pytest.mark.parametrize("label", [
     "Z5 a proxy 400 keeps the edit on screen and the next poll retries it until it lands",
     "Z5b repeated proxy 400s ride the retry ladder (3 fast retries, then back-off)",
+    "Z5c a 400 whose JSON names no broker verdict is a proxy 400: kept, on the ladder, then lands",
 ])
 def test_247_z5_proxy_400_is_a_failure(run, label):
     _ok(run, label)
