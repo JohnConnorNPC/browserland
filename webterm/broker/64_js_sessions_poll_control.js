@@ -541,6 +541,9 @@
                 // the socket's life, so it still names where an rpc came from
                 // after the socket is promoted away.
                 st.bootId = typeof msg.bootId === 'string' ? msg.bootId : null;
+                if (st.bootId === null && typeof _desktopForgetRun === 'function') {
+                    _desktopForgetRun(rec.hostId);
+                }
                 if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 // Capability from the FIRST status, per socket: a broker that
                 // stamps gen + bootId answers pings.
@@ -1017,17 +1020,47 @@
          'workspaces:send-window'].forEach(function (k) {
             _DESKTOP_WS_OPS[k] = true;
         });
-        // rid -> the desktop_result payload already sent. The broker sends
-        // each rpc to ONE designated socket, so a duplicate frame should be
-        // rare; this cache is the belt -- a replayed rid re-serves its answer
-        // without re-applying. Bounded; oldest evicted.
+        // The call's identity -> the desktop_result payload already sent. The
+        // broker sends each rpc to ONE designated socket, so a duplicate frame
+        // should be rare; this cache is the belt (best-effort duplicate
+        // suppression, not exactly-once) -- a replayed rpc re-serves its
+        // answer without re-applying. Bounded; oldest evicted.
+        //
+        // #250: a rid is unique only per BROKER RUN, so the key is
+        // JSON [hostId, bootId, rid]: another broker's rid N, or a restarted
+        // broker's, is a different call. The bootId is the frame's own (the
+        // run that numbered the rid), else the delivering socket's -- never
+        // rec.leaseBoot, which moves -- else '' for a broker that names no
+        // run. An rpc still being applied sits in _desktopInflight, so a
+        // duplicate that arrives meanwhile waits for its answer instead of
+        // applying the op a second time.
         const _desktopAppliedRids = new Map();
+        const _desktopInflight = new Map();
         const _DESKTOP_RID_CACHE_MAX = 128;
-        function _desktopRememberRid(rid, payload) {
-            _desktopAppliedRids.delete(rid);
-            _desktopAppliedRids.set(rid, payload);
+        function _desktopRememberRid(key, payload) {
+            _desktopAppliedRids.delete(key);
+            _desktopAppliedRids.set(key, payload);
             while (_desktopAppliedRids.size > _DESKTOP_RID_CACHE_MAX) {
                 _desktopAppliedRids.delete(_desktopAppliedRids.keys().next().value);
+            }
+        }
+        function _desktopRpcBoot(ws, msg) {
+            if (typeof msg.bootId === 'string') return msg.bootId;
+            let st = null;
+            try {
+                if (typeof _ctlSockState !== 'undefined' && ws
+                        && typeof ws === 'object') st = _ctlSockState.get(ws);
+            } catch (_) {}
+            return (st && typeof st.bootId === 'string') ? st.bootId : '';
+        }
+        // #250: a broker that names no run (pre-#248) numbers rids from 1
+        // again after a restart, and a new socket to it is the only sign of
+        // one (it never pongs, so the page never dials a replacement beside
+        // a live socket): its first status forgets that host's answers.
+        function _desktopForgetRun(hid) {
+            const pre = JSON.stringify([hid, '']).slice(0, -1) + ',';
+            for (const k of Array.from(_desktopAppliedRids.keys())) {
+                if (k.indexOf(pre) === 0) _desktopAppliedRids.delete(k);
             }
         }
         // One of the TWO /control send sites in this fragment (the
@@ -1370,6 +1403,7 @@
         async function handleDesktopRpc(hid, rec, ws, msg) {
             let out = null;
             let rid = msg ? msg.rid : undefined;
+            let ckey = null, settle = null;
             try {
                 if (!Number.isInteger(rid)
                         || !msg || typeof msg.op !== 'string') {
@@ -1378,11 +1412,23 @@
                         { ok: false, error: 'bad_args', detail: 'rid' });
                     return;
                 }
-                const cached = _desktopAppliedRids.get(rid);
+                // The call's identity, resolved before any await (#250).
+                const boot = _desktopRpcBoot(ws, msg);
+                ckey = JSON.stringify([hid, boot, rid]);
+                const cached = _desktopAppliedRids.get(ckey);
                 if (cached !== undefined) {
                     desktopReply(rec, ws, rid, cached);
                     return;
                 }
+                const pending = _desktopInflight.get(ckey);
+                if (pending !== undefined) {
+                    const first = await pending;
+                    if (first !== null) desktopReply(rec, ws, rid, first);
+                    return;
+                }
+                _desktopInflight.set(ckey, new Promise(function (res) {
+                    settle = res;
+                }));
                 const argsOf = function () {
                     return (msg.args && typeof msg.args === 'object'
                         && !Array.isArray(msg.args)) ? msg.args : {};
@@ -1479,8 +1525,16 @@
                 out = { ok: false, error: 'error',
                         detail: String((e && e.message) || e) };
             }
-            if (out !== null) {
-                _desktopRememberRid(rid, out);
-                desktopReply(rec, ws, rid, out);
+            try {
+                if (out !== null) {
+                    _desktopRememberRid(ckey, out);
+                    desktopReply(rec, ws, rid, out);
+                }
+            } finally {
+                // Remembered first, so a duplicate never finds neither.
+                if (settle !== null) {
+                    _desktopInflight.delete(ckey);
+                    settle(out);
+                }
             }
         }
