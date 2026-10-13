@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 88
+EXPECTED_ASSERTS = 93
 
 _HARNESS = r"""
 'use strict';
@@ -48,6 +48,11 @@ const src = fs.readFileSync(__SRC_PATH__, 'utf8');
 const a = src.indexOf(__START__), b = src.indexOf(__END__);
 if (a < 0 || b < a) throw new Error('section markers missing');
 const slice = src.slice(a, b);
+// #248 SH-1: the reply funnel lives in the desktop-relay section; cut just it.
+const ra = src.indexOf('        function desktopReply(rec, ws, rid, payload) {');
+const rb = src.indexOf('        // Broker-local int id (the DELIVERING connection');
+if (ra < 0 || rb < ra) throw new Error('desktopReply boundary missing');
+const replySrc = src.slice(ra, rb);
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -67,6 +72,7 @@ function mkWorld(opts) {
             this.closed = false; w.sockets.push(this);
         }
         send(t) {
+            this.attempts = (this.attempts || 0) + 1;
             if (this.readyState !== 1) throw new Error('not open');
             this.sent.push(JSON.parse(t));
         }
@@ -120,7 +126,7 @@ function mkWorld(opts) {
         controlKey: function (h, s) { return h + ':' + s; },
         applyControlView: function (k, m, src) { w.views.push(k + '/' + src); },
         handleDesktopRpc: function (hid, rec, ws, msg) {
-            w.rpcs.push({ hid: hid, rid: msg.rid, live: rec.ws === ws });
+            w.rpcs.push({ hid: hid, rid: msg.rid, live: rec.ws === ws, rec: rec, ws: ws });
         },
         desktopWsSend: function (ws, payload) {
             try { ws.send(JSON.stringify(payload)); } catch (_) {}
@@ -160,10 +166,11 @@ function mkWorld(opts) {
     if (opts.env) Object.assign(env, opts.env);
     w.env = env;
     const factory = new Function('env',
-        'with (env) {\n' + slice + '\n' +
+        'with (env) {\n' + slice + '\n' + replySrc + '\n' +
         'var __api = { openControlWs: openControlWs, closeControlWs: closeControlWs,\n' +
         '  controlSockets: controlSockets, sendBecomeActive: sendBecomeActive,\n' +
-        '  onControlStatus: onControlStatus, probeControl: probeControl };\n' +
+        '  onControlStatus: onControlStatus, probeControl: probeControl,\n' +
+        '  desktopReply: desktopReply };\n' +
         '}\nreturn __api;\n');
     w.api = factory(env);
     w.rec = function (hid) { return w.api.controlSockets.get(hid || 'local'); };
@@ -700,6 +707,42 @@ const nAfter = w.sockets.length;
 w.advance(60000);
 ok(w.sockets.length === nAfter, 'N7c ...and nothing re-dials a broker that needs a password');
 
+// ---- w1-4 SH-1: a reply survives a promotion on the same broker run ---------
+const RESULTS = function (ws) { return ws.sent.filter(m => m.type === 'desktop_result'); };
+function promoteMidRpc(bootOfReplacement) {
+    const w = mkWorld();
+    const s0 = connected(w, ST(true, { bootId: 'b1' }));
+    pong(s0, s0.lastPing().n);
+    s0._recv({ type: 'desktop_rpc', rid: 7, op: 'focus', args: {} });   // the op starts
+    const call = w.rpcs[0];
+    w.advance(25000);                    // next ping, unanswered
+    w.advance(10000);                    // miss -> replacement
+    const s1 = w.last(); s1._open(); s1._recv(ST(true, { bootId: bootOfReplacement }));
+    w.api.desktopReply(call.rec, call.ws, 7, { ok: true });          // the op finishes
+    return { w: w, s0: s0, s1: s1 };
+}
+let pm = promoteMidRpc('b1');
+ok(pm.w.rec().ws === pm.s1 && pm.s0.closed, 'R0 precondition: the delivering socket was promoted away mid-rpc');
+ok(RESULTS(pm.s1).length === 1 && RESULTS(pm.s1)[0].rid === 7 && RESULTS(pm.s0).length === 0,
+    'R1 same broker run: the reply goes out on the socket now in charge');
+pm = promoteMidRpc('b2');
+ok(RESULTS(pm.s1).length === 0 && RESULTS(pm.s0).length === 0,
+    'R2 a different broker run (bootId): the reply is dropped');
+w = mkWorld();
+s0 = connected(w, ST(true));
+s0._recv({ type: 'desktop_rpc', rid: 9, op: 'get', args: {} });
+w.api.desktopReply(w.rpcs[0].rec, w.rpcs[0].ws, 9, { ok: true });
+ok(RESULTS(s0).length === 1, 'R3 no promotion: the reply rides the delivering socket (unchanged)');
+pm = promoteMidRpc('b1');
+w = pm.w;
+s0 = pm.s0; s1 = pm.s1;
+s1.sent.length = 0;
+s1._drop(1006);                          // the socket in charge is gone too
+const att0 = s0.attempts || 0, att1 = s1.attempts || 0;
+w.api.desktopReply(w.rpcs[0].rec, w.rpcs[0].ws, 7, { ok: true });
+ok(RESULTS(s1).length === 0 && (s0.attempts || 0) === att0 && (s1.attempts || 0) === att1,
+    'R4 no socket in charge: dropped (no send attempted on any socket)');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -903,6 +946,17 @@ def test_w14_sh3_no_notice_beside_auth(run, label):
     "N7c ...and nothing re-dials a broker that needs a password",
 ])
 def test_w14_nit7_replacement_4401(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "R0 precondition: the delivering socket was promoted away mid-rpc",
+    "R1 same broker run: the reply goes out on the socket now in charge",
+    "R2 a different broker run (bootId): the reply is dropped",
+    "R3 no promotion: the reply rides the delivering socket (unchanged)",
+    "R4 no socket in charge: dropped (no send attempted on any socket)",
+])
+def test_w14_sh1_reply_across_promotion(run, label):
     _ok(run, label)
 
 

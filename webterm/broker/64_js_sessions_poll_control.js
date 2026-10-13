@@ -340,6 +340,9 @@
         const CONTROL_PONG_TIMEOUT_MS = 10000;
         const CONTROL_CONNECT_TIMEOUT_MS = 5000;
         let _controlPingSeq = 0;
+        // ws -> its per-socket state, kept after the socket is retired so a
+        // late desktop_result can still tell which broker run delivered it.
+        const _ctlSockState = new WeakMap();
         function homeHostId() { return (localHost() || {}).id || 'local'; }
 
         function openControlWs(host) {
@@ -384,10 +387,11 @@
                 rec: rec, ws: ws, role: role, done: false,
                 pingTimer: null, deadlineTimer: null, connectTimer: null,
                 pendN: null, lastN: 0, missed: 0, capable: false, statusSeen: false,
-                openedAt: 0,
+                openedAt: 0, bootId: null,
             };
             if (role === 'cur') { rec.cur = st; rec.ws = ws; }
             else rec.cand = st;
+            _ctlSockState.set(ws, st);
             // The watchdog covers the first STATUS, not just the upgrade: a
             // socket that opened but never reports (a broker or proxy that
             // accepted the upgrade and then went silent) would otherwise sit
@@ -531,6 +535,10 @@
             const rec = st.rec;
             if (!st.statusSeen) {
                 st.statusSeen = true;
+                // The broker run this socket talks to (#248 SH-1): fixed for
+                // the socket's life, so it still names where an rpc came from
+                // after the socket is promoted away.
+                st.bootId = typeof msg.bootId === 'string' ? msg.bootId : null;
                 if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
                 // Capability from the FIRST status, per socket: a broker that
                 // stamps gen + bootId answers pings.
@@ -559,6 +567,24 @@
             onControlStatus(rec.hostId, msg);
             _settleWantActive(rec, msg);
             _noteLeaseHolding(rec.hostId, msg);
+        }
+
+        // #248 SH-1: where a desktop_result goes when the socket that
+        // delivered its rpc was promoted away while the op ran (it awaits
+        // pushState). The broker accepts a result from ANY socket of this
+        // clientId and lease generation, so the socket now in charge carries
+        // it -- but only when it talks to the SAME broker run (bootId) as the
+        // delivering socket: another run numbers rids from 1 again, and its
+        // rid N is a different call. Anything else: null (dropped, as before).
+        function _desktopReplySocket(rec, ws) {
+            if (!rec || !ws) return null;
+            if (rec.ws === ws) return ws;
+            const from = _ctlSockState.get(ws);
+            const cur = rec.cur;
+            if (!from || !cur || cur.done || !cur.ws || cur.ws !== rec.ws) return null;
+            if (cur.ws.readyState !== WebSocket.OPEN) return null;
+            if (typeof from.bootId !== 'string' || from.bootId !== cur.bootId) return null;
+            return cur.ws;
         }
 
         // #248 C1: the holder owns the PTY size (owner O1), so a NEW holding
@@ -1012,10 +1038,17 @@
             try { return _deactivated === true; } catch (_) { return false; }
         }
         function desktopReply(rec, ws, rid, payload) {
-            // Socket identity: a reply must never ride a socket the rec has
-            // already replaced (openControlWs reuses recs across reconnects).
-            if (!rec || rec.ws !== ws) return;
-            desktopWsSend(ws, Object.assign(
+            // Socket identity: a reply rides the socket that delivered the
+            // rpc while it is still rec.ws. If a replacement took over while
+            // the op ran (#248 SH-1), _desktopReplySocket hands back the new
+            // socket when it talks to the same broker run; otherwise the
+            // reply is dropped, as it always was for a replaced socket.
+            let out = (rec && rec.ws === ws) ? ws : null;
+            if (!out && typeof _desktopReplySocket === 'function') {
+                out = _desktopReplySocket(rec, ws);
+            }
+            if (!out) return;
+            desktopWsSend(out, Object.assign(
                 { type: 'desktop_result', rid: rid }, payload));
         }
         // Broker-local int id (the DELIVERING connection's namespace) ->
