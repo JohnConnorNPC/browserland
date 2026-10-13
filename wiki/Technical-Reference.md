@@ -554,6 +554,53 @@ reattaches, so the attach's forced initial `resize` sends this window's size. A
 `409 not_active` from Take back shows the Become active prompt (home broker) or
 masks that broker (remote), as a lost lease does.
 
+### The /control lease channel (#248)
+
+`WS /control` carries the single-active-browser lease for one browser profile
+(`?clientId=<lease id>`). Frames the page sends: `{"type": "become_active"}`,
+`{"type": "ping", "n": <int>}` and `desktop_result` (the answers to a relayed desktop op). Frames it gets:
+
+* **`{"type": "status", "active": <bool>, "activeClientId": <str|null>, "gen":
+  <int>, "bootId": "<str>"}`** — on connect, after `become_active`, on release,
+  and wherever a status went out before. `gen` is the broker's lease generation:
+  it bumps on every holder change and restarts with the broker, so a page keys
+  "a new holding" on the pair (`bootId`, `gen`) — `bootId` names the broker run.
+  A broker that predates #248 sends neither field.
+* **`{"type": "pong", "n": <int|null>, "active", "activeClientId", "gen",
+  "bootId"}`** — the answer to a ping, on the same socket. `n` echoes the ping's
+  nonce (`null` if the ping carried no integer `n`); the rest is the live lease,
+  built exactly like a status, so a page whose status went missing re-learns it
+  from any ping, and the page runs it through the same path as a status frame.
+* **A repeat `become_active` from the current holder is idempotent.** It bumps no
+  generation, closes no socket (no 4409) and tells nobody else: only the sending
+  socket gets the status again. A `become_active` from anyone else flips the
+  lease, bumps `gen`, closes the previous holder's terminal sockets with 4409,
+  and sends every `/control` socket its status.
+* Every status or pong send is bounded at 0.5 s (`CONTROL_SEND_TIMEOUT`); a
+  socket that cannot take one is closed with 1012 and its page reconnects, so
+  one stalled browser never delays the rest. Releasing the lease closes nothing
+  with 4409.
+
+**Page-side liveness.** The page pings every 25 s with an increasing `n`. Only a
+pong whose `n` matches an outstanding ping clears the **10 s pong deadline**, and
+only a socket whose first status carried `gen` and `bootId` gets a deadline at
+all, so an old broker is never declared dead. On a missed deadline the page
+dials a replacement `/control` socket and keeps the old one working until the
+replacement's first status arrives (make-before-break). A **5 s connect/status
+watchdog** abandons a socket that has not delivered its first status that soon,
+and restarts the 5 s once the socket opens. The home broker's channel down for
+10 s shows the "lost contact with this broker — retrying…" notice.
+
+**Terminal `/ws`: `not_active`.** When a browser that does not hold the lease
+sends input, a paste, a binary frame or a resize on a terminal `/ws`, the broker
+drops it (as before) and answers `{"type": "error", "reason": "not_active",
+"session": <id>}`. It is advisory: sent at most once per socket per lease
+generation, and never for a socket refused because of a terminal controller (see
+Terminal control) or a revoked one. The page writes nothing to the terminal for
+it; it asks the lease channel for the live state (a ping), which settles whether
+this browser really lost the lease. `PUT /state` answers a non-holder `409
+{"error": "not_active"}` as before.
+
 ## MCP HTTP interface
 
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
