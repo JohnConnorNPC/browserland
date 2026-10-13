@@ -419,7 +419,11 @@
                     }
                     _stateSettleSent(gen);
                     _stateRevSkipped = false;
-                } else if (out.status === 400 || out.status === 413) {
+                } else if (out.status === 413 || (out.status === 400 && !!(out.body
+                        && _STATE_400_VERDICTS[out.body.error] === true))) {
+                    // The BROKER's verdict on this payload (#247 Z5: a 400
+                    // that is not -- a proxy page -- is an ordinary failure
+                    // below: it stays on screen and rides the retry ladder).
                     // A verdict that outlived its view: a PARKED edit stays
                     // owed, so the next view re-sends it and, refused again,
                     // converges WITH the notice there (one more PUT). Settling
@@ -432,13 +436,10 @@
                     // failed edit too): it can never land, so nothing is owed.
                     _stateSettleSent(gen);
                     // #247 item 7 (Q4): ...and the tab must not keep showing it.
-                    // Converge to the shared state -- only for the broker's own
-                    // verdict (a proxy's 400 may be transient), only if no NEWER
-                    // edit exists (that one re-pushes on its own), only in this
+                    // Converge to the shared state -- only if no NEWER edit
+                    // exists (that one re-pushes on its own), only in this
                     // view. The pull runs once the channel is free (finally).
-                    const verdict = out.status === 413 || !!(out.body
-                        && _STATE_400_VERDICTS[out.body.error] === true);
-                    if (STATE_REJECT_CONVERGES && verdict && _stateEditGen === gen
+                    if (STATE_REJECT_CONVERGES && _stateEditGen === gen
                             && epoch === _viewEpoch && !_deactivated) {
                         _stateRevSkipped = true;      // bypass "unchanged" ...
                         _stateLastSerialized = null;  // ... and "server == baseline"
@@ -446,7 +447,8 @@
                         converge = true;
                     }
                 } else if (epoch === _viewEpoch) {
-                    // 401 (local broker needs auth) / other: keep localStorage;
+                    // 401 (local broker needs auth) / a proxy's 400 / other:
+                    // keep localStorage;
                     // the existing /sessions auth flow handles login, next
                     // save retries.
                     _stateFailed(gen, baseRev, false);

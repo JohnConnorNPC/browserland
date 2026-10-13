@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 72
+EXPECTED_ASSERTS = 74
 
 _HARNESS = r"""
 'use strict';
@@ -707,6 +707,22 @@ function mkWorld() {
     w.holdPut = false; await w.release(); await z4l; await flush();
     ok(w.gets === 1, 'Z4b the load pull still sends after the first epoch bump while it waited');
 
+    // ---- Z5 (manager ruling): a proxy 400 is a definitive failure --------
+    w = mkWorld(); await w.boot();
+    w.putMode = '400proxy'; w.edit(['KEEP']); await w.firePush(); w.putMode = null; await flush();
+    const z5cols = w.cols();
+    await tick(w);
+    ok(z5cols === J(['KEEP']) && w.notices.length === 0 && w.srv() === J(['KEEP']) && w.cols() === J(['KEEP']),
+        'Z5 a proxy 400 keeps the edit on screen and the next poll retries it until it lands');
+    // Z5b: ...on the retry ladder, like any failure.
+    w = mkWorld(); await w.boot();
+    w.putMode = '400proxy'; w.edit(['KEEP']); await w.firePush();
+    for (let i = 0; i < 3; i++) await tick(w);
+    const z5b = w.puts.length;
+    await tick(w);
+    ok(z5b === 4 && w.puts.length === 4 && w.cols() === J(['KEEP']) && w.notices.length === 0,
+        'Z5b repeated proxy 400s ride the retry ladder (3 fast retries, then back-off)');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -900,6 +916,14 @@ def test_247_z1_park_keeps_the_original_base(run, label):
     "Z4b the load pull still sends after the first epoch bump while it waited",
 ])
 def test_247_z4_superseded_initial_pull(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "Z5 a proxy 400 keeps the edit on screen and the next poll retries it until it lands",
+    "Z5b repeated proxy 400s ride the retry ladder (3 fast retries, then back-off)",
+])
+def test_247_z5_proxy_400_is_a_failure(run, label):
     _ok(run, label)
 
 
