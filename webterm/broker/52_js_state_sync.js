@@ -73,6 +73,18 @@
         // ORIGINAL base while the edit is unchanged -- it lands only if nobody
         // wrote meanwhile and yields otherwise. false = rebase.
         const STATE_THROWN_RETRY_YIELDS = true;
+        // Item 9 (b): the AUTOMATIC retry of an owed edit rides the poll
+        // cadence for the first STATE_RETRY_FAST failures, then backs off
+        // 4 s, 8 s, 16 s, 32 s, capped at STATE_RETRY_CAP_MS (performance.now:
+        // a wall-clock step can neither stall nor skip it). The ladder belongs
+        // to the failed edit: a new edit or any settle starts over. A user's
+        // own save is never delayed. (a) = Infinity, (c) = 0.
+        const STATE_RETRY_FAST = 3;
+        const STATE_RETRY_CAP_MS = 60000;
+        // S6: once the ladder has engaged, a retry of a definitive failure
+        // (5xx/401/an unusable 409) uses the debt's ORIGINAL base -- it lands
+        // only if nobody wrote meanwhile, and yields otherwise. false = rebase.
+        const STATE_LATE_RETRY_YIELDS = true;
         // Q4 / item 7: a rejected save (413, or a 400 that is the broker's
         // verdict on the payload) can never land, so the tab goes back to the
         // saved layout and says so. false = keep the rejected edit on screen
@@ -164,9 +176,12 @@
         // A failure of `gen`; a newer edit starts a fresh record.
         function _stateFailed(gen, baseRev, thrown) {
             const f = (_stateFail && _stateFail.gen === gen) ? _stateFail
-                : { gen: gen, baseRev: baseRev, thrown: false, fails: 0 };
+                : { gen: gen, baseRev: baseRev, thrown: false, fails: 0, retryAt: 0 };
             f.thrown = f.thrown || !!thrown;
             f.fails += 1;
+            const over = f.fails - STATE_RETRY_FAST;
+            f.retryAt = over <= 0 ? 0
+                : performance.now() + Math.min(STATE_RETRY_CAP_MS, 2000 * Math.pow(2, over));
             _stateFail = f;
         }
         // #247 item 4 / N1: every rev a response carries is a safe
@@ -263,8 +278,9 @@
                 _stateNoteSend(serialized, gen);
                 let baseRev = _stateRev;
                 const f = _stateFail;
-                if (f && f.gen === gen && f.thrown && STATE_THROWN_RETRY_YIELDS) {
-                    baseRev = f.baseRev;          // Q2: its original base
+                if (f && f.gen === gen && ((f.thrown && STATE_THROWN_RETRY_YIELDS)
+                        || (STATE_LATE_RETRY_YIELDS && f.fails > STATE_RETRY_FAST))) {
+                    baseRev = f.baseRev;          // Q2 / S6: its original base
                 }
                 if (_stateParked && _stateParkGen === gen && _stateParkBase !== null) {
                     baseRev = _stateParkBase;     // Q1: its teardown-time base
@@ -575,12 +591,17 @@
         // push's debt (rev unchanged, server == our baseline, or the dirty
         // skip): the broker just answered, so retry the debt now rather than
         // at some unrelated later save (owner's call on #246). One debounced
-        // retry per such poll, so a PUT that keeps failing costs at most one
-        // request per poll tick. Never from a pull that adopts or
+        // retry per such poll for the first STATE_RETRY_FAST failures, then
+        // the item-9 ladder (at most one per 60 s). Never from a pull that adopts or
         // acknowledges (that settles the debt), and an undone edit has
         // already cleared it at the top of pullState.
         function _retryOwedPush() {
-            if (_stateOwed() && !_statePushQueued()) schedulePush();
+            if (!_stateOwed() || _statePushQueued()) return;
+            // Item 9 (b): not yet, says the ladder. (Only this automatic
+            // retry is gated; schedulePush from a user's save never is.)
+            if (_stateFail && _stateFail.gen === _stateEditGen
+                    && performance.now() < _stateFail.retryAt) return;
+            schedulePush();
         }
         // #247 item 3: called by 84 teardownView in place of clearing the
         // debounce timer. Drops only the WAKE-UPS; the edit itself is the

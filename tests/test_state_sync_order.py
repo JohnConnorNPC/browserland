@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 53
+EXPECTED_ASSERTS = 62
 
 _HARNESS = r"""
 'use strict';
@@ -545,6 +545,68 @@ function mkWorld() {
     await w.release(); w.putMode = null; await flush();
     ok(w.adopts === a4 && w.notices.length === 0, 'V4 a 413 answered after a teardown converges nothing');
 
+    // ---- 247-9 (item 9 b + S6): the retry ladder ---------------------------
+    // One "tick" = a poll + the debounce firing, at the current performance.now.
+    const tick = async function (w) { await w.api.pullState(false); await flush(); await w.firePush(); await flush(); };
+    // B1: three retries at poll cadence.
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['F']); await w.firePush();
+    for (let i = 0; i < 3; i++) await tick(w);
+    ok(w.puts.length === 4, 'B1 the first three retries ride the poll cadence (4 PUTs)');
+    // B2: then the 4th waits 4 s.
+    await tick(w);
+    const b2a = w.puts.length;
+    w.perf += 3999; await tick(w);
+    const b2b = w.puts.length;
+    w.perf += 1; await tick(w);
+    ok(b2a === 4 && b2b === 4 && w.puts.length === 5, 'B2 after the fast phase the next retry waits 4 s');
+    // B3: 8, 16, 32 s, then the 60 s cap.
+    const waits = [8000, 16000, 32000, 60000, 60000];
+    let capOk = true;
+    for (const ms of waits) {
+        const n = w.puts.length;
+        w.perf += ms - 1; await tick(w);
+        if (w.puts.length !== n) capOk = false;
+        w.perf += 1; await tick(w);
+        if (w.puts.length !== n + 1) capOk = false;
+    }
+    ok(capOk, 'B3 the back-off doubles to 8, 16, 32 s and caps at 60 s');
+    // B4: a landed retry resets the ladder.
+    w.putMode = null; w.perf += 60000; await tick(w);
+    ok(w.srv() === J(['F']), 'B4a precondition: the broker recovered and the owed edit landed');
+    w.putMode = '500'; w.edit(['G']); await w.firePush();
+    const b4 = w.puts.length;
+    await tick(w);
+    ok(w.puts.length === b4 + 1, 'B4 after a success a new failure retries at poll cadence again');
+    // B5: a NEW edit restarts the ladder (fresh intent).
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['F']); await w.firePush();
+    for (let i = 0; i < 4; i++) await tick(w);                       // ladder engaged
+    w.edit(['F2']); await w.firePush();                               // a user save: sent
+    const b5 = w.puts.length;
+    await tick(w);
+    ok(w.puts.length === b5 + 1, 'B5 a new edit restarts the ladder (its retry rides the poll again)');
+    // B6: a user save inside the back-off is never delayed.
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['F']); await w.firePush();
+    for (let i = 0; i < 4; i++) await tick(w);
+    const b6 = w.puts.length;
+    w.edit(['NOW']); await w.firePush();
+    ok(w.puts.length === b6 + 1, 'B6 a user save inside the back-off is sent at its normal 600 ms');
+    // B7 (S6): after the ladder engages, a retry uses the original base -> yields to a peer.
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['MINE']); await w.firePush();
+    for (let i = 0; i < 3; i++) await tick(w);                       // 4 failures: the ladder is on
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    w.putMode = null; w.perf += 4000; await tick(w); await tick(w);
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']), 'B7 a late retry (ladder engaged) yields to a peer write (S6)');
+    // B7b: in the fast phase the retry still rebases and wins (#246 policy a).
+    w = mkWorld(); await w.boot();
+    w.putMode = '500'; w.edit(['MINE']); await w.firePush(); w.putMode = null;
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    await tick(w);
+    ok(w.srv() === J(['MINE']), 'B7b a fast-phase retry rebases and wins (policy a)');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -696,6 +758,21 @@ def test_247_5_thrown_failures_and_own_writes(run, label):
     "V4 a 413 answered after a teardown converges nothing",
 ])
 def test_247_7_rejected_save_converges(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "B1 the first three retries ride the poll cadence (4 PUTs)",
+    "B2 after the fast phase the next retry waits 4 s",
+    "B3 the back-off doubles to 8, 16, 32 s and caps at 60 s",
+    "B4a precondition: the broker recovered and the owed edit landed",
+    "B4 after a success a new failure retries at poll cadence again",
+    "B5 a new edit restarts the ladder (its retry rides the poll again)",
+    "B6 a user save inside the back-off is sent at its normal 600 ms",
+    "B7 a late retry (ladder engaged) yields to a peer write (S6)",
+    "B7b a fast-phase retry rebases and wins (policy a)",
+])
+def test_247_9_retry_ladder(run, label):
     _ok(run, label)
 
 

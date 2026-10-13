@@ -474,11 +474,13 @@ function mkWorld() {
         && w.server.rev === 3 && w.server.layout.columns.length === 4,
         'S1a the owed edit retries on the rebased rev without waiting for a save');
     // S2: a broker that keeps refusing costs at most one PUT per poll tick.
+    // #247 item 9 (b, owner): only for the first 3 failures (the fast phase);
+    // test_state_sync_order.py's B cells pin the back-off after it.
     w = await failedEdit('500');
     w.otherTabWrites(L1);
     w.putFail = '500';
-    for (let i = 0; i < 4; i++) { await w.api.pullState(false); await w.firePush(); }
-    ok(w.puts.length === 1 + 4, 'S2 a failing retry repeats once per poll, never more');
+    for (let i = 0; i < 2; i++) { await w.api.pullState(false); await w.firePush(); }
+    ok(w.puts.length === 1 + 2, 'S2 a failing retry repeats once per poll in the fast phase, never more (item 9 b)');
     const before3 = w.puts.length;
     await w.api.pullState(false);
     await w.api.pullState(false);
@@ -682,7 +684,7 @@ def test_an_owed_edit_retries_once_the_broker_answers(scenario_run):
     # soon as a pull proves the broker reachable, bounded by the poll tick.
     _ok(scenario_run, "S1 precondition: the failed push left nothing queued")
     _ok(scenario_run, "S1a the owed edit retries on the rebased rev without waiting for a save")
-    _ok(scenario_run, "S2 a failing retry repeats once per poll, never more")
+    _ok(scenario_run, "S2 a failing retry repeats once per poll in the fast phase, never more (item 9 b)")
     _ok(scenario_run, "S2a three polls inside one debounce cost one PUT")
     _ok(scenario_run, "S2b throughout, the owed edit is kept (no adopt)")
     _ok(scenario_run, "S3 a poll during a queued push arms no second retry")
