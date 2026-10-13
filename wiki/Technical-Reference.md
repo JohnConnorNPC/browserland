@@ -771,12 +771,21 @@ desktop relay — window arranging *and* workspace management, admin included.
 below are gated by the full `/mcp/*` ladder and then by the flag (**403
 `desktop_disabled`**), and they relay each op to the **browser holding the
 control lease** over its `/control` socket: one frame per op
-(`{"type":"desktop_rpc","rid":<int>,"op":…,"args":…}`), one answer per rid.
+(`{"type":"desktop_rpc","rid":<int>,"op":…,"args":…,"gen":<int>,"bootId":<str>}`),
+one answer per rid. `gen` is the lease generation the call was made under and
+`bootId` the broker run; rids start at a random offset per run, and the
+browser keys the answers it has given on host, run and rid (#250).
 
 * **No lease holder** → **409 `no_active_browser`** (fail, never queue); a
   browser that does not answer within the 10 s end-to-end deadline → **504
   `desktop_timeout`**; a browser that lost the lease mid-op → **409
-  `lost_lease`** with nothing half-applied.
+  `{"error":"lost_lease","dispatched":true|false}`**. Each op applies whole or
+  not at all, but `dispatched: true` means the op reached a browser, which may
+  have applied it before it learned it was deposed: check with `get` before
+  retrying. Only `dispatched: false` (no browser was ever sent the op)
+  promises nothing was applied. The broker never sends an op once the lease
+  has moved on, and the browser refuses an op from a host whose lease it lost,
+  from an older lease generation, or from another broker run (#250).
 * **Visibility.** Every frame relayed for a NON-admin caller carries
   `args.visible` — the int ids of the caller's visible windows on this broker
   (effective mode ≠ `off`, in scope), computed at relay time; an admin's frame
@@ -826,7 +835,7 @@ above (else **400 `bad_op`**); op-specific arg errors answer **400
 | `unknown_window` | 404 | `unknown_or_off` — byte-identical to the chokepoint's 404 |
 | `bad_args` / `bad_op` | 400 | `bad_args` / `bad_op` |
 | `not_home` | 409 | workspace op arrived on a non-home broker's relay |
-| `lost_lease` | 409 | the browser lost the lease mid-op |
+| `lost_lease` | 409 | `{"error":"lost_lease","dispatched":true}` — the browser lost the lease mid-op |
 | `needs_confirm` | 409 | `{"error":"needs_confirm","count":<live windows>}` — pass `force: true` |
 | `last_workspace` | 409 | the last workspace cannot be removed |
 | `absent` / `inactive` | 200 | `{"ok": false, "reason": …}` — the workspaces mod is off/absent |
@@ -1099,7 +1108,7 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 409 | `no_active_browser` | `/mcp/desktop` with no browser holding the control lease (ops are never queued) |
 | 504 | `desktop_timeout` | the lease-holding browser did not answer the desktop op in time |
 | 409 | `not_home` | a `workspaces:*` op arrived on a relay whose lease holder's home is another broker |
-| 409 | `lost_lease` | the browser lost the control lease mid-op; nothing was half-applied |
+| 409 | `lost_lease` | the browser lost the control lease mid-op. `dispatched: false`: the op was never sent, so nothing was applied; `dispatched: true`: it may have applied, so check before retrying (#250) |
 | 409 | `needs_confirm` | `workspaces:remove` of a non-empty workspace without `force: true` — the body carries the live window `count` |
 | 409 | `last_workspace` | the last workspace cannot be removed |
 | 502 | `desktop_op_failed` | the browser's desktop op raised |
