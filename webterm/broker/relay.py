@@ -17,17 +17,18 @@ the snapshot request and mouse (a no-op) are never gated. A socket attaching
 reads ``resized`` then the terminal's control view, then gets the snapshot.
 
 #248: a frame dropped by the LEASE rule (not by a controller or a revoke) is
-answered with ``{type:'error', reason:'not_active'}``, at most once per socket
-per lease generation, so the page re-checks its lease.
+answered with ``{type:'error', reason:'not_active', session}``, at most once
+per socket per lease generation, so the page re-checks its lease.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
 from .. import protocol
-from .registry import BrokerRegistry
+from .registry import CONTROL_SEND_TIMEOUT, BrokerRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -147,13 +148,19 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
             # generation, so the page can re-check its lease instead of
             # typing into nothing. Never for a controller-gated or revoked
             # socket: the #239 controlled view already tells that page.
+            # Bounded, so a stalled socket cannot wedge this read loop; the
+            # generation counts as hinted only once a hint was delivered.
             if last["reason"] != "lease" or hinted["gen"] == last["gen"]:
                 return
-            hinted["gen"] = last["gen"]
+            gen = last["gen"]
             try:
-                await ws.send(protocol.error_frame("not_active", entry.id))
+                await asyncio.wait_for(
+                    ws.send(protocol.not_active_frame(entry.id)),
+                    CONTROL_SEND_TIMEOUT)
             except Exception as exc:
-                LOGGER.debug("send not_active failed: %s", exc)
+                LOGGER.debug("send not_active failed: %r", exc)
+                return
+            hinted["gen"] = gen
 
         # Browser -> broker -> producer. Every input/resize frame passes the
         # gate (_drive_refusal) on arrival AND again under the send lock: a

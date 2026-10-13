@@ -4299,6 +4299,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # lone-browser case needs no click). webterm_state.json is untouched.
     app.ctx.active_client_id = None
     app.ctx.control_clients = {}        # clientId -> set[ws]
+    # #248: ws -> asyncio.Lock serializing the lease-bearing frames (status,
+    # pong) on one /control socket; each frame is built INSIDE the lock, so
+    # a socket never receives an older lease after a newer one.
+    app.ctx.control_send_locks = {}
     app.ctx.lease_lock = asyncio.Lock()
     # #244: the desktop relay. lease_generation is read and written ONLY
     # under lease_lock and bumps on every holder change, so a browser
@@ -4310,6 +4314,25 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.desktop_rpcs = {}
     app.ctx.desktop_rid = itertools.count(1)
     app.ctx.desktop_rpc_timeout_s = DESKTOP_RPC_TIMEOUT_S
+
+    async def _bounded(coro, timeout):
+        # asyncio.wait_for, minus Python 3.10's lost cancellation (bpo-42130:
+        # a cancel that lands as the inner call completes is swallowed): a
+        # cancel here always propagates, after cancelling the inner call.
+        task = asyncio.ensure_future(coro)
+        # A cancelled inner call's own exception is retrieved, never logged
+        # as "never retrieved".
+        task.add_done_callback(
+            lambda t: t.cancelled() or t.exception())
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if not done:
+            task.cancel()
+            raise asyncio.TimeoutError()
+        return task.result()
 
     async def _push_terminal_control(window_id, view):
         # #238: every /control socket hears every terminal's control change
@@ -4870,8 +4893,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
         def _cid8(cid):
             # #248 A6: lease log lines name a client by an 8-char prefix of
-            # its clientId, never the whole id.
-            return (cid or "-")[:8]
+            # its clientId, never the whole id, and never a raw control
+            # character (a clientId is client-chosen: no forged log lines).
+            return "".join(ch if ch.isprintable() else "?"
+                           for ch in (cid or "-")[:8])
 
         def _lease_view(owner_id):
             # (active, activeClientId, gen, bootId) for a socket opened by
@@ -4892,12 +4917,32 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # cannot take its status within CONTROL_SEND_TIMEOUT is closed
             # 1012 so the page re-dials (any code but 4401) and reads a fresh
             # status, instead of staying registered with a missed one.
+            await _send_lease_frame(
+                sock, lambda: protocol.control_status_frame(
+                    *_lease_view(owner_id)), "status")
+
+        async def _send_lease_frame(sock, build, what):
+            # One lease-bearing frame on `sock`: built by `build()` only once
+            # this socket's send lock is held (so frames land in the order
+            # their lease was read), the whole wait -- lock included --
+            # bounded by CONTROL_SEND_TIMEOUT; a socket that misses it is
+            # closed 1012. No lock = the socket's handler is gone: nothing
+            # to tell it.
+            lock = ctx.control_send_locks.get(sock)
+            if lock is None:
+                return
+
+            async def locked():
+                async with lock:
+                    await sock.send(build())
             try:
-                await asyncio.wait_for(sock.send(protocol.control_status_frame(
-                    *_lease_view(owner_id))), CONTROL_SEND_TIMEOUT)
+                await _bounded(locked(), CONTROL_SEND_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
-                LOGGER.debug("control send failed: %r", exc)
-                ctx.registry.close_soon(sock, 1012, "control status timed out")
+                LOGGER.debug("control %s failed: %r", what, exc)
+                ctx.registry.close_soon(sock, 1012,
+                                        "control " + what + " timed out")
 
         async def _send_all(groups):
             # Every socket's status at once ({clientId: [sockets]}), so one
@@ -4915,18 +4960,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             n = data.get("n")
             if isinstance(n, bool) or not isinstance(n, int):
                 n = None
-            try:
-                await asyncio.wait_for(sock.send(protocol.control_pong_frame(
-                    n, *_lease_view(client_id))), CONTROL_SEND_TIMEOUT)
-            except Exception as exc:
-                LOGGER.debug("control pong failed: %r", exc)
-                ctx.registry.close_soon(sock, 1012, "control pong timed out")
+            await _send_lease_frame(sock, lambda: protocol.control_pong_frame(
+                n, *_lease_view(client_id)), "pong")
+
+        def _cut_terminals(cids):
+            # Close the losers' terminal sockets 4409. SYNCHRONOUS: called
+            # with no await since the flip, it selects exactly the sockets
+            # those clients held when they lost, so a later takeover that
+            # hands the lease back to one of them can never have its
+            # terminals cut by this one. Each close is bounded and retained
+            # by the registry (close_soon), so none holds back a status or
+            # this socket's next ping.
+            losing = set(cids)
+            for entry in ctx.registry.entries():
+                for sock, cid in list(entry.subscriber_clients.items()):
+                    if cid in losing:
+                        ctx.registry.close_soon(sock, 4409, "deactivated")
 
         # The connect registration is INSIDE the try so the finally always
         # runs (a cancellation during the initial _send must not strand this
         # ws in control_clients / pin the lease to a dead first client).
         try:
             # ---- connect: register + auto-activate-first ----------------
+            ctx.control_send_locks[ws] = asyncio.Lock()
             async with ctx.lease_lock:
                 ctx.control_clients.setdefault(client_id, set()).add(ws)
                 if ctx.active_client_id is None:
@@ -4981,19 +5037,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if repeat:
                     await _send(ws, client_id)
                     continue
-                # #248 S7: the statuses go first, all at once: cutting the
-                # losers' terminals awaits each close unbounded, and must not
-                # hold back any page's status. Their input is already gated
-                # on the flipped lease (relay._drive_refusal).
+                # #248: the losers' terminals are cut (bounded closes,
+                # scheduled synchronously -- no await since the flip), then
+                # every status goes out at once (S7).
+                _cut_terminals(list(losers))
                 await _send_all({**losers, client_id: winners})
-                for cid in losers:
-                    await ctx.registry.close_clients_terminals(cid, 4409)
         except Exception as exc:
             LOGGER.info("control session ended: %s", exc)
         finally:
             # ---- disconnect: drop the ws; release the lease only if THIS
             # client held it and has no other live control socket. No
             # auto-promote — the remaining browsers keep their button.
+            ctx.control_send_locks.pop(ws, None)
             async with ctx.lease_lock:
                 socks = ctx.control_clients.get(client_id)
                 if socks is not None:
@@ -7886,6 +7941,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     break
                 except asyncio.TimeoutError:
                     stalled = True   # this socket stalled: try the next
+                    # #248: a send cancelled mid-frame leaves the socket
+                    # unusable, and a half-open one would eat a slice of
+                    # every later call: close it 1012 (the page re-dials).
+                    ctxd.registry.close_soon(sock, 1012,
+                                             "desktop rpc send timed out")
                     continue
                 except Exception:
                     continue       # a dead socket: try the next

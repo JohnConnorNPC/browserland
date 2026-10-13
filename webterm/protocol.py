@@ -445,6 +445,18 @@ def error_frame(reason: str, session_id: int) -> str:
     })
 
 
+def not_active_frame(session_id: int) -> str:
+    """#248: broker -> browser on a terminal /ws, the advisory answer to an
+    input/paste/binary/resize frame dropped because this browser does not
+    hold the single-active-browser lease. The key is ``session`` (the #248
+    wire contract), not error_frame's ``session_id``."""
+    return json.dumps({
+        "type": "error",
+        "reason": "not_active",
+        "session": session_id,
+    })
+
+
 def mcp_activity_frame(kind: str) -> str:
     """Transient per-window MCP-touch pulse (#33): the broker emits this on an
     MCP read/write so the browser can briefly flash that window's robot icon

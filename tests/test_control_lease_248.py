@@ -96,18 +96,29 @@ class Ctl:
         self.ctx = app.ctx
         self.handler = _control_handler(app)
         self.tasks = []
+        self.wss = []
 
     async def connect(self, client_id, stall=None):
-        ws = CtlWS(stall)
+        return await self.attach(client_id, CtlWS(stall))
+
+    async def attach(self, client_id, ws):
+        self.wss.append(ws)
         self.tasks.append(asyncio.get_running_loop().create_task(
             self.handler(CtlReq(client_id), ws)))
         await _settle()
         return ws
 
     async def close_all(self):
-        for t in self.tasks:
+        # Hang every socket up first so each handler ends its own loop: a
+        # bare cancel can be swallowed by Python 3.10's wait_for when it
+        # lands just as a bounded send completes (bpo-42130).
+        for ws in self.wss:
+            ws.hang_up()
+        await _settle()
+        rest = list(self.app.ctx.bg_tasks)        # e.g. a hung 4409 cut
+        for t in self.tasks + rest:
             t.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.gather(*self.tasks, *rest, return_exceptions=True)
 
 
 def _statuses(ws):
@@ -239,13 +250,22 @@ def test_a_stalled_pong_send_closes_the_socket_1012(tmp_path, monkeypatch):
 
 # ---- atom 3: become_active from the current holder is idempotent ----------
 
-def _record_4409s(app):
-    calls = []
+_wid_seq = [248100]
 
-    async def fake(client_id, code):
-        calls.append((client_id, code))
-    app.ctx.registry.close_clients_terminals = fake
-    return calls
+
+async def _terminals(app, *client_ids):
+    """One attached terminal /ws per clientId: {clientId: socket}."""
+    _wid_seq[0] += 1
+    entry = await app.ctx.registry.register(FakeWS(), _hello(_wid_seq[0]))
+    socks = {}
+    for cid in client_ids:
+        socks[cid] = FakeWS()
+        entry.add_subscriber(socks[cid], cid)
+    return socks
+
+
+def _cuts(socks):
+    return [(cid, s.closed) for cid, s in socks.items() if s.closed]
 
 
 def test_holder_become_active_twice_changes_nothing(tmp_path, monkeypatch):
@@ -256,7 +276,7 @@ def test_holder_become_active_twice_changes_nothing(tmp_path, monkeypatch):
         a1 = await c.connect("A")
         a2 = await c.connect("A")           # the holder's second socket
         b = await c.connect("B")
-        cuts = _record_4409s(app)
+        socks = await _terminals(app, "A", "B")
         g = c.ctx.lease_generation
         before = {id(w): len(w.sent) for w in (a1, a2, b)}
         for _ in range(2):
@@ -264,7 +284,7 @@ def test_holder_become_active_twice_changes_nothing(tmp_path, monkeypatch):
             await _settle()
         assert c.ctx.lease_generation == g
         assert c.ctx.active_client_id == "A"
-        assert cuts == []
+        assert _cuts(socks) == []
         # One status per request, to the requesting socket only.
         assert a1.sent[before[id(a1)]:] == [
             {"type": "status", "active": True, "activeClientId": "A",
@@ -282,13 +302,13 @@ def test_non_holder_become_active_still_flips(tmp_path, monkeypatch):
         c = Ctl(app)
         a = await c.connect("A")
         b = await c.connect("B")
-        cuts = _record_4409s(app)
+        socks = await _terminals(app, "A", "B")
         g = c.ctx.lease_generation
         b.push({"type": "become_active"})
         await _settle()
         assert c.ctx.lease_generation == g + 1
         assert c.ctx.active_client_id == "B"
-        assert cuts == [("A", 4409)]
+        assert _cuts(socks) == [("A", 4409)]
         assert _statuses(a)[-1]["active"] is False
         assert _statuses(a)[-1]["activeClientId"] == "B"
         assert _statuses(b)[-1]["active"] is True
@@ -347,6 +367,11 @@ def test_a_stalled_loser_does_not_delay_the_takeover_statuses(
         assert w.sent[-1]["active"] is True
         # The stalled one is dropped so its page re-dials for a fresh status.
         assert await _wait(lambda: stalled.closed == 1012) is not None
+        # The hung 4409 cut never wedges the winner's socket: it still
+        # answers a ping (a page's pong deadline would otherwise drop it).
+        w.push({"type": "ping", "n": 9})
+        assert await _wait(lambda: w.sent[-1].get("type") == "pong")             is not None
+        assert w.sent[-1]["n"] == 9 and w.sent[-1]["active"] is True
         await c.close_all()
     asyncio.run(go())
 
@@ -437,7 +462,14 @@ def _errors(ws):
 
 
 def _hint(entry):
-    return {"type": "error", "reason": "not_active", "session_id": entry.id}
+    return {"type": "error", "reason": "not_active", "session": entry.id}
+
+
+def test_protocol_not_active_frame_exact():
+    # The #248 wire contract's key is `session` (error_frame's is
+    # `session_id`).
+    assert json.loads(protocol.not_active_frame(12)) == {
+        "type": "error", "reason": "not_active", "session": 12}
 
 
 DRIVE_FRAMES = [{"type": "input", "data": "x"}, {"type": "paste", "data": "x"},
@@ -579,7 +611,7 @@ def test_e2e_non_holder_input_gets_one_not_active(broker):
         hints = [f for f in frames if f.get("type") == "error"
                  and f.get("reason") == "not_active"]
         assert hints == [{"type": "error", "reason": "not_active",
-                          "session_id": wid}]
+                          "session": wid}]
         for ws in (desk, mine, holder, prod):
             await ws.close()
     asyncio.run(scenario())
@@ -620,3 +652,217 @@ def test_a_stalled_first_socket_leaves_time_for_a_healthy_one(
     assert resp.json["active_workspace"] == 0
     assert len(stalled.frames) == 1 and len(healthy.frames) == 1
     assert elapsed < 0.6 + 0.3, elapsed
+
+
+# ---- codex review round 1 --------------------------------------------------
+
+def test_a_takeover_cuts_only_the_terminals_its_losers_held_at_the_flip(
+        tmp_path, monkeypatch):
+    # B takes over from A; while B's statuses are held up by a stalled
+    # socket, C takes over and attaches a terminal as the holder. B's cut
+    # must have taken exactly the sockets its losers held at B's flip --
+    # never C's new one, whatever B does after its fan-out.
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        await c.connect("A")
+        await _stalled_loser(c, "L")
+        b = await c.connect("B")
+        cc = await c.connect("C")
+        entry = await app.ctx.registry.register(FakeWS(), _hello(248002))
+        term_a, term_c_old = FakeWS(), FakeWS()
+        entry.add_subscriber(term_a, "A")
+        entry.add_subscriber(term_c_old, "C")
+        b.push({"type": "become_active"})
+        await _settle(2)                   # B flipped; its fan-out is held
+        cc.push({"type": "become_active"})
+        await _settle(2)
+        assert c.ctx.active_client_id == "C"
+        term_c_new = FakeWS()              # C's terminal, opened as holder
+        entry.add_subscriber(term_c_new, "C")
+        await asyncio.sleep(0.8)           # B's fan-out times out
+        assert term_a.closed == 4409
+        assert term_c_old.closed == 4409   # C lost at B's flip
+        assert term_c_new.closed is None
+        await c.close_all()
+    asyncio.run(go())
+
+
+def test_a_socket_whose_handler_is_gone_is_not_written(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.connect("A")
+        b = await c.connect("B")
+        # B's handler is gone (its lock popped) but a fan-out still names
+        # the socket: it is skipped, not given a fresh unshared lock.
+        app.ctx.control_send_locks.pop(b)
+        n = len(b.sent)
+        a.hang_up()                        # release -> fan-out to b
+        await _settle()
+        assert len(b.sent) == n
+        await c.close_all()
+    asyncio.run(go())
+
+
+def test_the_send_bound_includes_waiting_for_the_socket_lock(
+        tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.connect("A")
+        b = await c.connect("B")
+        # Something holds a's send lock and never lets go: a status queued
+        # behind it must still give up within the bound and drop the socket.
+        await app.ctx.control_send_locks[a].acquire()
+        b.push({"type": "become_active"})
+        assert await _wait(lambda: a.closed == 1012, 2.0) is not None
+        await c.close_all()
+    asyncio.run(go())
+
+
+class _CancelOnPong(CtlWS):
+    """Cancels the handler task the instant its pong send completes -- the
+    moment Python 3.10's wait_for loses a cancellation (bpo-42130)."""
+
+    task = None
+
+    async def send(self, data):
+        await super().send(data)
+        if self.sent[-1].get("type") == "pong":
+            asyncio.get_running_loop().call_soon(self.task.cancel)
+
+
+def test_a_cancel_landing_as_a_send_completes_is_not_lost(
+        tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.attach("A", _CancelOnPong())
+        a.task = c.tasks[-1]
+        a.push({"type": "ping", "n": 1})
+        assert await _wait(lambda: a.task.done(), 2.0) is not None
+        assert "A" not in app.ctx.control_clients   # the finally ran
+        assert app.ctx.active_client_id is None
+        await c.close_all()
+    asyncio.run(go())
+
+
+class _HeldPong(CtlWS):
+    """Holds only the send of the pong with n == 1 until ``release`` is set;
+    every other frame goes straight through (sends are NOT serialized here,
+    unlike most transports, so only the broker can keep them in order)."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def send(self, data):
+        f = json.loads(data)
+        if f.get("type") == "pong" and f.get("n") == 1:
+            await self.release.wait()
+        self.sent.append(f)
+
+
+def test_lease_frames_on_one_socket_land_in_lease_order(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        a = await c.attach("A", _HeldPong())
+        b = await c.connect("B")
+        a.push({"type": "ping", "n": 1})   # built at gen G, held in send
+        await _settle(2)
+        b.push({"type": "become_active"})  # gen G+1 status for a
+        await _settle(4)
+        a.release.set()
+        await _settle()
+        gens = [(f["type"], f["gen"]) for f in a.sent]
+        assert [g for _, g in gens] == sorted(g for _, g in gens), gens
+        assert a.sent[-1]["type"] == "status"
+        assert a.sent[-1]["active"] is False
+        await c.close_all()
+    asyncio.run(go())
+
+
+class _HintGate(FakeBrowser):
+    """Fails the first not_active send, stalls the second until ``go``."""
+
+    def __init__(self):
+        super().__init__()
+        self.hint_sends = 0
+        self.go = asyncio.Event()
+
+    async def send(self, data):
+        if isinstance(data, str) and '"not_active"' in data:
+            self.hint_sends += 1
+            if self.hint_sends == 1:
+                raise ConnectionError("first hint send fails")
+            if self.hint_sends == 2:
+                await self.go.wait()
+        await super().send(data)
+
+
+def test_a_hint_is_retried_after_a_failed_send_and_never_wedges_the_loop():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = LeaseCtx("phone", gen=2)
+        entry = await _registered(reg)
+        desk = _HintGate()
+        task = _attach(reg, ctx, entry, desk, "desktop")
+        await _relay_settle()
+        desk.push({"type": "input", "data": "1"})   # hint send raises
+        await _relay_settle()
+        assert desk.hint_sends == 1 and _errors(desk) == []
+        desk.push({"type": "input", "data": "2"})   # retried: it stalls
+        await asyncio.sleep(0.8)                    # past the send bound
+        assert desk.hint_sends == 2
+        # The read loop moved on: the desktop now holds the lease and its
+        # next input reaches the producer.
+        ctx.active_client_id, ctx.lease_generation = "desktop", 3
+        desk.push({"type": "input", "data": "mine"})
+        await _relay_settle()
+        assert _producer_frames(entry) == [{"type": "input", "data": "mine"}]
+        desk.go.set()
+        desk.hang_up()
+        await task
+    asyncio.run(scenario())
+
+
+def test_a_timed_out_relay_send_closes_that_socket(tmp_path, monkeypatch):
+    class _Stalled(_StalledWS):
+        closed = None
+
+        async def close(self, code=1000, reason=""):
+            self.closed = code
+
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 0.6
+    snap = {"active_workspace": 0,
+            "workspaces": [{"index": 0, "id": "L1", "name": None}]}
+    stalled, healthy = _Stalled(), _FakeBrowserWS(app, _reply_ok(snap))
+    app.ctx.control_clients["two"] = [stalled, healthy]
+    app.ctx.active_client_id = "two"
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    assert resp.status == 200, resp.json
+    assert stalled.closed == 1012
+
+
+def test_log_ids_carry_no_control_characters(tmp_path, monkeypatch, caplog):
+    app = _app(tmp_path, monkeypatch)
+    caplog.set_level(logging.INFO, logger="webterm.broker.app")
+
+    async def go():
+        c = Ctl(app)
+        await c.connect("ev\nil\r\x1b-0000000")
+        await c.close_all()
+    asyncio.run(go())
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("lease: ")]
+    assert lines[0].startswith("lease: ev?il??- claimed a free lease")
+    assert all("\n" not in m and "\r" not in m and "\x1b" not in m
+               for m in lines)
