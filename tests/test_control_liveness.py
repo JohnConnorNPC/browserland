@@ -701,7 +701,8 @@ s1 = w.last();
 s1._drop(4401);                          // the REPLACEMENT is refused
 ok(w.log.indexOf('auth') !== -1 && w.poll && w.poll.authNeeded === true,
     'N7a a replacement 4401 shows the auth overlay at once');
-ok(s0.closed && w.rec().ws === null && w.rec().cand === null && w.rec().reattachTimer === null,
+ok(s0.closed && w.rec().ws === null && w.rec().cur === null && w.rec().cand === null
+    && w.rec().reattachTimer === null,
     'N7b ...retires the old socket too and schedules no re-dial');
 const nAfter = w.sockets.length;
 w.advance(60000);
@@ -966,3 +967,15 @@ def test_every_scenario_passed_and_node_exited_clean(run):
         f"expected {EXPECTED_ASSERTS} asserts, ran {run['passed']}\n{run['stdout']}")
     assert len(run["results"]) == EXPECTED_ASSERTS
     assert run["rc"] == 0, run["stderr"]
+
+
+def test_w14_auth_success_clears_auth_needed_then_redials_control():
+    """SH-3's timer skips while ``authNeeded`` is set, so the flag must be
+    cleared by the real auth-success path -- which lives in 63 (the auth
+    form), outside the sliced section, so it is pinned by source: the form's
+    submit clears the host's ``authNeeded`` BEFORE it re-dials /control."""
+    src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    clear = "            if (st) st.authNeeded = false;"
+    redial = "            try { openControlWs(host); } catch (_) {}"
+    assert src.count(clear) == 1 and src.count(redial) == 1
+    assert src.index(clear) < src.index(redial)

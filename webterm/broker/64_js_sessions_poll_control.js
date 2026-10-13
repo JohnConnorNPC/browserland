@@ -435,10 +435,12 @@
                 // #244: an MCP desktop op relayed by this broker to us, the
                 // lease holder. Fire-and-forget: handleDesktopRpc owns its
                 // own errors and always answers (or errors into) exactly one
-                // desktop_result frame per rid. desktopReply answers only
-                // while this socket is rec.ws: a replacement's first frame is
-                // its status (promoting it) and a retired socket handles
-                // nothing, so every socket that can deliver an rpc is rec.ws.
+                // desktop_result frame per rid. Every socket that can DELIVER
+                // an rpc is rec.ws (a replacement's first frame is its status,
+                // which promotes it; a retired socket handles nothing). An op
+                // that is still running when its socket is promoted away is
+                // answered on the new rec.ws if it talks to the same broker run
+                // (desktopReply -> _desktopReplySocket, #248 SH-1).
                 if (msg.type === 'desktop_rpc') {
                     Promise.resolve(handleDesktopRpc(hid, rec, ws, msg))
                         .catch(function () {});
