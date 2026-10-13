@@ -62,6 +62,15 @@
             };
         }
         function _stateSerialize() { return JSON.stringify(_stateBlob()); }
+        // #247 item 4 / N1: every rev a response carries is a safe
+        // non-negative integer, and a state body (a GET 200, a 409) also
+        // carries object settings and layout -- a proxy's `409 {}` or
+        // `{rev: 7}` must never be adopted as an EMPTY state.
+        function _stateRevOk(v) { return Number.isSafeInteger(v) && v >= 0; }
+        function _stateBodyOk(b) {
+            const obj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+            return obj(b) && _stateRevOk(b.rev) && obj(b.settings) && obj(b.layout);
+        }
 
         function schedulePush() {
             if (_deactivated) return;            // torn down — never push state
@@ -119,8 +128,8 @@
                             && typeof probeControl === 'function') {
                         probeControl(homeHostId());
                     }
-                    if (cur && typeof cur === 'object') {
-                        _stateRev = (typeof cur.rev === 'number') ? cur.rev : _stateRev;
+                    if (_stateBodyOk(cur)) {
+                        _stateRev = cur.rev;
                         if (!_statePushAgain && _stateSerialize() === serialized) {
                             _applyServerState(cur);          // no local edit pending — yield
                         } else {
@@ -132,7 +141,14 @@
                     }
                 } else if (r.ok) {
                     const resp = await r.json();
-                    if (resp && typeof resp.rev === 'number') _stateRev = resp.rev;
+                    if (!resp || !_stateRevOk(resp.rev)) {
+                        // A 200 without a usable rev taught us nothing: the PUT
+                        // may or may not have landed, so it is still owed (the
+                        // next pull acknowledges it if it did).
+                        if (epoch === _viewEpoch) _statePushFailed = true;
+                        return;
+                    }
+                    _stateRev = resp.rev;
                     _stateLastSerialized = serialized;
                     _statePushFailed = false;
                     _stateRevSkipped = false;
@@ -219,13 +235,13 @@
             } finally {
                 clearTimeout(timer);
             }
-            if (!srv || typeof srv !== 'object') return;
+            if (!_stateBodyOk(srv)) return;         // #247 N1
             // A tab back at its baseline (a failed edit undone without a
             // save) owes nothing, whatever the server's rev says.
             if (_statePushFailed && _stateSerialize() === _stateLastSerialized) {
                 _statePushFailed = false;
             }
-            const srvRev = (typeof srv.rev === 'number') ? srv.rev : 0;
+            const srvRev = srv.rev;
             if (srvRev === 0) {
                 if (initial) {
                     _stateRev = 0;
@@ -244,7 +260,7 @@
                 return;
             }
             const srvSerialized = JSON.stringify({
-                settings: srv.settings || {}, layout: srv.layout || {} });
+                settings: srv.settings, layout: srv.layout });
             _stateRev = srvRev;                  // take the new rev either way
             if (!initial && srvSerialized === _stateLastSerialized) {
                 _stateRevSkipped = false;        // the server is our baseline
