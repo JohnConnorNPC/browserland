@@ -262,7 +262,8 @@ function mkWorld() {
         return fw.prefs._layout.columns.length === 4
             && fw.prefs._layout.columns[0].id === 'c1';
     }
-    for (const mode of ['500', '401', 'throw']) {
+    // #247 Q2: 'throw' runs first, so E2b below uses a world whose retry lands.
+    for (const mode of ['throw', '500', '401']) {
         w = await failedEdit(mode);
         const s4 = w.api.st();
         ok(w.puts.length === 1 && !s4.timer && !s4.inFlight && !s4.again
@@ -273,9 +274,17 @@ function mkWorld() {
         ok(keptEdit(w), 'E1 (' + mode + ') a failed push keeps the local edit (no adopt)');
         w.api.savePrefs();
         await w.firePush();
-        ok(w.puts.length === 2 && w.puts[1].baseRev === 2
-            && w.puts[1].layout.columns.length === 4 && w.server.rev === 3,
-            'E2 (' + mode + ') the next save retries the failed edit on the rebased rev');
+        if (mode === 'throw') {
+            // #247 Q2 (owner): a THROWN failure may have landed, so its retry
+            // uses the ORIGINAL base: a peer wrote meanwhile, so it yields.
+            ok(w.puts.length === 2 && w.puts[1].baseRev === 1 && w.server.rev === 2
+                && J(w.prefs._layout) === J(L1),
+                'E2 (throw) a thrown failure retries on its original base and yields to the peer (Q2)');
+        } else {
+            ok(w.puts.length === 2 && w.puts[1].baseRev === 2
+                && w.puts[1].layout.columns.length === 4 && w.server.rev === 3,
+                'E2 (' + mode + ') the next save retries the failed edit on the rebased rev');
+        }
     }
     w.prefs._layout.focusedCol = 1;                // dirty, nothing pending
     w.otherTabWrites(L1);
@@ -617,7 +626,10 @@ def test_a_failed_push_still_owes_the_edit(scenario_run):
     for mode in ("500", "401", "throw"):
         _ok(scenario_run, f"E0 precondition ({mode}): the push failed, nothing re-queued")
         _ok(scenario_run, f"E1 ({mode}) a failed push keeps the local edit (no adopt)")
+    for mode in ("500", "401"):
         _ok(scenario_run, f"E2 ({mode}) the next save retries the failed edit on the rebased rev")
+    # #247 Q2 (owner): a thrown failure retries on its original base.
+    _ok(scenario_run, "E2 (throw) a thrown failure retries on its original base and yields to the peer (Q2)")
     _ok(scenario_run, "E2b once the retry lands, unsaved dirt adopts again")
     _ok(scenario_run, "E3 after an adopt supersedes a failed edit, unsaved dirt adopts again")
 

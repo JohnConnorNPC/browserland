@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 37
+EXPECTED_ASSERTS = 48
 
 _HARNESS = r"""
 'use strict';
@@ -431,6 +431,87 @@ function mkWorld() {
     await w.rebuild();
     ok(w.srv() === J(['P1']), 'D8 an in-flight PUT that fails with a 500 after the teardown stays owed and lands on regain (R1)');
 
+    // ---- 247-5: thrown failures, editGen (S4), own-write recognition (R2) ---
+    // F1 (the issue): the PUT landed, its reply was lost, a peer built on it.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'commitThrow'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    w.server = { rev: 3, settings: {}, layout: { cols: ['E', 'peer'] } };
+    await w.api.pullState(false); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['E', 'peer']) && w.cols() === J(['E', 'peer']),
+        'F1 a false debt never reverts the peer write built on it (original base -> 409 -> yield)');
+    // F2: it landed and nobody wrote -> the acknowledgement, no PUT.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'commitThrow'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    await w.api.pullState(false); await flush(); await w.firePush();
+    ok(w.puts.length === 1 && w.api.rev() === 2, 'F2 a lost reply whose PUT landed is acknowledged by the next pull (no retry)');
+    // F3: it never landed and nobody wrote -> it lands on the original base.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'throw'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    await w.api.pullState(false); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['E']) && J(w.putsLog()) === J(['PUT@1:["E"]', 'PUT@1:["E"]']),
+        'F3 a thrown PUT that never landed retries on its original base and lands');
+    // F4: a NEW edit after the throw is fresh intent: it rebases and wins.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'throw'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    w.server = { rev: 2, settings: {}, layout: { cols: ['P'] } };
+    await w.api.pullState(false); await flush();
+    w.edit(['E2']); await w.firePush(); await flush();
+    ok(w.srv() === J(['E2']), 'F4 a new edit (a byte change) after a throw rebases and lands (policy a)');
+    // F5: ABA -- edit away and back to the same bytes is still new intent.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'throw'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    w.server = { rev: 2, settings: {}, layout: { cols: ['P'] } };
+    await w.api.pullState(false); await flush();
+    w.edit(['X']); w.edit(['E']); await w.firePush(); await flush();
+    ok(w.srv() === J(['E']), 'F5 edit-away-and-back (ABA) is new intent: it rebases and lands');
+    // F7 (S4): a byte-identical save during the debt is NOT new intent.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'commitThrow'; w.edit(['E']); await w.firePush(); w.putMode = null;
+    w.server = { rev: 3, settings: {}, layout: { cols: ['E', 'peer'] } };
+    w.api.savePrefs();                                                 // nothing changed
+    await w.api.pullState(false); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['E', 'peer']), 'F7 a byte-identical save during the debt keeps the original base (S4)');
+    // F8 (S4): a byte-identical save during a PUT -> the 409 still yields.
+    w = mkWorld(); await w.boot();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['PEER'] } };
+    w.holdPut = true; w.edit(['MINE']); await w.firePush();
+    w.api.savePrefs(); await w.firePush();                             // byte-identical, mid-flight
+    w.holdPut = false; await w.release(); await w.firePush(); await flush();
+    ok(w.srv() === J(['PEER']) && w.cols() === J(['PEER']) && w.puts.length === 1,
+        'F8 a byte-identical save during a PUT does not re-push over the 409 winner (S4)');
+    // F9 (own write): a lost-reply PUT, then a new edit on the stale base.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'commitThrow'; w.edit(['E1']); await w.firePush(); w.putMode = null;
+    w.edit(['E2']); await w.firePush(); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['E2']) && J(w.putsLog()) === J(['PUT@1:["E1"]', 'PUT@1:["E2"]', 'PUT@2:["E2"]']),
+        'F9 a 409 whose winner is our own previous write rebases on it and lands');
+    // F10 (R2): a peer reverts to an OLDER send of ours -> that is a peer write.
+    w = mkWorld(); await w.boot();
+    w.edit(['A1']); await w.firePush();                                // lands at 2
+    w.putMode = 'commitThrow'; w.edit(['B']); await w.firePush(); w.putMode = null;   // lands at 3, reply lost
+    w.server = { rev: 4, settings: {}, layout: { cols: ['A1'] } };     // a peer reverts to A1
+    w.edit(['C']); await w.firePush(); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['A1']) && w.putsLog().indexOf('PUT@4:["C"]') === -1,
+        'F10 a peer revert to an older send of ours is not taken for our write: the edit yields (R2)');
+    // D6b (M3, completed): the parked edit of D6 lands once the channel recovers.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'hangBody'; w.edit(['P1']); await w.firePush(); w.putMode = null;
+    w.edit(['P2']); w.api.teardown();
+    w.api.rebuildStart();
+    w.holdPut = true;
+    const fo6b = w.api.flushOwed(); await flush();
+    await w.fireDeadlines(); await flush(); await w.fireDeadlines();
+    await fo6b; await w.api.pullState(true); await flush();
+    w.holdPut = false; await w.release();
+    for (let i = 0; i < 3; i++) { await w.api.pullState(false); await flush(); await w.firePush(); await flush(); }
+    ok(w.srv() === J(['P2']), 'D6b ...and lands once the channel recovers (it never yields to our own P1)');
+    // E5b: a hung PUT, then a new edit with no poll in between.
+    w = mkWorld(); await w.boot();
+    w.putMode = 'hangBody'; w.edit(['H']); await w.firePush(); w.putMode = null;
+    await w.fireDeadlines();
+    w.edit(['H2']); await w.firePush(); await flush(); await w.firePush(); await flush();
+    ok(w.srv() === J(['H2']), 'E5b after a hung PUT the next edit lands without waiting for a poll');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -555,6 +636,23 @@ def test_247_3_84_wiring():
     regate = rb.index("if (_deactivated || epoch !== _viewEpoch) return;", flush)
     pull = rb.index("try { await pullState(true); } catch (_) {}")
     assert flush < regate < pull
+
+
+@pytest.mark.parametrize("label", [
+    "F1 a false debt never reverts the peer write built on it (original base -> 409 -> yield)",
+    "F2 a lost reply whose PUT landed is acknowledged by the next pull (no retry)",
+    "F3 a thrown PUT that never landed retries on its original base and lands",
+    "F4 a new edit (a byte change) after a throw rebases and lands (policy a)",
+    "F5 edit-away-and-back (ABA) is new intent: it rebases and lands",
+    "F7 a byte-identical save during the debt keeps the original base (S4)",
+    "F8 a byte-identical save during a PUT does not re-push over the 409 winner (S4)",
+    "F9 a 409 whose winner is our own previous write rebases on it and lands",
+    "F10 a peer revert to an older send of ours is not taken for our write: the edit yields (R2)",
+    "D6b ...and lands once the channel recovers (it never yields to our own P1)",
+    "E5b after a hung PUT the next edit lands without waiting for a poll",
+])
+def test_247_5_thrown_failures_and_own_writes(run, label):
+    _ok(run, label)
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):

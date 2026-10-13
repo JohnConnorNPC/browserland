@@ -68,6 +68,40 @@
         // Q1: a parked edit is pushed when this page takes the lease back.
         // false = it is dropped at the rebuild instead.
         const STATE_PUSH_PARKED_ON_REGAIN = true;
+        // Q2 / item 5: a THROWN failure (the PUT may have landed: offline, a
+        // lost reply, the deadline, a 200 without a rev) retries on its
+        // ORIGINAL base while the edit is unchanged -- it lands only if nobody
+        // wrote meanwhile and yields otherwise. false = rebase.
+        const STATE_THROWN_RETRY_YIELDS = true;
+        // ---- #247 own-write recognition --------------------------------------
+        // The bytes of this tab's last few PUTs. A write whose reply was lost
+        // DID land when the server later shows exactly its bytes; an owed or
+        // parked edit made on top of it must then move its base up to that
+        // rev rather than yield to our own write (found re-probing M3 x Q2).
+        // R2: only the DIRECT parent counts -- the newest send older than the
+        // edit. A peer that reverts to an OLDER send's bytes is a peer write.
+        const _stateRecentSends = [];
+        function _stateNoteSend(bytes, gen) {
+            _stateRecentSends.push({ bytes: bytes, gen: gen });
+            if (_stateRecentSends.length > 4) _stateRecentSends.shift();
+        }
+        function _stateDirectParent(gen) {
+            let best = null;
+            for (const s of _stateRecentSends) {
+                if (s.gen < gen && (!best || s.gen > best.gen)) best = s;
+            }
+            return best;
+        }
+        function _stateSawOwnWrite(bytes, rev) {
+            if (_stateFail) {
+                const par = _stateDirectParent(_stateFail.gen);
+                if (par && par.bytes === bytes && _stateFail.baseRev < rev) _stateFail.baseRev = rev;
+            }
+            if (_stateParked && _stateParkBase !== null) {
+                const par = _stateDirectParent(_stateParkGen);
+                if (par && par.bytes === bytes && _stateParkBase < rev) _stateParkBase = rev;
+            }
+        }
         // #246 review: a rev was taken WITHOUT adopting its state (a pull
         // skipped for a pending push, or a 409 kept the local edit). If that
         // push then sends nothing (the edit undone inside the debounce, a
@@ -215,7 +249,12 @@
                 mine = new Promise(r => { release = r; });
                 _stateChannel = mine;
                 _stateSentGen = gen;
+                _stateNoteSend(serialized, gen);
                 let baseRev = _stateRev;
+                const f = _stateFail;
+                if (f && f.gen === gen && f.thrown && STATE_THROWN_RETRY_YIELDS) {
+                    baseRev = f.baseRev;          // Q2: its original base
+                }
                 if (_stateParked && _stateParkGen === gen && _stateParkBase !== null) {
                     baseRev = _stateParkBase;     // Q1: its teardown-time base
                 }
@@ -282,8 +321,23 @@
                         return;
                     }
                     if (_stateBodyOk(cur)) {
+                        const winnerBytes = JSON.stringify({
+                            settings: cur.settings, layout: cur.layout });
+                        _stateSawOwnWrite(winnerBytes, cur.rev);
                         _stateRev = cur.rev;
-                        if (!_statePushAgain && _stateSerialize() === serialized) {
+                        const par = _stateDirectParent(gen);
+                        if (par && par.bytes === winnerBytes) {
+                            // The "winner" is OUR previous write (its reply was
+                            // lost): this edit was made on top of it. Rebase on
+                            // it and re-push; never yield to ourselves.
+                            _stateLastSerialized = winnerBytes;
+                            _stateRevSkipped = false;
+                            _statePushAgain = true;
+                        } else if (_stateEditGen === gen) {
+                            // #247 S4: no NEW edit (a byte change) since the
+                            // send -- yield. (A byte-identical re-save during the
+                            // PUT used to set _statePushAgain and re-push over
+                            // the winner.)
                             _applyServerState(cur);          // no local edit pending — yield
                         } else {
                             _stateLastSerialized = null;     // keep local; force the re-push
@@ -443,6 +497,7 @@
             }
             const srvSerialized = JSON.stringify({
                 settings: srv.settings, layout: srv.layout });
+            _stateSawOwnWrite(srvSerialized, srvRev);
             _stateRev = srvRev;                  // take the new rev either way
             if (!initial && srvSerialized === _stateLastSerialized) {
                 _stateRevSkipped = false;        // the server is our baseline
