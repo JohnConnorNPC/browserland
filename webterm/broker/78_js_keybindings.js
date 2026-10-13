@@ -88,6 +88,12 @@
             // the keydown's own gesture, which this dispatcher keeps.
             { id: 'open-in-window', label: 'Open terminal in new window',
               run: () => { if (frontId) detachWindow(frontId); } },
+            // #248 C3: re-send this screen's size to the PTY (and reset a
+            // floating box first). Unbound by default.
+            { id: 'fit-to-screen', label: 'Fit focused window to this screen',
+              run: () => { if (frontId) fitToThisScreen(windows.get(frontId)); } },
+            { id: 'fit-all-to-screen', label: 'Fit all windows to this screen',
+              run: () => fitAllToThisScreen() },
             // #213 moved 'toggle-help' out of this list: it is contributed by
             // mods/help through ctx.registerKeyActions, backed by the
             // 'help:toggle' command, so the action comes and goes with the mod
@@ -799,6 +805,9 @@
             if (win.type !== 'app') {
                 items.push({ label: 'Open in new window', enabled: !win.detached,
                              action: () => detachWindow(win.id) });
+                // #248 C3: give the PTY this screen's size back.
+                items.push({ label: 'Fit to this screen', enabled: !win.detached,
+                             action: () => fitToThisScreen(win) });
             }
             items.push({ label: win.minimized ? 'Restore' : 'Minimize',
                          enabled: true,
@@ -904,6 +913,10 @@
             // Guarded: with nothing contributed in tiling mode `items` is
             // still empty, and a leading separator would render as a stray rule.
             if (items.length) items.push({ sep: true });
+            // #248 C3: every terminal re-sends this screen's size.
+            items.push({ label: 'Fit all to this screen',
+                         enabled: Array.from(windows.values()).some(w => !w.disposed && w.type !== 'app'),
+                         action: fitAllToThisScreen });
             items.push({ label: '🎛 Control panel', enabled: true, action: launchControlPanel });
             if (lastLayoutSnapshot && !tiling) {
                 items.push({ sep: true });

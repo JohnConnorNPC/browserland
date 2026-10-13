@@ -448,6 +448,32 @@
             }
         }
 
+        // #248 C3 (owner O4): "Fit to this screen" -- the manual escape when
+        // a terminal is at another device's size. A floating window's box is
+        // reset first to this device's default size (the Lock Size default,
+        // clamped to the desktop) and persisted, because its box may already
+        // be the damaged one (shrunk to the other device's grid and saved by
+        // the pre-#248 snap), and a refit derives the grid from the box
+        // (audit M7). Then a forced resize from the box. A tiled window's box
+        // is the strip's, so it only refits; the detached surface's window
+        // is the viewport. A window that cannot send right now (minimized,
+        // controlled) keeps the mark and sends when it can.
+        function fitToThisScreen(win) {
+            if (!win || win.disposed || win.type === 'app' || win.detached) return;
+            if (!win.tiled && !isDetachedSurface()) {
+                const size = defaultPixelSize();
+                const g = win.geom || {};
+                applyGeomToWindow(win, { left: g.left | 0, top: g.top | 0,
+                                         width: size.width, height: size.height });
+                savePrefs();
+            }
+            win.needsReclaim = true;
+            refitSoon(win);
+        }
+        function fitAllToThisScreen() {
+            for (const win of windows.values()) fitToThisScreen(win);
+        }
+
         function scheduleResize(win) {
             if (win.resizeTimer) clearTimeout(win.resizeTimer);
             win.resizeTimer = setTimeout(() => {
