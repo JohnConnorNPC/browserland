@@ -7918,7 +7918,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # snapshot above and the registration below -- an await here opens a
         # window where a deposed holder is sent the call.
         frame = protocol.desktop_rpc_frame(rid, op, dict(args,
-                                                         visible=visible))
+                                                         visible=visible),
+                                           gen=generation,
+                                           boot_id=ctxd.boot_id)
         future = loop.create_future()
         ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
         try:
