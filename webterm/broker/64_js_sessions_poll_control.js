@@ -384,6 +384,7 @@
                 rec: rec, ws: ws, role: role, done: false,
                 pingTimer: null, deadlineTimer: null, connectTimer: null,
                 pendN: null, lastN: 0, missed: 0, capable: false, statusSeen: false,
+                openedAt: 0,
             };
             if (role === 'cur') { rec.cur = st; rec.ws = ws; }
             else rec.cand = st;
@@ -392,14 +393,14 @@
             // accepted the upgrade and then went silent) would otherwise sit
             // as a replacement forever, with no deadline (capability comes
             // from that status) and every probe refused while it is pending.
-            st.connectTimer = setTimeout(() => {
-                st.connectTimer = null;
-                if (!st.done && !st.statusSeen) _controlSocketGone(st, null);
-            }, CONTROL_CONNECT_TIMEOUT_MS);
+            _armStatusWatchdog(st);
             ws.onopen = () => {
                 if (st.done) { try { ws.close(); } catch (_) {} return; }
                 if (st.role === 'cur') rec.attempts = 0;
                 rec.lastOpenAt = Date.now();
+                st.openedAt = rec.lastOpenAt;
+                // A full budget for the first status, whatever the upgrade took.
+                _armStatusWatchdog(st);
                 // #239: a new /control socket may be a new broker run, whose
                 // control gens are re-seeded from its clock: forget this
                 // host's, so its next view per terminal is taken whatever its
@@ -448,6 +449,14 @@
             };
             ws.onerror = () => { /* onclose schedules the reconnect */ };
             return st;
+        }
+
+        function _armStatusWatchdog(st) {
+            if (st.connectTimer) clearTimeout(st.connectTimer);
+            st.connectTimer = setTimeout(() => {
+                st.connectTimer = null;
+                if (!st.done && !st.statusSeen) _controlSocketGone(st, null);
+            }, CONTROL_CONNECT_TIMEOUT_MS);
         }
 
         // Send one nonce'd ping on `st`. The deadline protects the OLDEST ping
@@ -528,7 +537,13 @@
                 st.capable = typeof msg.gen === 'number'
                     && typeof msg.bootId === 'string';
                 _armPongDeadline(st);
-                if (st.role === 'cand') _promoteControl(st);
+                if (st.role === 'cand') {
+                    // A replacement on the SAME broker run keeps the #239
+                    // gen order (resetting it would let a delayed older view
+                    // in); a different run re-seeds its gens, so forget them.
+                    if (msg.bootId !== rec.leaseBoot) resetControlBaselines(rec.hostId);
+                    _promoteControl(st);
+                }
             }
             if (rec.hostId === homeHostId()) _clearLostContact();
             // Two sockets of one replacement can deliver statuses out of the
@@ -578,7 +593,6 @@
             rec.attempts = 0;
             if (rec.reattachTimer) { clearTimeout(rec.reattachTimer); rec.reattachTimer = null; }
             if (old && old !== st) _retireControlSocket(old);
-            resetControlBaselines(rec.hostId);
         }
 
         // Stop everything `st` owns and close its socket. Idempotent.
@@ -633,10 +647,10 @@
             // its 0.5 s budget -- the path is fine, and if that was the
             // holder's only socket the lease was just released, so another
             // device could auto-claim during a 2 s backoff. Re-dial at once,
-            // but only off a channel that had been up for REATTACH_STABLE_MS:
+            // but only off a socket that had been up for REATTACH_STABLE_MS:
             // a broker that 1012s every fresh socket backs off as usual.
-            if (ev && ev.code === 1012 && rec.lastOpenAt
-                    && (Date.now() - rec.lastOpenAt) >= REATTACH_STABLE_MS) {
+            if (ev && ev.code === 1012 && st.openedAt
+                    && (Date.now() - st.openedAt) >= REATTACH_STABLE_MS) {
                 const h = hostById(rec.hostId);
                 if (h) { rec.attempts = 1; openControlWs(h); return; }
             }

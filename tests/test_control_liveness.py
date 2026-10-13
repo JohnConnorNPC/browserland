@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 77
+EXPECTED_ASSERTS = 82
 
 _HARNESS = r"""
 'use strict';
@@ -586,8 +586,15 @@ s1 = w.last(); s1._open();
 ok(w.log.filter(x => x === 'reset:local').length === resetsAtOpen,
     'K4a a replacement opening does not reset the #239 control baselines');
 s1._recv(ST(true));
-ok(w.log.filter(x => x === 'reset:local').length === resetsAtOpen + 1,
-    'K4 ...its promotion does, once');
+ok(w.rec().ws === s1 && w.log.filter(x => x === 'reset:local').length === resetsAtOpen,
+    'K4 ...nor does its promotion on the SAME broker run (the gen order stands)');
+w = mkWorld();
+s0 = connected(w, ST(true, { bootId: 'b1' }));
+const r0 = w.log.filter(x => x === 'reset:local').length;
+w.advance(10000);
+s1 = w.last(); s1._open(); s1._recv(ST(true, { bootId: 'b2' }));
+ok(w.log.filter(x => x === 'reset:local').length === r0 + 1,
+    'K4b a replacement that reports a NEW broker run resets the baselines once');
 
 w = mkWorld();
 s0 = connected(w, ST(true));
@@ -630,6 +637,30 @@ const td = w.log.filter(x => x === 'teardown').length;
 pong(s1, s1.lastPing().n, { active: true, activeClientId: 'me', gen: 5, bootId: 'b1' });
 ok(td === 1 && w.log.filter(x => x === 'rebuild').length === 0 && w.env._homeActive === false,
     'Q4 an older-gen pong (any socket) cannot undo a newer status');
+
+// ---- codex review round 2 ----------------------------------------------------
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last();
+w.advance(4800);                         // a slow upgrade
+s0._open();
+w.advance(4000);
+ok(!s0.closed, 'W1 a slow upgrade still gets a full 5 s for its first status');
+s0._recv(ST(true));
+w.advance(2000);
+ok(!s0.closed && w.rec().ws === s0, 'W2 ...and the status arriving keeps it');
+
+w = mkWorld();
+s0 = connected(w, ST(true));             // opened at t0, never answers its first ping
+w.advance(10000);                        // miss 1 at t+10 -> replacement
+s1 = w.last(); s1._open(); s1._drop(1006);   // it opens, then fails
+pong(s0, s0.lastPing().n);               // the original answers its second chance
+w.advance(1000);
+ok(w.sockets.length === 2 && !s0.closed && w.rec().cand === null,
+    'Q5a precondition: a replacement opened and failed; the long-lived socket is in charge');
+s0._drop(1012);
+ok(w.rec().reattachTimer === null && w.sockets.length === 3,
+    'Q5 the 1012 stability test reads the closing socket, not a replacement that just opened');
 
 console.log(pass + ' passed, ' + fail + ' failed');
 """
@@ -789,7 +820,8 @@ def test_reclaim_per_new_holding(run, label):
     "K2 an OPEN first socket that never reports is abandoned at 5 s too",
     "K3 a replacement older-gen first status promotes it but cannot undo the newer flip",
     "K4a a replacement opening does not reset the #239 control baselines",
-    "K4 ...its promotion does, once",
+    "K4 ...nor does its promotion on the SAME broker run (the gen order stands)",
+    "K4b a replacement that reports a NEW broker run resets the baselines once",
     "K5a precondition: no notice before 10 s after the first missed deadline",
     "K5 a silent channel shows the notice 10 s after its FIRST missed deadline",
     "K6 a restarted broker (new bootId, lower gen) is not mistaken for a stale status",
@@ -805,6 +837,16 @@ def test_codex_round1(run, label):
     "Q4 an older-gen pong (any socket) cannot undo a newer status",
 ])
 def test_manager_note_1012_and_pong_order(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "W1 a slow upgrade still gets a full 5 s for its first status",
+    "W2 ...and the status arriving keeps it",
+    "Q5a precondition: a replacement opened and failed; the long-lived socket is in charge",
+    "Q5 the 1012 stability test reads the closing socket, not a replacement that just opened",
+])
+def test_codex_round2(run, label):
     _ok(run, label)
 
 
