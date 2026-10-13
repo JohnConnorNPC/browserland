@@ -2,6 +2,12 @@
 <html>
 <head>
     <title>Browserland</title>
+    <!-- #249: without this a phone lays the page out at its 980px default and
+         zooms it out to ~40%, so a tiled terminal fits 61x120 of unreadable
+         text. Deliberately NO interactive-widget: resizes-content would resize
+         the PTY on every on-screen-keyboard toggle (the lease holder owns the
+         size, #248), so the keyboard is allowed to cover the bottom rows. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <!-- #22: the build id (package version + git short hash) of the broker
          process actually serving this page, substituted at assembly. Grep-able
          by design -- see ui.py's _BUILD_PLACEHOLDER for the full why, including

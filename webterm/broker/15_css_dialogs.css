@@ -611,3 +611,39 @@
         .set-mod-policy-note {
             font-size: 11px; color: var(--fg-dim); flex: 1 1 auto; min-width: 0;
         }
+
+        /* ---- #249 phone layout. The viewport meta (00_head.html) makes a phone
+           lay out at its real width; this is the smallest set of rules that
+           keeps the chrome usable there. EVERY rule is gated on a narrow
+           max-width, so a desktop browser (any pointer, any size above 900px)
+           is pixel- and rect-identical: tests/playwright_phone.py compares the
+           page with and without this block, and tests/test_phone_viewport.py
+           pins that nothing here is top-level. It sits at the END of the core
+           CSS: later than the base .tb-btn/.title-text rules it overrides; mod
+           stylesheets splice in after it, so a rule here that must beat one
+           gets an ID or an extra class. */
+        @media (max-width: 520px) {
+            /* The clock chip alone is 133px of a 390px taskbar and squeezes the
+               window chips to 0. It is a mod node whose display is an inline
+               style (clock.js), so only !important can win. */
+            #clock-chip { display: none !important; }
+            /* Tighter taskbar rhythm: a 320px phone has ~45px left for the
+               window chips otherwise. */
+            #taskbar { gap: 4px; padding: 0 4px; }
+            #taskbar-items { gap: 4px; }
+            /* Title bars: drop the cosmetic buttons so the name is readable.
+               NOT hidden, on purpose: the MCP button (a security indicator of
+               what the broker exposes), min/close, and a recorder button that is
+               recording or paused (it is the only way to stop it). */
+            .term-window .title-bar .ti-id-badge,
+            .term-window .title-bar .btn-rec:not(.recording):not(.rec-paused),
+            .term-window .title-bar .color-btn { display: none; }
+        }
+        /* Touch targets on a touch screen no wider than a tablet: 22x18 is too
+           small for a finger. The title bar is --title-h (26px), so 24px is the
+           tallest that still fits, and 30px wide keeps the title text room. A
+           touch laptop at desktop width is deliberately left alone. */
+        @media (pointer: coarse) and (max-width: 900px) {
+            .term-window .tb-btn { width: 30px; height: 24px; }
+        }
+        /* ---- end #249 phone layout */
