@@ -109,68 +109,18 @@
                      hostId: win.hostId,
                      hostLabel: (hostById(win.hostId) || {}).label };
 
-            // A `resized` frame: accept the producer's grid, and snap a float
-            // to it so peer browsers follow a remote drag-resize.
+            // A `resized` frame: the producer's grid. The terminal follows it;
+            // the window box never does (#248, owner O3). It used to snap a
+            // float's box to the grid and PERSIST it, so peer tabs followed a
+            // drag-resize -- but a grid set by another device (the owner's
+            // phone) then shrank and saved the desktop's floats, and every
+            // later refit measured that shrunken box and re-sent the phone's
+            // grid. The box is this device's own; a lease holder re-asserts
+            // its grid from it (C1), and "Fit to this screen" resets it.
             function applyResized(data) {
                 const cols = Math.max(1, data.cols | 0);
                 const rows = Math.max(1, data.rows | 0);
                 try { win.term.resize(cols, rows); } catch (_) {}
-                // Tiled windows: flex owns the pixel box, so never snap the
-                // .term-window size to the grid — just accept the grid.
-                if (win.tiled) return;
-                // #226: the detached surface's window is the viewport; it
-                // is never snapped to a grid it dictated itself.
-                if (isDetachedSurface()) return;
-                // Locked clients refuse peer-driven size snaps — the
-                // local pixel area must stay at lockedSize() regardless
-                // of what an unlocked peer dragged to.
-                if (isSizeLocked()) return;
-                // Snap the .term-window pixel size to the new grid so peer
-                // browsers follow a remote drag-resize. Originator's drag
-                // produced these exact dims so this is usually identity
-                // (or a small grid-alignment snap).
-                const dims = readCellDims(win);
-                if (dims) {
-                    // .term-window box-model (content-box):
-                    //   borders: 2px each side (4 horiz, 4 vert)
-                    //   .term-body padding: 4px each side (8 horiz, 8 vert)
-                    //   title-bar: 26px (vert only)
-                    // -> outer offsetWidth  = grid_w + 12
-                    // -> outer offsetHeight = grid_h + 38
-                    // ceil avoids fractional cellW shaving cols on the
-                    // floor() round-trip in sendResize().
-                    const targetW = Math.ceil(cols * dims.w) + 12;
-                    const targetH = Math.ceil(rows * dims.h) + 38;
-                    const curW = win.dom.offsetWidth;
-                    const curH = win.dom.offsetHeight;
-                    // Tolerate up to one cell of drift before snapping.
-                    // readCellDims() varies a hair between fresh term
-                    // instances (font/canvas measurement), so on
-                    // close+reopen a sub-cell drift would otherwise drop
-                    // a row/col and shrink the window each cycle. A
-                    // real peer-sync from a remote drag-resize moves the
-                    // size by many cells and still trips the snap.
-                    const snapThresholdW = Math.max(2, dims.w);
-                    const snapThresholdH = Math.max(2, dims.h);
-                    if (Math.abs(targetW - curW) > snapThresholdW
-                        || Math.abs(targetH - curH) > snapThresholdH) {
-                        const desktop = document.getElementById('desktop');
-                        const dw = desktop.clientWidth;
-                        const dh = desktop.clientHeight;
-                        const left = win.dom.offsetLeft;
-                        const top = win.dom.offsetTop;
-                        const w = Math.max(MIN_W, Math.min(targetW, dw - left));
-                        const h = Math.max(MIN_H, Math.min(targetH, dh - top));
-                        // style.width is content-box; subtract borders so
-                        // the resulting offsetWidth matches the target.
-                        win.dom.style.width = (w - 4) + 'px';
-                        win.dom.style.height = (h - 4) + 'px';
-                        win.geom.width = win.dom.offsetWidth;
-                        win.geom.height = win.dom.offsetHeight;
-                        getPref(win.id).geom = Object.assign({}, win.geom);
-                        savePrefs();
-                    }
-                }
             }
 
             // #239: on attach the broker sends `resized` and, right after it,
