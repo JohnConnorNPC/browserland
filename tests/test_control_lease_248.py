@@ -149,3 +149,89 @@ def test_status_names_the_live_generation_and_boot(tmp_path, monkeypatch):
                                     "bootId": boot}
         await c.close_all()
     asyncio.run(go())
+
+
+# ---- atom 2: ping -> pong (nonce + live lease) ----------------------------
+
+import websockets  # noqa: E402
+
+from tests.test_terminal_control import (  # noqa: E402,F401
+    TOKEN, _lease, _until, broker)
+
+
+async def _ctl(port, client_id):
+    """A raw /control socket and its first status."""
+    ws = await websockets.connect(
+        f"ws://127.0.0.1:{port}/control?clientId={client_id}&token={TOKEN}")
+    return ws, json.loads(await asyncio.wait_for(ws.recv(), 5))
+
+
+async def _next(ws, timeout=5.0):
+    return json.loads(await asyncio.wait_for(ws.recv(), timeout))
+
+
+def _as_pong(status, n):
+    return dict(status, type="pong", n=n)
+
+
+def test_protocol_pong_frame_exact():
+    assert json.loads(protocol.control_pong_frame(3, False, "A", 9, "b")) == {
+        "type": "pong", "n": 3, "active": False, "activeClientId": "A",
+        "gen": 9, "bootId": "b"}
+
+
+def test_e2e_ping_pong_echoes_the_nonce_and_the_live_lease(broker):
+    port, _ = broker
+
+    async def scenario():
+        a = await _lease(port, "PONG-A")
+        b, sb = await _ctl(port, "PONG-B")
+        assert sb["active"] is False and sb["activeClientId"] == "PONG-A"
+        # The holder's pong: its nonce, and the lease exactly as a status
+        # would say it right now.
+        await a.send(json.dumps({"type": "ping", "n": 41}))
+        assert await _next(a) == _as_pong(dict(sb, active=True), 41)
+        # A non-holder's ping without a nonce: n null, its own view.
+        await b.send(json.dumps({"type": "ping"}))
+        assert await _next(b) == _as_pong(sb, None)
+        # An unknown frame is still ignored: the next frame b reads is the
+        # pong to the ping sent after it, nothing in between.
+        await b.send(json.dumps({"type": "bogus", "n": 1}))
+        await b.send(json.dumps({"type": "ping", "n": 7}))
+        assert await _next(b) == _as_pong(sb, 7)
+        # become_active still works after pings, and the next pong says so.
+        for i in range(3):
+            await b.send(json.dumps({"type": "ping", "n": 100 + i}))
+            assert (await _next(b))["n"] == 100 + i
+        await b.send(json.dumps({"type": "become_active"}))
+        won = await _until(b, lambda f: f.get("type") == "status")
+        assert won == dict(sb, active=True, activeClientId="PONG-B",
+                           gen=sb["gen"] + 1)
+        lost = await _until(a, lambda f: f.get("type") == "status")
+        assert lost == dict(won, active=False)
+        await a.send(json.dumps({"type": "ping", "n": 5}))
+        assert await _next(a) == _as_pong(lost, 5)
+        await a.close()
+        await b.close()
+    asyncio.run(scenario())
+
+
+def test_a_stalled_pong_send_closes_the_socket_1012(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    async def go():
+        c = Ctl(app)
+        gate = asyncio.Event()
+        gate.set()
+        ws = await c.connect("STALL", stall=gate)
+        assert _statuses(ws)[0]["active"] is True
+        gate.clear()                       # every later send hangs
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        ws.push({"type": "ping", "n": 1})
+        while ws.closed is None and loop.time() - t0 < 3:
+            await asyncio.sleep(0.02)
+        assert ws.closed == 1012
+        assert loop.time() - t0 < 1.5
+        await c.close_all()
+    asyncio.run(go())

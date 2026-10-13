@@ -464,7 +464,9 @@ def mcp_activity_frame(kind: str) -> str:
 #                      "activeClientId": <id|null>, "gen": <int>,
 #                      "bootId": <str>}
 #                     {"type": "terminal_control", ...}  (#238, below)
+#                     {"type": "pong", "n": <int|null>, + the status fields}
 #   client -> broker: {"type": "become_active"}
+#                     {"type": "ping", "n": <int>}  (#248)
 # ---------------------------------------------------------------------------
 
 def control_status_frame(active: bool,
@@ -477,6 +479,24 @@ def control_status_frame(active: bool,
     (bootId, gen) -- a generation alone restarts with the broker."""
     return json.dumps({
         "type": "status",
+        "active": bool(active),
+        "activeClientId": active_client_id,
+        "gen": int(gen),
+        "bootId": str(boot_id),
+    })
+
+
+def control_pong_frame(n: Optional[int], active: bool,
+                       active_client_id: Optional[str],
+                       gen: int, boot_id: str) -> str:
+    """#248: broker -> client on /control, the answer to ``{type:'ping',
+    n}`` on the same socket. Echoes the ping's nonce (``None`` when the ping
+    carried no integer ``n``) and carries the live lease exactly as a status
+    frame does, so a page whose status went missing re-learns its lease from
+    any ping."""
+    return json.dumps({
+        "type": "pong",
+        "n": n,
         "active": bool(active),
         "activeClientId": active_client_id,
         "gen": int(gen),

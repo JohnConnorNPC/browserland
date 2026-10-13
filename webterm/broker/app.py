@@ -4868,6 +4868,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return
         ctx = app.ctx
 
+        def _lease_view(owner_id):
+            # (active, activeClientId, gen, bootId) for a socket opened by
+            # clientId `owner_id`, read live at the moment of the call.
+            cur = ctx.active_client_id
+            return cur == owner_id, cur, ctx.lease_generation, ctx.boot_id
+
         async def _send(sock, owner_id):
             # Tell `sock` (opened by clientId `owner_id`) the CURRENT lease
             # status. Read live, never a captured snapshot: a status frame
@@ -4877,11 +4883,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # transition re-notifies all affected sockets, so the final resting
             # status on each socket is always the truth.
             try:
-                cur = ctx.active_client_id
                 await sock.send(protocol.control_status_frame(
-                    cur == owner_id, cur, ctx.lease_generation, ctx.boot_id))
+                    *_lease_view(owner_id)))
             except Exception as exc:
                 LOGGER.debug("control send failed: %s", exc)
+
+        async def _pong(sock, data):
+            # #248 A1': answer an app ping on the socket that sent it, with
+            # its nonce and the live lease (a page that missed a status
+            # re-learns it here). Bounded like _push_terminal_control: a
+            # stalled socket is closed 1012 so the page re-dials (any code
+            # but 4401) instead of waiting out a pong that never comes.
+            n = data.get("n")
+            if isinstance(n, bool) or not isinstance(n, int):
+                n = None
+            try:
+                await asyncio.wait_for(sock.send(protocol.control_pong_frame(
+                    n, *_lease_view(client_id))), CONTROL_SEND_TIMEOUT)
+            except Exception as exc:
+                LOGGER.debug("control pong failed: %r", exc)
+                ctx.registry.close_soon(sock, 1012, "control pong timed out")
 
         # The connect registration is INSIDE the try so the finally always
         # runs (a cancellation during the initial _send must not strand this
@@ -4907,6 +4928,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     # #244: the relay's reply path; validated and
                     # generation-gated in _desktop_result.
                     _desktop_result(client_id, data)
+                    continue
+                if data.get("type") == "ping":
+                    await _pong(ws, data)
                     continue
                 if data.get("type") != "become_active":
                     continue
