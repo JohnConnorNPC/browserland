@@ -583,3 +583,40 @@ def test_e2e_non_holder_input_gets_one_not_active(broker):
         for ws in (desk, mine, holder, prod):
             await ws.close()
     asyncio.run(scenario())
+
+
+# ---- atom 7 (S8): the desktop relay slices its deadline per socket --------
+
+import time  # noqa: E402
+
+from tests.test_mcp_desktop import (  # noqa: E402
+    _desktop_app, _FakeBrowserWS, _mcp, _reply_ok)
+
+
+class _StalledWS:
+    def __init__(self):
+        self.frames = []
+
+    async def send(self, frame):
+        self.frames.append(json.loads(frame))
+        await asyncio.sleep(10)
+
+
+def test_a_stalled_first_socket_leaves_time_for_a_healthy_one(
+        tmp_path, monkeypatch):
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 0.6
+    snap = {"active_workspace": 0,
+            "workspaces": [{"index": 0, "id": "L1", "name": None}]}
+    stalled, healthy = _StalledWS(), _FakeBrowserWS(app, _reply_ok(snap))
+    # A list, not the real set, so the stalled socket is FIRST: the order a
+    # set happens to yield is exactly what this must not depend on.
+    app.ctx.control_clients["two"] = [stalled, healthy]
+    app.ctx.active_client_id = "two"
+    t0 = time.monotonic()
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    elapsed = time.monotonic() - t0
+    assert resp.status == 200, resp.json
+    assert resp.json["active_workspace"] == 0
+    assert len(stalled.frames) == 1 and len(healthy.frames) == 1
+    assert elapsed < 0.6 + 0.3, elapsed

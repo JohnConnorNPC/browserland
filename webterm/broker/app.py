@@ -7869,13 +7869,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         try:
             sent = False
             stalled = False
-            for sock in sockets:
+            for i, sock in enumerate(sockets):
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     stalled = True
                     break
+                # #248 S8: each attempt gets an equal slice of what is left,
+                # inside the one deadline, so a half-open socket tried first
+                # cannot spend the whole budget before a healthy sibling
+                # (e.g. the replacement a page dialed beside it) is tried.
+                # The last socket gets everything that remains.
+                budget = remaining / (len(sockets) - i)
                 try:
-                    await asyncio.wait_for(sock.send(frame), remaining)
+                    await asyncio.wait_for(sock.send(frame), budget)
                     sent = True
                     break
                 except asyncio.TimeoutError:
