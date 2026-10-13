@@ -708,11 +708,14 @@
         // device's later takeover to trip; the deferred send never re-arms
         // it, so two pages cannot ping-pong the lease without a new click.
         const CONTROL_WANT_ACTIVE_MS = 15000;
-        function sendBecomeActive(host) {
+        // `deferred`: the send _settleWantActive makes for an earlier click --
+        // it never records a new intent and never dials.
+        function sendBecomeActive(host, deferred) {
             host = host || localHost();
             if (!host) return;
             let rec = controlSockets.get(host.id);
             if (!rec || !rec.ws || rec.ws.readyState !== WebSocket.OPEN) {
+                if (deferred) return;
                 if (!rec) {
                     openControlWs(host);
                     rec = controlSockets.get(host.id);
@@ -724,19 +727,15 @@
                     + ' — will take over when connected');
                 return;
             }
-            rec.wantActive = Date.now();
-            _sendBecomeActiveNow(rec, host);
-            // The socket may be the stale one: check it, so a dead channel is
-            // replaced and the intent above lands on the replacement.
-            probeControl(host.id);
-        }
-        function _sendBecomeActiveNow(rec, host) {
-            if (!rec.ws || rec.ws.readyState !== WebSocket.OPEN) return;
+            if (!deferred) rec.wantActive = Date.now();
             if (_leaseAffordance.armed && host.id === homeHostId()) {
                 _leaseAffordance.asked = true;
             }
             try { rec.ws.send(JSON.stringify({ type: 'become_active' })); }
             catch (_) {}
+            // The socket may be the stale one: check it, so a dead channel is
+            // replaced and the intent above lands on the replacement.
+            if (!deferred && typeof probeControl === 'function') probeControl(host.id);
         }
         // Called after every status the channel delivers (64 _controlStatus).
         function _settleWantActive(rec, msg) {
@@ -745,7 +744,7 @@
             const fresh = (Date.now() - rec.wantActive) < CONTROL_WANT_ACTIVE_MS;
             rec.wantActive = 0;
             const host = hostById(rec.hostId);
-            if (fresh && host) _sendBecomeActiveNow(rec, host);
+            if (fresh && host) sendBecomeActive(host, true);
         }
 
         function onControlStatus(hostId, msg) {
