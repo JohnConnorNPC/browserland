@@ -73,6 +73,16 @@
         // ORIGINAL base while the edit is unchanged -- it lands only if nobody
         // wrote meanwhile and yields otherwise. false = rebase.
         const STATE_THROWN_RETRY_YIELDS = true;
+        // Q4 / item 7: a rejected save (413, or a 400 that is the broker's
+        // verdict on the payload) can never land, so the tab goes back to the
+        // saved layout and says so. false = keep the rejected edit on screen
+        // until a peer rev arrives (pre-#247).
+        const STATE_REJECT_CONVERGES = true;
+        const STATE_REJECT_NOTICE = "couldn't save this change — back to the saved layout";
+        const _STATE_400_VERDICTS = Object.create(null);
+        ['bad_json', 'bad_baseRev', 'bad_state'].forEach(function (k) {
+            _STATE_400_VERDICTS[k] = true;
+        });
         // ---- #247 own-write recognition --------------------------------------
         // The bytes of this tab's last few PUTs. A write whose reply was lost
         // DID land when the server later shows exactly its bytes; an owed or
@@ -234,6 +244,7 @@
             const epoch = _viewEpoch;
             let mine = null;
             let release = null;
+            let converge = false;
             try {
                 // #247 single-flight: wait for the /state channel, then claim
                 // it with no await in between (see _stateWaitChannel).
@@ -274,7 +285,9 @@
                             }),                        // may write (else 409 not_active)
                             signal: ctrl.signal, timeoutMs: 0,
                         });
-                        const body = (r.status === 409 || r.ok) ? await r.json() : null;
+                        let body = null;
+                        if (r.status === 409 || r.ok) body = await r.json();
+                        else if (r.status === 400) { try { body = await r.json(); } catch (_) {} }
                         return { status: r.status, ok: r.ok, body: body };
                     })(), ctrl);
                 } catch (e) {
@@ -374,6 +387,20 @@
                     // A verdict on this payload (which carries any older
                     // failed edit too): it can never land, so nothing is owed.
                     _stateSettleSent(gen);
+                    // #247 item 7 (Q4): ...and the tab must not keep showing it.
+                    // Converge to the shared state -- only for the broker's own
+                    // verdict (a proxy's 400 may be transient), only if no NEWER
+                    // edit exists (that one re-pushes on its own), only in this
+                    // view. The pull runs once the channel is free (finally).
+                    const verdict = out.status === 413 || !!(out.body
+                        && _STATE_400_VERDICTS[out.body.error] === true);
+                    if (STATE_REJECT_CONVERGES && verdict && _stateEditGen === gen
+                            && epoch === _viewEpoch && !_deactivated) {
+                        _stateRevSkipped = true;      // bypass "unchanged" ...
+                        _stateLastSerialized = null;  // ... and "server == baseline"
+                        try { showNotice(STATE_REJECT_NOTICE, { type: 'error' }); } catch (_) {}
+                        converge = true;
+                    }
                 } else if (epoch === _viewEpoch) {
                     // 401 (local broker needs auth) / other: keep localStorage;
                     // the existing /sessions auth flow handles login, next
@@ -389,6 +416,7 @@
                     _statePushAgain = false;
                     if (epoch === _viewEpoch) schedulePush();   // never into a newer view
                 }
+                if (converge) pullState(false);
             }
         }
 

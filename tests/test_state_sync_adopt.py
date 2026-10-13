@@ -421,8 +421,14 @@ function mkWorld() {
         w.putFail = mode;
         await w.firePush();
         w.putFail = null;
-        ok(w.puts.length === 1 && keptEdit(w),
-            'P2 precondition (' + mode + '): skipped, then the push was refused');
+        if (mode === '413') {
+            // #247 item 7 (Q4, owner): a rejected save converges AT ONCE.
+            ok(w.puts.length === 1 && J(w.prefs._layout) === J(L1),
+                'P2 precondition (413): skipped, then the push was refused and the tab converged at once (Q4)');
+        } else {
+            ok(w.puts.length === 1 && keptEdit(w),
+                'P2 precondition (' + mode + '): skipped, then the push was refused');
+        }
         await w.api.pullState(false);
         ok(J(w.prefs._layout) === J(L1),
             'P2a (' + mode + ') a later poll adopts the skipped rev');
@@ -450,9 +456,10 @@ function mkWorld() {
     w.putFail = '413';
     await w.firePush();                            // the re-push is refused
     w.putFail = null;
+    // #247 item 7 (Q4, owner): the refused re-push converges at once.
     ok(w.puts.length === 2 && w.api.st().rev === 2
-        && w.prefs._layout.columns.length === 5,
-        'P3 precondition: 409 kept the edit at rev 2, its re-push was refused');
+        && J(w.prefs._layout) === J(L1),
+        'P3 precondition: 409 kept the edit at rev 2, its re-push was refused and the tab converged at once (Q4)');
     await w.api.pullState(false);                  // same rev 2
     ok(J(w.prefs._layout) === J(L1), 'P3a a later poll adopts the 409 winner');
 
@@ -660,11 +667,13 @@ def test_a_skipped_rev_is_reconsidered_when_its_push_sends_nothing(scenario_run)
     _ok(scenario_run, "P1 precondition: skipped at rev 2, then the push sent nothing")
     _ok(scenario_run, "P1a a later poll adopts the skipped rev")
     _ok(scenario_run, "P1b the next unrelated save keeps the peer layout on /state")
+    _ok(scenario_run, "P2 precondition (400): skipped, then the push was refused")
+    # #247 item 7 (Q4, owner): a 413 converges at once.
+    _ok(scenario_run, "P2 precondition (413): skipped, then the push was refused and the tab converged at once (Q4)")
     for mode in ("400", "413"):
-        _ok(scenario_run, f"P2 precondition ({mode}): skipped, then the push was refused")
         _ok(scenario_run, f"P2a ({mode}) a later poll adopts the skipped rev")
         _ok(scenario_run, f"P2b ({mode}) the next unrelated save keeps the peer layout")
-    _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused")
+    _ok(scenario_run, "P3 precondition: 409 kept the edit at rev 2, its re-push was refused and the tab converged at once (Q4)")
     _ok(scenario_run, "P3a a later poll adopts the 409 winner")
 
 

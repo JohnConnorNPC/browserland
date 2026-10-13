@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 48
+EXPECTED_ASSERTS = 53
 
 _HARNESS = r"""
 'use strict';
@@ -512,6 +512,39 @@ function mkWorld() {
     w.edit(['H2']); await w.firePush(); await flush(); await w.firePush(); await flush();
     ok(w.srv() === J(['H2']), 'E5b after a hung PUT the next edit lands without waiting for a poll');
 
+    // ---- 247-7 (Q4): a rejected save goes back to the saved layout --------
+    const REJ = "couldn't save this change — back to the saved layout";
+    // V1: a 413 converges at once, with the notice, and nothing is re-sent.
+    w = mkWorld(); await w.boot();
+    w.putMode = '413'; w.edit(['TOO-BIG']); await w.firePush(); w.putMode = null; await flush();
+    await w.firePush(); await w.api.pullState(false); await flush(); await w.firePush();
+    ok(w.cols() === J(['A']) && J(w.notices) === J([REJ]) && w.puts.length === 1,
+        'V1 a 413 goes back to the saved layout at once, says so, and re-sends nothing');
+    // V2: a 400 that is the broker's verdict on the payload: the same.
+    w = mkWorld(); await w.boot();
+    w.putMode = '400verdict'; w.edit(['BAD']); await w.firePush(); w.putMode = null; await flush();
+    ok(w.cols() === J(['A']) && J(w.notices) === J([REJ]), 'V2 a broker-verdict 400 (bad_json) converges the same way');
+    // V2b: a 400 that is not the broker's (a proxy page): no converge.
+    w = mkWorld(); await w.boot();
+    w.putMode = '400proxy'; w.edit(['KEEP']); await w.firePush(); w.putMode = null; await flush();
+    ok(w.cols() === J(['KEEP']) && w.notices.length === 0, 'V2b a proxy 400 does not discard the edit');
+    // V3 (S5a): a 413 for an OLDER payload never clears a newer queued edit.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '413'; w.edit(['TOO-BIG']); await w.firePush();
+    w.edit(['SMALL']); await w.firePush();                             // newer, queued
+    w.holdPut = false; w.heldPut.shift().res(); await flush(); w.putMode = null;
+    await w.firePush(); await flush();
+    ok(w.srv() === J(['SMALL']) && w.cols() === J(['SMALL']) && w.notices.length === 0,
+        'V3 a 413 for an older payload lets the newer edit land (no converge, no notice)');
+    // V4: a 413 answered after a teardown converges nothing.
+    w = mkWorld(); await w.boot();
+    w.holdPut = true; w.putMode = '413'; w.edit(['TOO-BIG']); await w.firePush();
+    w.holdPut = false;
+    w.api.teardown();
+    const a4 = w.adopts;
+    await w.release(); w.putMode = null; await flush();
+    ok(w.adopts === a4 && w.notices.length === 0, 'V4 a 413 answered after a teardown converges nothing');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -652,6 +685,17 @@ def test_247_3_84_wiring():
     "E5b after a hung PUT the next edit lands without waiting for a poll",
 ])
 def test_247_5_thrown_failures_and_own_writes(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "V1 a 413 goes back to the saved layout at once, says so, and re-sends nothing",
+    "V2 a broker-verdict 400 (bad_json) converges the same way",
+    "V2b a proxy 400 does not discard the edit",
+    "V3 a 413 for an older payload lets the newer edit land (no converge, no notice)",
+    "V4 a 413 answered after a teardown converges nothing",
+])
+def test_247_7_rejected_save_converges(run, label):
     _ok(run, label)
 
 
