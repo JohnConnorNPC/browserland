@@ -121,3 +121,68 @@ def test_e2e_rpc_gen_matches_the_holders_last_status(broker):  # noqa: F811
     assert status == 200
     assert isinstance(last["gen"], int) and isinstance(last["bootId"], str)
     assert (frame["gen"], frame["bootId"]) == (last["gen"], last["bootId"])
+
+
+# ---- A2: the send task re-checks the generation ------------------------------
+
+def _takeover_at_registration(app, monkeypatch):
+    """Run one GET /mcp/desktop while holder A is taken over by B at the
+    exact point the issue names: B's become_active is queued from inside
+    desktop_rpc_frame, which the relay calls synchronously just before it
+    registers the call, so B's handler wakes BEFORE the send task that
+    wait_for schedules. Returns what happened, plus every asyncio exception
+    the loop reported."""
+    app.ctx.desktop_rpc_timeout_s = 1.0
+    orig = protocol.desktop_rpc_frame
+    out = {"loop_errors": []}
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda _l, ctx: out["loop_errors"].append(ctx.get("message")))
+        c = Ctl(app)
+        a = await c.attach("A", HolderWS(app.ctx))
+        b = await c.connect("B")
+        out["gen0"] = app.ctx.lease_generation
+
+        def hooked(*args, **kw):
+            b.push({"type": "become_active"})       # the takeover, NOW
+            return orig(*args, **kw)
+        monkeypatch.setattr(protocol, "desktop_rpc_frame", hooked)
+        try:
+            _, resp = await _get_desktop(app)
+        finally:
+            monkeypatch.setattr(protocol, "desktop_rpc_frame", orig)
+        await _settle()
+        import gc
+        gc.collect()
+        await _settle()
+        out["http"] = (resp.status, resp.json)
+        out["holder"] = app.ctx.active_client_id
+        out["gen1"] = app.ctx.lease_generation
+        out["a_rpcs"] = _rpcs(a)
+        out["a_log"] = list(a.log)
+        await c.close_all()
+    asyncio.run(go())
+    return out
+
+
+def test_a_takeover_before_the_send_writes_nothing_to_the_deposed_holder(
+        tmp_path, monkeypatch):
+    """T2 (the #250 P2 probe as a test): the caller gets 409 lost_lease and
+    the deposed holder's socket was never sent the desktop_rpc."""
+    out = _takeover_at_registration(_desktop_app(tmp_path, monkeypatch),
+                                    monkeypatch)
+    assert out["holder"] == "B" and out["gen1"] > out["gen0"]
+    assert out["http"][0] == 409
+    assert out["http"][1]["error"] == "lost_lease"
+    assert out["a_rpcs"] == [], out["a_log"]
+
+
+def test_the_failed_future_is_retrieved(tmp_path, monkeypatch):
+    """T3: the bump failed the call's future before the send step refused;
+    the relay retrieves it, so asyncio reports nothing."""
+    out = _takeover_at_registration(_desktop_app(tmp_path, monkeypatch),
+                                    monkeypatch)
+    assert out["http"][0] == 409
+    assert out["loop_errors"] == []

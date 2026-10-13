@@ -7923,6 +7923,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                            boot_id=ctxd.boot_id)
         future = loop.create_future()
         ctxd.desktop_rpcs[rid] = _DesktopCall(future, holder, generation)
+
+        async def _send_rpc(sock):
+            # #250: a takeover can land between the registration above and
+            # this task's first step (wait_for schedules it; a become_active
+            # already queued runs first), so the holder may be deposed by
+            # now. Write only while the call's generation is still the live
+            # one -- read in the send task itself, with no lock: every bump
+            # changes lease_generation before its status send starts.
+            if ctxd.lease_generation != generation:
+                raise _DesktopLeaseLost()
+            await sock.send(frame)
         try:
             sent = False
             stalled = False
@@ -7938,9 +7949,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # The last socket gets everything that remains.
                 budget = remaining / (len(sockets) - i)
                 try:
-                    await asyncio.wait_for(sock.send(frame), budget)
+                    await asyncio.wait_for(_send_rpc(sock), budget)
                     sent = True
                     break
+                except _DesktopLeaseLost:
+                    # The bump already failed the future (it runs under
+                    # lease_lock); retrieve it so asyncio never logs "Future
+                    # exception was never retrieved".
+                    if future.done():
+                        future.exception()
+                    return {"http": sanic_json({"error": "lost_lease"},
+                                               status=409)}
                 except asyncio.TimeoutError:
                     stalled = True   # this socket stalled: try the next
                     # #248: a send cancelled mid-frame leaves the socket
