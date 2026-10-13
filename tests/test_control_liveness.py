@@ -1,0 +1,412 @@
+"""Behavioural tests for the /control liveness machinery in
+``webterm/broker/64_js_sessions_poll_control.js`` (#248).
+
+The single-active lease reaches a page over one ``/control`` WebSocket per
+host. Before #248 nothing checked that socket was alive: a socket the browser
+still believed OPEN (sleep, a network change, a black-holed path) never fired
+``onclose``, never re-dialed, and the page stayed live and "active" while the
+broker had released the lease and handed it to another device (the owner's
+phone). The fix is a per-socket state machine: nonce'd pings, a pong deadline
+only on sockets whose first status proves a ponging broker, make-before-break
+replacement, a connect watchdog and a wake probe.
+
+All of that is ordering across timers and socket events, so -- like
+``tests/test_desktop_rpc.py`` -- this executes the SHIPPED section: cut AT
+RUNTIME between its own section markers and evaluated in node inside a
+``with (env)`` scope whose outer names are stubs: a fake WebSocket the script
+opens, feeds and drops by hand, and a hand-cranked clock behind
+``setTimeout``/``setInterval``/``Date.now``. One PASS/FAIL line per assert plus
+a machine-readable tail; the fixture FAILS if a marker vanishes. Skipped when
+node is absent.
+"""
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from webterm.broker import ui
+
+BROKER_DIR = Path(ui.__file__).resolve().parent
+SRC_JS = BROKER_DIR / "64_js_sessions_poll_control.js"
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
+
+START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
+END = "        // ---- desktop relay (#244)"
+
+EXPECTED_ASSERTS = 26
+
+_HARNESS = r"""
+'use strict';
+const fs = require('fs');
+const src = fs.readFileSync(__SRC_PATH__, 'utf8');
+const a = src.indexOf(__START__), b = src.indexOf(__END__);
+if (a < 0 || b < a) throw new Error('section markers missing');
+const slice = src.slice(a, b);
+
+let pass = 0, fail = 0;
+function ok(cond, label) {
+    if (cond) { pass++; console.log('PASS: ' + label); }
+    else { fail++; console.log('FAIL: ' + label); }
+}
+
+// ---- one world = one fresh evaluation of the section --------------------
+function mkWorld(opts) {
+    opts = opts || {};
+    const w = { now: 1000000, tid: 1, timers: new Map(), sockets: [],
+                log: [], visCbs: [], notices: [], rpcs: [], views: [] };
+    class FakeWS {
+        constructor(url) {
+            this.url = url; this.readyState = 0; this.sent = [];
+            this.closed = false; w.sockets.push(this);
+        }
+        send(t) {
+            if (this.readyState !== 1) throw new Error('not open');
+            this.sent.push(JSON.parse(t));
+        }
+        close() { this.closed = true; this.readyState = 3; }
+        _open() { this.readyState = 1; if (this.onopen) this.onopen(); }
+        _recv(o) { if (this.onmessage) this.onmessage({ data: JSON.stringify(o) }); }
+        _drop(code) {
+            this.readyState = 3;
+            if (this.onclose) this.onclose({ code: code || 1006 });
+        }
+        pings() { return this.sent.filter(m => m.type === 'ping'); }
+        lastPing() { const p = this.pings(); return p[p.length - 1] || { n: -1 }; }
+    }
+    FakeWS.CONNECTING = 0; FakeWS.OPEN = 1; FakeWS.CLOSING = 2; FakeWS.CLOSED = 3;
+    function setT(fn, ms, every) {
+        const id = w.tid++;
+        w.timers.set(id, { fn: fn, at: w.now + (ms || 0), every: every || 0 });
+        return id;
+    }
+    w.advance = function (ms) {
+        const end = w.now + ms;
+        for (;;) {
+            let next = null;
+            for (const [id, t] of w.timers) {
+                if (t.at <= end && (!next || t.at < next[1].at)) next = [id, t];
+            }
+            if (!next) break;
+            w.now = next[1].at;
+            if (next[1].every) next[1].at += next[1].every;
+            else w.timers.delete(next[0]);
+            next[1].fn();
+        }
+        w.now = end;
+    };
+    const hosts = { local: { id: 'local', label: 'home' },
+                    rb: { id: 'rb', label: 'remote B' } };
+    const env = {
+        WebSocket: FakeWS,
+        setTimeout: function (fn, ms) { return setT(fn, ms, 0); },
+        setInterval: function (fn, ms) { return setT(fn, ms, ms); },
+        clearTimeout: function (id) { w.timers.delete(id); },
+        clearInterval: function (id) { w.timers.delete(id); },
+        Date: { now: function () { return w.now; } },
+        CLIENT_ID: 'me',
+        REATTACH_STABLE_MS: 5000,
+        REATTACH_BACKOFF_MAX_MS: 30000,
+        localHost: function () { return hosts.local; },
+        hostById: function (id) { return hosts[id] || null; },
+        hostWsUrl: function (h, p) { return 'ws://' + h.id + p; },
+        resetControlBaselines: function (hid) { w.log.push('reset:' + hid); },
+        controlKey: function (h, s) { return h + ':' + s; },
+        applyControlView: function (k, m, src) { w.views.push(k + '/' + src); },
+        handleDesktopRpc: function (hid, rec, ws, msg) {
+            w.rpcs.push({ hid: hid, rid: msg.rid, live: rec.ws === ws });
+        },
+        desktopWsSend: function (ws, payload) {
+            try { ws.send(JSON.stringify(payload)); } catch (_) {}
+        },
+        pollStateFor: function () { return w.poll || (w.poll = {}); },
+        showAuthOverlay: function () { w.log.push('auth'); },
+        renderHostStatus: function () {},
+        showNotice: function (t, o) { w.notices.push(t); },
+        onVisibility: function (fn) { w.visCbs.push(fn); return function () {}; },
+        registerHostCache: function () {},
+        _leaseAffordance: { armed: false, asked: false },
+        _homeActive: false,
+        _booted: true,
+        _deactivated: false,
+        bootActiveView: function () { w.log.push('boot'); env._deactivated = false; },
+        rebuildView: function () { w.log.push('rebuild'); env._deactivated = false; },
+        teardownView: function () { w.log.push('teardown'); env._deactivated = true; },
+        showBecomeActiveOverlay: function () { w.log.push('overlay'); },
+        hideBecomeActiveOverlay: function () {},
+        _emitModEvent: function (n, p) { w.log.push('lease:' + p.active); },
+        onRemoteControlStatus: function (hid, active) { w.log.push('remote:' + hid + ':' + active); },
+    };
+    if (opts.env) Object.assign(env, opts.env);
+    w.env = env;
+    const factory = new Function('env',
+        'with (env) {\n' + slice + '\n' +
+        'var __api = { openControlWs: openControlWs, closeControlWs: closeControlWs,\n' +
+        '  controlSockets: controlSockets, sendBecomeActive: sendBecomeActive,\n' +
+        '  onControlStatus: onControlStatus };\n' +
+        '}\nreturn __api;\n');
+    w.api = factory(env);
+    w.rec = function (hid) { return w.api.controlSockets.get(hid || 'local'); };
+    w.last = function () { return w.sockets[w.sockets.length - 1]; };
+    return w;
+}
+const ST = function (active, extra) {
+    return Object.assign({ type: 'status', active: active,
+        activeClientId: active ? 'me' : 'other', gen: 1, bootId: 'b1' }, extra || {});
+};
+const OLD_ST = function (active) {      // a pre-#248 broker: no gen / bootId
+    return { type: 'status', active: active, activeClientId: active ? 'me' : 'other' };
+};
+// Open the home channel on a capable broker and answer its first status.
+function connected(w, status) {
+    w.api.openControlWs(w.env.localHost());
+    const ws = w.last();
+    ws._open();
+    ws._recv(status || ST(true));
+    return ws;
+}
+function pong(ws, n, extra) { ws._recv(Object.assign({ type: 'pong', n: n }, extra || {})); }
+
+// ---- A2: pings, the deadline, make-before-break ---------------------------
+let w = mkWorld();
+let s0 = connected(w);
+ok(s0.pings().length === 1 && Number.isInteger(s0.pings()[0].n),
+    'L1 the first ping goes out at open, with an integer nonce');
+pong(s0, s0.lastPing().n);
+w.advance(25000);
+ok(s0.pings().length === 2 && s0.pings()[1].n !== s0.pings()[0].n,
+    'L2 a ping per CONTROL_PING_MS, each with a fresh nonce');
+
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last(); s0._open(); s0._recv(OLD_ST(true));
+w.advance(120000);
+ok(w.sockets.length === 1 && !s0.closed,
+    'L3 an old broker (no gen/bootId in its first status) gets no deadline: no replacement, ever');
+
+w = mkWorld();
+s0 = connected(w);
+w.advance(9999);
+ok(w.sockets.length === 1, 'L4 no replacement before the 10 s deadline');
+w.advance(1);
+ok(w.sockets.length === 2 && !s0.closed && w.rec().ws === s0,
+    'L5 a missed pong dials a replacement and keeps the old socket in charge');
+const c0 = w.last();
+s0._recv({ type: 'terminal_control', id: 7, state: 'free', gen: 3 });
+s0._recv({ type: 'desktop_rpc', rid: 41, op: 'get', args: {} });
+ok(w.views.length === 1 && w.rpcs.length === 1 && w.rpcs[0].live === true,
+    'L6 during the overlap the old socket still handles terminal_control and desktop_rpc (and may reply)');
+c0._open();
+ok(!s0.closed && w.rec().ws === s0,
+    'L7 the replacement opening alone does not retire the old socket');
+c0._recv(ST(true));
+ok(w.rec().ws === c0 && s0.closed && w.rec().cand === null,
+    'L8 the replacement first status promotes it and closes the old socket');
+s0._recv(ST(false));
+ok(w.log.indexOf('teardown') === -1,
+    'L9 a late frame on the retired socket is ignored');
+
+w = mkWorld();
+s0 = connected(w);
+w.advance(5000);
+pong(s0, 999999);
+w.advance(5000);
+ok(w.sockets.length === 2,
+    'L10 a pong with the wrong nonce does not satisfy the deadline');
+
+w = mkWorld();
+s0 = connected(w);
+for (let i = 0; i < 4; i++) { pong(s0, s0.lastPing().n); w.advance(25000); }
+ok(w.sockets.length === 1 && !s0.closed,
+    'L11 answered pings never trigger a replacement');
+
+w = mkWorld();
+s0 = connected(w);
+w.advance(10000);                       // miss 1 -> replacement dialed
+let c1 = w.last();
+c1._drop(1006);                         // the replacement fails before reporting
+ok(!s0.closed && w.rec().ws === s0 && w.rec().cand === null,
+    'L12 a failed replacement leaves the old socket open and in charge');
+pong(s0, s0.lastPing().n);
+for (let i = 0; i < 75; i++) { w.advance(1000); pong(s0, s0.lastPing().n); }
+ok(!s0.closed && w.rec().ws === s0 && w.sockets.length === 2,
+    'L13 an old socket that answers again simply stays');
+
+w = mkWorld();
+s0 = connected(w);
+w.advance(10000);                       // miss 1
+c1 = w.last(); c1._drop(1006);          // replacement fails
+w.advance(10000);                       // miss 2 on the old socket
+ok(s0.closed && w.rec().ws === null && w.rec().reattachTimer !== null,
+    'L14 a second missed deadline retires the old socket and schedules a re-dial');
+
+// M1: the old socket's close must not orphan the replacement.
+w = mkWorld();
+s0 = connected(w);
+w.advance(10000);
+c1 = w.last(); c1._open();
+s0._drop(1006);                          // old one finally closes, mid-overlap
+ok(w.rec().cand && w.rec().cand.ws === c1 && w.rec().reattachTimer === null
+    && w.sockets.length === 2,
+    'L15 the old socket closing mid-overlap leaves the replacement pending (no third dial)');
+c1._recv(ST(true));
+ok(w.rec().ws === c1 && w.log.indexOf('lease:true') !== -1,
+    'L16 ...and the replacement status is then handled with the replacement in charge');
+pong(c1, c1.lastPing().n);
+w.advance(30000);
+pong(c1, c1.lastPing().n);
+w.advance(9000);
+ok(w.sockets.length === 2 && !c1.closed && c1.pings().length === 2,
+    'L17 the promoted socket runs its own pinger (no stray deadline from the old one)');
+
+// M2: the connect watchdog.
+w = mkWorld();
+w.api.openControlWs(w.env.localHost());
+s0 = w.last();                          // stays CONNECTING
+w.advance(5000);
+ok(s0.closed && w.rec().ws === null && w.rec().reattachTimer !== null,
+    'L18 a dial still CONNECTING after 5 s is abandoned and a re-dial scheduled');
+w.advance(2000);
+ok(w.sockets.length === 2, 'L19 ...which dials again after the backoff');
+
+// closeControlWs closes both.
+w = mkWorld();
+s0 = connected(w);
+w.advance(10000);
+c1 = w.last();
+w.api.closeControlWs('local');
+const closedNow = s0.closed && c1.closed;
+w.advance(120000);
+ok(closedNow && w.sockets.length === 2 && !w.rec(),
+    'L20 closeControlWs closes the socket in charge AND the replacement; nothing re-dials');
+
+// The wake probe.
+w = mkWorld();
+s0 = connected(w);
+pong(s0, s0.lastPing().n);
+w.advance(30000);                       // the 25 s ping is outstanding (thaw)
+const before = s0.pings().length;
+const oldN = s0.lastPing().n;
+w.visCbs.forEach(fn => fn());
+ok(s0.pings().length === before + 1 && s0.lastPing().n !== oldN,
+    'L21 the wake probe sends a fresh ping at once');
+pong(s0, oldN);                         // a late pong to the ping sent BEFORE it
+w.advance(10000);
+ok(w.sockets.length === 2,
+    'L22 a late pong to an older ping does not satisfy the wake probe');
+
+w = mkWorld();
+s0 = connected(w);
+pong(s0, s0.lastPing().n);
+w.advance(20000);
+w.visCbs.forEach(fn => fn());           // probe at t+20: deadline t+30
+w.advance(5000);                        // the periodic ping goes out at t+25
+ok(s0.pings().length === 3, 'L25a precondition: a periodic ping went out inside the probe window');
+w.advance(5000);
+ok(w.sockets.length === 2,
+    'L25 a periodic ping never pushes a running deadline out');
+
+w = mkWorld();
+s0 = connected(w);
+s0._drop(1006);
+ok(w.rec().reattachTimer !== null && w.sockets.length === 1,
+    'L23 precondition: a dropped channel waits out its backoff');
+w.visCbs.forEach(fn => fn());
+ok(w.sockets.length === 2 && w.rec().reattachTimer === null,
+    'L24 the wake probe re-dials a backed-off channel at once');
+
+console.log(pass + ' passed, ' + fail + ' failed');
+"""
+
+
+@pytest.fixture(scope="module")
+def run(tmp_path_factory):
+    src = SRC_JS.read_text(encoding="utf-8")
+    for m in (START, END):
+        assert src.count(m) == 1, f"marker {m!r} must occur exactly once"
+    harness = tmp_path_factory.mktemp("ctl-liveness") / "harness.js"
+    harness.write_text(
+        _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS)))
+        .replace("__START__", json.dumps(START))
+        .replace("__END__", json.dumps(END)),
+        encoding="utf-8")
+    proc = subprocess.run([NODE, str(harness)], capture_output=True,
+                          text=True, encoding="utf-8", timeout=120)
+    lines = (proc.stdout or "").strip().splitlines()
+    tail = re.match(r"^(\d+) passed, (\d+) failed$", lines[-1] if lines else "")
+    assert tail is not None, (
+        f"no machine-readable tail\nrc={proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}")
+    results = {}
+    for line in lines[:-1]:
+        if line.startswith("PASS: "):
+            results[line[6:]] = True
+        elif line.startswith("FAIL: "):
+            results[line[6:]] = False
+    return {"rc": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr,
+            "passed": int(tail.group(1)), "failed": int(tail.group(2)),
+            "results": results}
+
+
+def _ok(run, label):
+    got = run["results"].get(label)
+    assert got is True, (
+        f"{label!r} {'failed' if got is False else 'never ran'}\n"
+        f"stdout: {run['stdout']}\nstderr: {run['stderr']}")
+
+
+@pytest.mark.parametrize("label", [
+    "L1 the first ping goes out at open, with an integer nonce",
+    "L2 a ping per CONTROL_PING_MS, each with a fresh nonce",
+    "L3 an old broker (no gen/bootId in its first status) gets no deadline: no replacement, ever",
+    "L4 no replacement before the 10 s deadline",
+    "L5 a missed pong dials a replacement and keeps the old socket in charge",
+    "L6 during the overlap the old socket still handles terminal_control and desktop_rpc (and may reply)",
+    "L7 the replacement opening alone does not retire the old socket",
+    "L8 the replacement first status promotes it and closes the old socket",
+    "L9 a late frame on the retired socket is ignored",
+    "L10 a pong with the wrong nonce does not satisfy the deadline",
+    "L11 answered pings never trigger a replacement",
+    "L12 a failed replacement leaves the old socket open and in charge",
+    "L13 an old socket that answers again simply stays",
+    "L14 a second missed deadline retires the old socket and schedules a re-dial",
+])
+def test_liveness_deadline_and_make_before_break(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "L15 the old socket closing mid-overlap leaves the replacement pending (no third dial)",
+    "L16 ...and the replacement status is then handled with the replacement in charge",
+    "L17 the promoted socket runs its own pinger (no stray deadline from the old one)",
+    "L18 a dial still CONNECTING after 5 s is abandoned and a re-dial scheduled",
+    "L19 ...which dials again after the backoff",
+    "L20 closeControlWs closes the socket in charge AND the replacement; nothing re-dials",
+])
+def test_per_socket_state_watchdog_and_close(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "L21 the wake probe sends a fresh ping at once",
+    "L22 a late pong to an older ping does not satisfy the wake probe",
+    "L23 precondition: a dropped channel waits out its backoff",
+    "L24 the wake probe re-dials a backed-off channel at once",
+    "L25a precondition: a periodic ping went out inside the probe window",
+    "L25 a periodic ping never pushes a running deadline out",
+])
+def test_wake_probe(run, label):
+    _ok(run, label)
+
+
+def test_every_scenario_passed_and_node_exited_clean(run):
+    assert run["failed"] == 0, run["stdout"] + run["stderr"]
+    assert run["passed"] == EXPECTED_ASSERTS, (
+        f"expected {EXPECTED_ASSERTS} asserts, ran {run['passed']}\n{run['stdout']}")
+    assert len(run["results"]) == EXPECTED_ASSERTS
+    assert run["rc"] == 0, run["stderr"]

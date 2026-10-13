@@ -307,10 +307,39 @@
         // HOME broker's lease drives the WHOLE page (boot / overlay / teardown
         // / rebuild); a REMOTE broker's lease only masks that host's windows +
         // flips its taskbar chip (see the multi-host handler). Reconnect uses
-        // the scheduleReattach backoff shape; a light app-level ping keeps the
-        // socket warm through idle proxies.
-        const controlSockets = new Map();   // hostId -> { ws, ... }
+        // the scheduleReattach backoff shape.
+        //
+        // #248: the channel's LIVENESS is checked, not assumed. A socket the
+        // browser still believes is OPEN can be dead (sleep, a network change,
+        // a black-holed path): it never fires onclose, so it never re-dialed,
+        // and the page stayed live and "active" while the broker had long
+        // released the lease and handed it to another device. Now:
+        //   - every socket owns its state (timers, outstanding ping, role):
+        //     the rec's `cur` is the socket in charge, `cand` a replacement
+        //     being dialed. Nothing about one socket is kept on the rec, so a
+        //     late event on one can never clear the other's timers;
+        //   - a ping carries a nonce `n` and only the pong echoing it counts;
+        //     a pong also carries the live lease, which goes through
+        //     onControlStatus like a status frame (level-idempotent);
+        //   - a socket whose FIRST status carried `gen` + `bootId` is from a
+        //     broker that pongs, so only such a socket gets a pong deadline
+        //     (an older broker never pongs and must not be flapped);
+        //   - a missed deadline dials a replacement BEFORE dropping the old
+        //     socket (make-before-break). The old socket keeps working until
+        //     the replacement's first status, or until it misses a second
+        //     deadline; a failed replacement never takes the old one down. A
+        //     false positive (a stalled main thread) therefore costs one extra
+        //     socket, never the lease;
+        //   - a dial still CONNECTING after 5 s is abandoned (Chromium leaves a
+        //     black-holed upgrade CONNECTING for ~4 min, which would park the
+        //     re-dial past any recovery);
+        //   - a page that becomes visible re-pings at once (the wake probe),
+        //     and a backed-off re-dial is brought forward.
+        const controlSockets = new Map();   // hostId -> { cur, cand, ws, ... }
         const CONTROL_PING_MS = 25000;
+        const CONTROL_PONG_TIMEOUT_MS = 10000;
+        const CONTROL_CONNECT_TIMEOUT_MS = 5000;
+        let _controlPingSeq = 0;
         function homeHostId() { return (localHost() || {}).id || 'local'; }
 
         function openControlWs(host) {
@@ -322,27 +351,52 @@
                     || existing.ws.readyState === WebSocket.CONNECTING)) {
                 return;                          // already dialing/connected
             }
+            // A replacement already in flight becomes the socket in charge on
+            // its first status; dialing a third would only race it.
+            if (existing && existing.cand) return;
             const rec = existing || {
-                hostId: hid, ws: null, attempts: 0, lastOpenAt: 0,
-                reattachTimer: null, pingTimer: null, closedByUs: false,
+                hostId: hid, ws: null, cur: null, cand: null, attempts: 0,
+                lastOpenAt: 0, reattachTimer: null, closedByUs: false,
+                wantActive: 0,
             };
             rec.closedByUs = false;
             controlSockets.set(hid, rec);
+            _dialControl(rec, host, 'cur');
+        }
+
+        // Dial one /control socket for `rec` in `role` ('cur' or 'cand') and
+        // wire its handlers to ITS OWN state `st`. rec.ws always mirrors
+        // rec.cur's socket (sendBecomeActive and the startup guard read it).
+        function _dialControl(rec, host, role) {
+            const hid = rec.hostId;
             let url;
             try {
                 url = hostWsUrl(host, '/control?clientId='
                     + encodeURIComponent(CLIENT_ID));
-            } catch (e) { return; }
+            } catch (e) { return null; }
             let ws;
             try { ws = new WebSocket(url); }
-            catch (e) { scheduleControlReattach(hid); return; }
-            rec.ws = ws;
-            // Every handler guards on socket identity: openControlWs reuses the
-            // rec across reconnects, so a stale socket's late callback must not
-            // clear the replacement's ws/pingTimer or deliver a stale status.
+            catch (e) {
+                if (role === 'cur') scheduleControlReattach(hid);
+                return null;
+            }
+            const st = {
+                rec: rec, ws: ws, role: role, done: false,
+                pingTimer: null, deadlineTimer: null, connectTimer: null,
+                pendN: null, lastN: 0, missed: 0, capable: false, statusSeen: false,
+            };
+            if (role === 'cur') { rec.cur = st; rec.ws = ws; }
+            else rec.cand = st;
+            st.connectTimer = setTimeout(() => {
+                st.connectTimer = null;
+                if (!st.done && ws.readyState === WebSocket.CONNECTING) {
+                    _controlSocketGone(st, null);
+                }
+            }, CONTROL_CONNECT_TIMEOUT_MS);
             ws.onopen = () => {
-                if (rec.ws !== ws) { try { ws.close(); } catch (_) {} return; }
-                rec.attempts = 0;
+                if (st.done) { try { ws.close(); } catch (_) {} return; }
+                if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
+                if (st.role === 'cur') rec.attempts = 0;
                 rec.lastOpenAt = Date.now();
                 // #239: a new /control socket may be a new broker run, whose
                 // control gens are re-seeded from its clock: forget this
@@ -350,55 +404,202 @@
                 // gen. (A 1012 close for a stalled send lands here too, via
                 // scheduleControlReattach.)
                 resetControlBaselines(hid);
-                if (rec.pingTimer) clearInterval(rec.pingTimer);
-                rec.pingTimer = setInterval(() => {
-                    // App-level keepalive: an unknown-type JSON frame the broker
-                    // ignores (protocol.parse -> not become_active) but that
-                    // keeps the pipe warm through idle proxies.
-                    try { desktopWsSend(ws, { type: 'ping' }); } catch (_) {}
-                }, CONTROL_PING_MS);
+                // The first ping goes out now, so a broker that pongs is
+                // checked from the start; then one per CONTROL_PING_MS, which
+                // also keeps the pipe warm through idle proxies.
+                st.pingTimer = setInterval(() => _controlPing(st), CONTROL_PING_MS);
+                _controlPing(st);
             };
             ws.onmessage = (ev) => {
-                if (rec.ws !== ws) return;
+                if (st.done) return;
                 let msg;
                 try { msg = JSON.parse(ev.data); } catch (_) { return; }
+                if (!msg) return;
+                if (msg.type === 'pong') { _controlPong(st, msg); return; }
                 // #239 (#238): a terminal on this broker changed controller.
                 // The one way a controlled window, which holds no /ws, hears
                 // of a release it did not cause.
-                if (msg && msg.type === 'terminal_control') {
+                if (msg.type === 'terminal_control') {
                     applyControlView(controlKey(hid, msg.id), msg, 'push');
                     return;
                 }
                 // #244: an MCP desktop op relayed by this broker to us, the
                 // lease holder. Fire-and-forget: handleDesktopRpc owns its
                 // own errors and always answers (or errors into) exactly one
-                // desktop_result frame per rid.
-                if (msg && msg.type === 'desktop_rpc') {
+                // desktop_result frame per rid. desktopReply answers only
+                // while this socket is rec.ws: a replacement's first frame is
+                // its status (promoting it) and a retired socket handles
+                // nothing, so every socket that can deliver an rpc is rec.ws.
+                if (msg.type === 'desktop_rpc') {
                     Promise.resolve(handleDesktopRpc(hid, rec, ws, msg))
                         .catch(function () {});
                     return;
                 }
                 if (!msg || msg.type !== 'status') return;
-                onControlStatus(hid, msg);
+                _controlStatus(st, msg);
             };
             ws.onclose = (ev) => {
-                if (rec.ws !== ws) return;       // superseded socket — ignore
-                if (rec.pingTimer) { clearInterval(rec.pingTimer); rec.pingTimer = null; }
-                rec.ws = null;
-                if (ev && ev.code === 4401) {
-                    // Token rejected — defer to the existing auth flow (the
-                    // auth-form success path re-dials this control WS). Do NOT
-                    // hammer-reconnect a broker that needs a password.
-                    pollStateFor(hid).authNeeded = true;
-                    try { showAuthOverlay(hostById(hid)); } catch (_) {}
-                    try { renderHostStatus(); } catch (_) {}
-                    return;
-                }
-                if (rec.closedByUs) return;      // closeControlWs / host removed
-                scheduleControlReattach(hid);
+                if (st.done) return;             // retired by us — handled
+                _controlSocketGone(st, ev);
             };
             ws.onerror = () => { /* onclose schedules the reconnect */ };
+            return st;
         }
+
+        // Send one nonce'd ping on `st`. The deadline protects the OLDEST ping
+        // still unanswered (st.pendN): a periodic ping never pushes a running
+        // deadline out. `restart` (the wake probe) makes this ping the one
+        // protected and counts the deadline from now, so a pong to any ping
+        // sent BEFORE it no longer counts.
+        function _controlPing(st, restart) {
+            if (st.done || !st.ws || st.ws.readyState !== WebSocket.OPEN) return;
+            const n = ++_controlPingSeq;
+            st.lastN = n;
+            desktopWsSend(st.ws, { type: 'ping', n: n });
+            if (st.pendN === null || restart) {
+                st.pendN = n;
+                _armPongDeadline(st);
+            }
+        }
+        // Only a socket whose first status proved a ponging broker, and only
+        // while a ping is outstanding.
+        function _armPongDeadline(st) {
+            if (st.deadlineTimer) { clearTimeout(st.deadlineTimer); st.deadlineTimer = null; }
+            if (st.done || !st.capable || st.pendN === null) return;
+            st.deadlineTimer = setTimeout(() => {
+                st.deadlineTimer = null;
+                _controlPongMissed(st);
+            }, CONTROL_PONG_TIMEOUT_MS);
+        }
+        function _controlPong(st, msg) {
+            // Any pong to the protected ping or a later one on THIS socket
+            // proves it alive since that ping; an older or foreign nonce does
+            // not.
+            if (st.pendN !== null && typeof msg.n === 'number'
+                    && msg.n >= st.pendN && msg.n <= st.lastN) {
+                st.pendN = null;
+                st.missed = 0;
+                if (st.deadlineTimer) { clearTimeout(st.deadlineTimer); st.deadlineTimer = null; }
+            }
+        }
+        function _controlPongMissed(st) {
+            if (st.done) return;
+            st.missed += 1;
+            st.pendN = null;
+            const rec = st.rec;
+            // A replacement that stops answering is just a failed replacement.
+            if (st.role !== 'cur' || st.missed >= 2) {
+                _controlSocketGone(st, null);
+                return;
+            }
+            // First miss on the socket in charge: dial the replacement now and
+            // give the old socket a second chance with a fresh ping.
+            if (!rec.cand && !rec.closedByUs) {
+                const h = hostById(rec.hostId);
+                if (h) _dialControl(rec, h, 'cand');
+            }
+            _controlPing(st);
+        }
+
+        // A status frame (or a pong's lease) from socket `st`.
+        function _controlStatus(st, msg) {
+            const rec = st.rec;
+            if (!st.statusSeen) {
+                st.statusSeen = true;
+                // Capability from the FIRST status, per socket: a broker that
+                // stamps gen + bootId answers pings.
+                st.capable = typeof msg.gen === 'number'
+                    && typeof msg.bootId === 'string';
+                _armPongDeadline(st);
+                if (st.role === 'cand') _promoteControl(st);
+            }
+            onControlStatus(rec.hostId, msg);
+        }
+
+        // The replacement reported: it is now the socket in charge, and the
+        // old one is let go.
+        function _promoteControl(st) {
+            const rec = st.rec;
+            const old = rec.cur;
+            st.role = 'cur';
+            rec.cand = null;
+            rec.cur = st;
+            rec.ws = st.ws;
+            rec.attempts = 0;
+            if (rec.reattachTimer) { clearTimeout(rec.reattachTimer); rec.reattachTimer = null; }
+            if (old && old !== st) _retireControlSocket(old);
+        }
+
+        // Stop everything `st` owns and close its socket. Idempotent.
+        function _retireControlSocket(st) {
+            if (st.done) return;
+            st.done = true;
+            if (st.pingTimer) { clearInterval(st.pingTimer); st.pingTimer = null; }
+            if (st.deadlineTimer) { clearTimeout(st.deadlineTimer); st.deadlineTimer = null; }
+            if (st.connectTimer) { clearTimeout(st.connectTimer); st.connectTimer = null; }
+            const ws = st.ws;
+            st.ws = null;
+            if (ws) {
+                try {
+                    ws.onopen = ws.onmessage = null;
+                    ws.onclose = ws.onerror = null;
+                } catch (_) {}
+                try { ws.close(); } catch (_) {}
+            }
+        }
+
+        // Socket `st` is gone: closed by the broker or the network, abandoned
+        // by the connect watchdog, or out of pong deadlines (ev null).
+        function _controlSocketGone(st, ev) {
+            if (st.done) return;
+            const rec = st.rec;
+            const wasCur = rec.cur === st;
+            _retireControlSocket(st);
+            if (!wasCur) {
+                if (rec.cand === st) rec.cand = null;
+                // Nothing left in charge either: back to the normal re-dial.
+                if (!rec.cur && !rec.closedByUs) scheduleControlReattach(rec.hostId);
+                return;
+            }
+            rec.cur = null;
+            rec.ws = null;
+            if (ev && ev.code === 4401) {
+                if (rec.cand) { _retireControlSocket(rec.cand); rec.cand = null; }
+                // Token rejected — defer to the existing auth flow (the
+                // auth-form success path re-dials this control WS). Do NOT
+                // hammer-reconnect a broker that needs a password.
+                pollStateFor(rec.hostId).authNeeded = true;
+                try { showAuthOverlay(hostById(rec.hostId)); } catch (_) {}
+                try { renderHostStatus(); } catch (_) {}
+                return;
+            }
+            if (rec.closedByUs) return;          // closeControlWs / host removed
+            // A replacement in flight takes charge when it reports; its own
+            // failure re-dials (above).
+            if (rec.cand) return;
+            scheduleControlReattach(rec.hostId);
+        }
+
+        // The wake probe: a page coming back to the foreground re-checks
+        // every channel NOW instead of at the next 25 s tick — a fresh nonce,
+        // so a late pong to an older ping cannot satisfy it, and a deadline
+        // counted from now, so timers that fire late on thaw cannot trip it.
+        // A channel waiting out its backoff is re-dialed at once.
+        onVisibility(function () {
+            for (const rec of controlSockets.values()) {
+                if (rec.closedByUs) continue;
+                const st = rec.cur;
+                if (st && !st.done && st.ws
+                        && st.ws.readyState === WebSocket.OPEN) {
+                    if (st.capable) _controlPing(st, true);
+                } else if (!rec.cur && !rec.cand && rec.reattachTimer) {
+                    clearTimeout(rec.reattachTimer);
+                    rec.reattachTimer = null;
+                    const h = hostById(rec.hostId);
+                    if (h) openControlWs(h);
+                }
+            }
+        });
 
         function scheduleControlReattach(hostId) {
             const rec = controlSockets.get(hostId);
@@ -422,15 +623,11 @@
             if (!rec) return;
             rec.closedByUs = true;
             if (rec.reattachTimer) { clearTimeout(rec.reattachTimer); rec.reattachTimer = null; }
-            if (rec.pingTimer) { clearInterval(rec.pingTimer); rec.pingTimer = null; }
-            if (rec.ws) {
-                try {
-                    rec.ws.onopen = rec.ws.onmessage = null;
-                    rec.ws.onclose = rec.ws.onerror = null;
-                } catch (_) {}
-                try { rec.ws.close(); } catch (_) {}
-                rec.ws = null;
-            }
+            // #248: both sockets — the one in charge and any replacement.
+            if (rec.cur) _retireControlSocket(rec.cur);
+            if (rec.cand) _retireControlSocket(rec.cand);
+            rec.cur = rec.cand = null;
+            rec.ws = null;
             controlSockets.delete(hostId);
         }
         // #195: the one member of the invalidation set that is not a cache but
