@@ -40,7 +40,7 @@
         }
         // Click-time answer to "does this host refuse every launch?". The
         // serving broker's comes from the AWAITED /info memo, never the paint
-        // predicate: the first sync read of a fresh memo is null (#253 MUST 2).
+        // predicate: the first sync read of a fresh memo is null.
         // A peer has only the Control Panel's record to go on; the broker's own
         // 403 (mapped below) covers a peer this page has not probed.
         async function hostRefusesLaunch(host) {
@@ -519,8 +519,17 @@
         function learnTerminalsThenRepaint(host) {
             if (hostTerminalsOff(host.id) !== null) return;
             let p;
-            if (host.id === 'local') p = localInfo();
-            else p = primeModCatalog(host);
+            if (host.id === 'local') {
+                p = localInfo();
+                // Attach the predicate's memo reader BEFORE our repaint
+                // hook: a menu opened before the memo existed read null
+                // without attaching one, and the repaint must find the
+                // answer already set — an unchanged menu signature ends
+                // the paint before anything would ask again.
+                hostTerminalsOff('local');
+            } else {
+                p = primeModCatalog(host);
+            }
             if (p && typeof p.then === 'function') {
                 p.then(() => repaintLaunchMenu(), () => {});
             }

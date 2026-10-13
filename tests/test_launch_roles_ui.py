@@ -298,7 +298,9 @@ const launched = (w) => w.fetches.filter(f => f.endsWith(' /launch'));
             profileMenuItems: (h, d) => d.profiles.map(n => ({ label: n })),
             launchMenuGen: 0, launchMenuNode: null, launchMenuPaint: null,
             launchMenuStillOurs: () => true,
-            launchMenuSig: () => String(Math.random()),
+            // Content-based like 76's, so paint()'s unchanged-signature early
+            // return runs here too and a repaint that changes nothing stops.
+            launchMenuSig: (items) => JSON.stringify(items.map(i => [i.label, i.enabled])),
             renderMenu: (items) => {
                 w.renders = (w.renders || []).concat([items.map(i => i.label)]);
             },

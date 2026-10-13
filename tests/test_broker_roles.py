@@ -394,9 +394,12 @@ def test_profile_writes_and_detect_refused_reads_answer(tmp_path,
     for path in ("/profiles", "/profiles/config", "/sessions"):
         _, r = authed(app).get(path)
         assert r.status == 200, (path, r.status)
-    # And the refusals still sit behind the auth gate.
+    # And the refusals still sit behind the auth gate (RAW client: no token).
     _, r = app.test_client.get("/profiles/detect")
     assert r.status == 401
+    _, r = app.test_client.post("/profiles/config", json={"profiles": {}})
+    assert r.status == 401
+    assert r.json["error"] == "auth_required"
 
 
 def test_profile_routes_unchanged_by_default(tmp_path, monkeypatch):
