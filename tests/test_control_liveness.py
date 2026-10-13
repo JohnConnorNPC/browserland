@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 39
+EXPECTED_ASSERTS = 47
 
 _HARNESS = r"""
 'use strict';
@@ -396,6 +396,51 @@ s0._drop(4401);
 w.api.probeControl('local');
 ok(w.sockets.length === 1, 'H8 a hint never re-dials a channel parked on 4401 (auth)');
 
+// ---- B1: take back while reconnecting --------------------------------------
+const BA = function (ws) { return ws.sent.filter(m => m.type === 'become_active').length; };
+w = mkWorld();
+s0 = connected(w, ST(false));
+s0._drop(1006);                          // channel down, waiting out its backoff
+w.api.sendBecomeActive(w.env.localHost());
+ok(BA(s0) === 0 && w.notices.some(n => n.indexOf('will take over when connected') !== -1)
+    && w.sockets.length === 2,
+    'B1 a click with the channel down sends nothing, says so, and re-dials at once');
+let s1 = w.last(); s1._open(); s1._recv(ST(false));
+ok(BA(s1) === 1, 'B2 the new channel first inactive status sends become_active once');
+s1._recv(ST(false));
+ok(BA(s1) === 1, 'B3 the deferred send never re-arms: a second inactive status sends nothing');
+
+w = mkWorld();
+s0 = connected(w, ST(false));
+s0._drop(1006);
+w.api.sendBecomeActive(w.env.localHost());
+w.advance(16000);                        // the re-dial is slow: the click is stale
+s1 = w.last(); s1._open(); s1._recv(ST(false));
+ok(BA(s1) === 0, 'B4 an intent older than 15 s sends nothing');
+
+w = mkWorld();
+s0 = connected(w, ST(false));
+pong(s0, s0.lastPing().n);
+w.api.sendBecomeActive(w.env.localHost());
+ok(BA(s0) === 1, 'B5 a click on a live channel sends become_active at once');
+
+w = mkWorld();
+s0 = connected(w, ST(false));
+s0._drop(1006);
+w.api.sendBecomeActive(w.env.localHost());
+s1 = w.last(); s1._open();
+s1._recv(ST(true));                      // auto-claim on reconnect (S9)
+s1._recv(ST(false, { activeClientId: 'phone', gen: 2 }));   // a later takeover
+ok(BA(s1) === 0, 'B6 an active status clears the intent: a later takeover is not fought (S9)');
+
+w = mkWorld();
+w.api.sendBecomeActive(w.env.hostById('rb'));
+ok(w.sockets.length === 1 && w.sockets[0].url.indexOf('ws://rb/control') === 0,
+    'B7 a click for a host with no channel yet dials it');
+s1 = w.last();
+if (s1) { s1._open(); s1._recv(ST(false)); }
+ok(!!s1 && BA(s1) === 1, 'B8 ...and takes over when it reports');
+
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -502,6 +547,20 @@ def test_pong_lease_goes_through_on_control_status(run, label):
     "H8 a hint never re-dials a channel parked on 4401 (auth)",
 ])
 def test_probe_control(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "B1 a click with the channel down sends nothing, says so, and re-dials at once",
+    "B2 the new channel first inactive status sends become_active once",
+    "B3 the deferred send never re-arms: a second inactive status sends nothing",
+    "B4 an intent older than 15 s sends nothing",
+    "B5 a click on a live channel sends become_active at once",
+    "B6 an active status clears the intent: a later takeover is not fought (S9)",
+    "B7 a click for a host with no channel yet dials it",
+    "B8 ...and takes over when it reports",
+])
+def test_take_back_while_reconnecting(run, label):
     _ok(run, label)
 
 

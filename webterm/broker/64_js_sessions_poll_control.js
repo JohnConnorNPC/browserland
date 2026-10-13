@@ -524,6 +524,7 @@
                 if (st.role === 'cand') _promoteControl(st);
             }
             onControlStatus(rec.hostId, msg);
+            _settleWantActive(rec, msg);
         }
 
         // The replacement reported: it is now the socket in charge, and the
@@ -697,15 +698,54 @@
             }
         });
 
+        // #248 B1: a take-back click is an INTENT, kept for 15 s. With the
+        // channel down (reconnecting, or a stale socket the click's probe
+        // then replaces) it used to vanish silently -- the overlay button
+        // and the lease chip did nothing. Now the click says so, brings the
+        // re-dial forward, and the next status that still says "not you"
+        // sends become_active once. Any {active:true} clears the intent (S9),
+        // so an auto-claim on reconnect can never leave it armed for another
+        // device's later takeover to trip; the deferred send never re-arms
+        // it, so two pages cannot ping-pong the lease without a new click.
+        const CONTROL_WANT_ACTIVE_MS = 15000;
         function sendBecomeActive(host) {
             host = host || localHost();
-            const rec = host && controlSockets.get(host.id);
-            if (!rec || !rec.ws || rec.ws.readyState !== WebSocket.OPEN) return;
+            if (!host) return;
+            let rec = controlSockets.get(host.id);
+            if (!rec || !rec.ws || rec.ws.readyState !== WebSocket.OPEN) {
+                if (!rec) {
+                    openControlWs(host);
+                    rec = controlSockets.get(host.id);
+                } else {
+                    _redialNow(rec);
+                }
+                if (rec) rec.wantActive = Date.now();
+                showNotice('reconnecting to ' + (host.label || host.id)
+                    + ' — will take over when connected');
+                return;
+            }
+            rec.wantActive = Date.now();
+            _sendBecomeActiveNow(rec, host);
+            // The socket may be the stale one: check it, so a dead channel is
+            // replaced and the intent above lands on the replacement.
+            probeControl(host.id);
+        }
+        function _sendBecomeActiveNow(rec, host) {
+            if (!rec.ws || rec.ws.readyState !== WebSocket.OPEN) return;
             if (_leaseAffordance.armed && host.id === homeHostId()) {
                 _leaseAffordance.asked = true;
             }
             try { rec.ws.send(JSON.stringify({ type: 'become_active' })); }
             catch (_) {}
+        }
+        // Called after every status the channel delivers (64 _controlStatus).
+        function _settleWantActive(rec, msg) {
+            if (!rec.wantActive) return;
+            if (msg.active) { rec.wantActive = 0; return; }
+            const fresh = (Date.now() - rec.wantActive) < CONTROL_WANT_ACTIVE_MS;
+            rec.wantActive = 0;
+            const host = hostById(rec.hostId);
+            if (fresh && host) _sendBecomeActiveNow(rec, host);
         }
 
         function onControlStatus(hostId, msg) {
