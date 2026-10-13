@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 7
+EXPECTED_ASSERTS = 15
 
 _HARNESS = r"""
 'use strict';
@@ -189,6 +189,63 @@ function mkWorld() {
         && w.log.indexOf('PROBE') < w.log.lastIndexOf('ADOPT:["WIN"]'),
         'U6 a not_active 409 with state probes first, then adopts');
 
+    // ---- 247-1: the single-flight /state channel ---------------------------
+    // O1: a poll during a held pull issues no second GET (item 1).
+    w = mkWorld(); await w.boot();
+    w.server = { rev: 2, settings: {}, layout: { cols: ['X'] } };
+    w.holdGet = true; const o1 = w.api.pullState(false); await flush(); w.holdGet = false;
+    const g1 = w.gets;
+    w.server = { rev: 3, settings: {}, layout: { cols: ['Y'] } };
+    await w.api.pullState(false); await flush();
+    ok(w.gets === g1, 'O1 a poll while a pull is outstanding sends no GET');
+    await w.release(); await o1; await flush();
+    await w.api.pullState(false); await flush();
+    w.edit(['Z']); await w.firePush(); await flush();
+    ok(w.cols() === J(['Z']) && w.srv() === J(['Z']) && J(w.log.filter(x => x.indexOf('PUT') === 0)) === J(['PUT@3:["Z"]']),
+        'O1b an edit made after observing Y@3 lands on base 3 (never on a stale rev)');
+    // O2: 1b -- a pull sent before our PUT is answered first; the push waits.
+    w = mkWorld(); await w.boot();
+    w.holdGet = true; const o2 = w.api.pullState(false); await flush(); w.holdGet = false;
+    w.edit(['E']); await w.firePush();
+    ok(w.puts.length === 0, 'O2a a push waits for a held GET (nothing sent meanwhile)');
+    const adoptsBefore = w.adopts;
+    await w.release(); await o2; await flush(); await flush();
+    ok(w.puts.length === 1 && w.puts[0].baseRev === 1 && w.srv() === J(['E']) && w.cols() === J(['E'])
+        && w.adopts === adoptsBefore && w.api.rev() === 2,
+        'O2 the push sends once after the pull, lands, and the screen never re-adopts the old state');
+    // O3 (w2 W2-B): a GET captured AFTER a later-sent PUT's state.
+    w = mkWorld(); await w.boot();
+    w.server = { rev: 4, settings: {}, layout: { cols: ['X'] } }; await w.api.pullState(false); await flush();
+    w.holdGetLate = true; const o3 = w.api.pullState(false); await flush(); w.holdGetLate = false;
+    w.server = { rev: 5, settings: {}, layout: { cols: ['Y'] } };
+    w.holdPut = true; w.edit(['Z']); await w.firePush();
+    w.server = { rev: 6, settings: {}, layout: { cols: ['W'] } };
+    const revs = [];
+    w.held.shift().res(); await o3; await flush(); revs.push(w.api.rev());
+    w.holdPut = false; await w.release(); revs.push(w.api.rev());
+    w.edit(['V']); await w.firePush(); await flush(); revs.push(w.api.rev());
+    ok(revs[1] >= revs[0] && revs[2] >= revs[1] && w.srv() === J(['V']),
+        'O3 a reordered capture never lowers the rev, and the next edit lands (revs ' + J(revs) + ')');
+    // O4: a genuine rollback is followed (no rev comparison).
+    w = mkWorld(); await w.boot();
+    w.edit(['A10']); await w.firePush();
+    w.server = { rev: 1, settings: {}, layout: { cols: ['RESTORED'] } };
+    await w.api.pullState(false); await flush();
+    ok(w.cols() === J(['RESTORED']) && w.api.rev() === 1, 'O4 a genuine rev rollback is followed by the next pull');
+    // O5/O6: one request at a time, also when a push and an initial pull start in one tick.
+    w = mkWorld(); await w.boot();
+    w.holdGet = true; w.holdPut = true;
+    w.prefs._layout = { cols: ['K'] }; w.api.savePrefs();
+    const before6 = w.gets + w.puts.length;
+    for (const [id, t] of Array.from(w.timers)) if (t.ms === 600) { w.timers.delete(id); t.fn(); }
+    const ip = w.api.pullState(true);
+    await flush(); await flush();
+    ok((w.gets + w.puts.length) - before6 === 1,
+        'O6 a push and an initial pull started in one tick put ONE request on the wire');
+    w.holdGet = false; w.holdPut = false;
+    await w.release(); await ip; await flush(); await w.release();
+    ok(w.srv() === J(['K']), 'O5 ...and the other one follows once it is answered');
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(function (e) { console.log('CRASH ' + (e && e.stack)); process.exit(1); });
 """
@@ -240,6 +297,24 @@ def _ok(run, label):
 ])
 def test_247_4_response_validation(run, label):
     _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "O1 a poll while a pull is outstanding sends no GET",
+    "O1b an edit made after observing Y@3 lands on base 3 (never on a stale rev)",
+    "O2a a push waits for a held GET (nothing sent meanwhile)",
+    "O2 the push sends once after the pull, lands, and the screen never re-adopts the old state",
+    "O4 a genuine rev rollback is followed by the next pull",
+    "O6 a push and an initial pull started in one tick put ONE request on the wire",
+    "O5 ...and the other one follows once it is answered",
+])
+def test_247_1_single_flight(run, label):
+    _ok(run, label)
+
+
+def test_247_1_reorder_cell_ran(run):
+    assert any(k.startswith("O3 a reordered capture never lowers the rev") and v
+               for k, v in run["results"].items()), run["stdout"]
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):

@@ -71,6 +71,21 @@
             const obj = v => !!v && typeof v === 'object' && !Array.isArray(v);
             return obj(b) && _stateRevOk(b.rev) && obj(b.settings) && obj(b.layout);
         }
+        // #247 items 1/1b: a single-flight /state channel. At most ONE /state
+        // request (GET or PUT) is outstanding per tab, so the broker handles
+        // them in the order this tab sent them and no response can carry a
+        // rev older than one already observed -- with no rev comparisons, so
+        // a genuine rollback is still followed. A background poll is skipped
+        // while the channel is busy; a push or an initial pull waits for it.
+        // Acquire = wait, then RE-CHECK with no await in between (returning
+        // from an async helper yields a tick even when the channel was free,
+        // and another requester may take it in that tick):
+        //   do { await _stateWaitChannel(); } while (_stateChannel);
+        // then claim it synchronously. Only the owner releases it.
+        let _stateChannel = null;
+        async function _stateWaitChannel() {
+            while (_stateChannel) { try { await _stateChannel; } catch (_) {} }
+        }
 
         function schedulePush() {
             if (_deactivated) return;            // torn down — never push state
@@ -88,30 +103,57 @@
             if (_deactivated) return;            // torn down — never push state
             if (isDetachedSurface()) return;     // #226: one writer, the desktop
             if (_statePushInFlight) { _statePushAgain = true; return; }
-            const serialized = _stateSerialize();
-            if (serialized === _stateLastSerialized) {        // nothing changed
-                _statePushFailed = false;        // (an undone edit owes nothing)
-                return;
-            }
-            const epoch = _viewEpoch;
             _statePushInFlight = true;
+            const epoch = _viewEpoch;
+            let mine = null;
+            let release = null;
             try {
-                const blob = _stateBlob();
-                const r = await hostFetch(localHost(), '/state', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        baseRev: _stateRev,
-                        settings: blob.settings,
-                        layout: blob.layout,
-                        clientId: CLIENT_ID,   // lease: only the active browser
-                    }),                        // may write (else 409 not_active)
-                });
+                // #247 single-flight: wait for the /state channel, then claim
+                // it with no await in between (see _stateWaitChannel).
+                do { await _stateWaitChannel(); } while (_stateChannel);
+                if (_deactivated) return;
+                const serialized = _stateSerialize();
+                if (serialized === _stateLastSerialized) {        // nothing changed
+                    _statePushFailed = false;    // (an undone edit owes nothing)
+                    return;
+                }
+                mine = new Promise(r => { release = r; });
+                _stateChannel = mine;
+                let out = null;
+                try {
+                    const blob = _stateBlob();
+                    const r = await hostFetch(localHost(), '/state', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            baseRev: _stateRev,
+                            settings: blob.settings,
+                            layout: blob.layout,
+                            clientId: CLIENT_ID,   // lease: only the active browser
+                        }),                        // may write (else 409 not_active)
+                    });
+                    const body = (r.status === 409 || r.ok) ? await r.json() : null;
+                    out = { status: r.status, ok: r.ok, body: body };
+                } catch (e) {
+                    out = null;
+                } finally {
+                    if (_stateChannel === mine) _stateChannel = null;
+                    release();
+                    release = null;
+                }
+                // Everything below runs synchronously: a request waiting on the
+                // channel resumes only after this response has been processed.
+                if (!out) {
+                    // Offline — localStorage already holds it; retry on next save.
+                    // (The PUT may still have landed: pullState acknowledges that.)
+                    if (epoch === _viewEpoch) _statePushFailed = true;
+                    return;
+                }
                 // Torn down while this PUT was in flight (lost the lease): drop
                 // the result so a 409 not_active never re-renders into the
                 // overlay the teardown just put up.
                 if (_deactivated) return;
-                if (r.status === 409) {
+                if (out.status === 409) {
                     // Another browser won the race — its state is inlined so we
                     // converge in one round trip (no second GET). Adopt it ONLY
                     // if we have no NEWER local edit than the payload we just
@@ -120,7 +162,7 @@
                     // editor wins; an idle loser yields). _stateSerialize() now
                     // differs from `serialized` exactly when the user edited
                     // during the in-flight PUT (the Codex lost-update case).
-                    const cur = await r.json();
+                    const cur = out.body;
                     // #248 A4: refused for the LEASE (not a stale rev): a hint
                     // that this page may have lost it unawares. Ask the broker;
                     // the adopt below is unchanged.
@@ -139,8 +181,8 @@
                     } else if (epoch === _viewEpoch) {
                         _statePushFailed = true;     // unusable body: still owed
                     }
-                } else if (r.ok) {
-                    const resp = await r.json();
+                } else if (out.ok) {
+                    const resp = out.body;
                     if (!resp || !_stateRevOk(resp.rev)) {
                         // A 200 without a usable rev taught us nothing: the PUT
                         // may or may not have landed, so it is still owed (the
@@ -152,7 +194,7 @@
                     _stateLastSerialized = serialized;
                     _statePushFailed = false;
                     _stateRevSkipped = false;
-                } else if (r.status === 400 || r.status === 413) {
+                } else if (out.status === 400 || out.status === 413) {
                     // A verdict on this payload (which carries any older
                     // failed edit too): it can never land, so nothing is owed.
                     _statePushFailed = false;
@@ -162,12 +204,9 @@
                     // save retries.
                     _statePushFailed = true;
                 }
-            } catch (e) {
-                // Offline — localStorage already holds it; retry on next save.
-                // (The PUT may still have landed: pullState acknowledges that.)
-                if (epoch === _viewEpoch) _statePushFailed = true;
             } finally {
                 _statePushInFlight = false;
+                if (release) { if (_stateChannel === mine) _stateChannel = null; release(); }
                 if (_statePushAgain) { _statePushAgain = false; schedulePush(); }
             }
         }
@@ -222,6 +261,13 @@
             // (_markStateReady) behind it, that is a permanently blank desktop.
             // Same shape as pollHost: the json() read lives INSIDE the try, and
             // the timer is cleared in the outer finally.
+            // #247 single-flight: a background poll never queues behind a busy
+            // channel (the next tick asks again); an initial pull waits for it.
+            if (!initial && (_stateChannel || _statePushInFlight)) return;
+            if (initial) { do { await _stateWaitChannel(); } while (_stateChannel); }
+            let release;
+            const mine = new Promise(r => { release = r; });
+            _stateChannel = mine;
             let srv;
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
@@ -234,6 +280,8 @@
                 return;
             } finally {
                 clearTimeout(timer);
+                if (_stateChannel === mine) _stateChannel = null;
+                release();
             }
             if (!_stateBodyOk(srv)) return;         // #247 N1
             // A tab back at its baseline (a failed edit undone without a

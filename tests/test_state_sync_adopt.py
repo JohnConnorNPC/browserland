@@ -329,8 +329,10 @@ function mkWorld() {
         w.putFail = mode;
         await w.firePush();
         w.api.bumpEpoch();                         // the lease flip
-        await w.api.pullState(true);               // the rebuild's re-adopt
+        // #247 single-flight: the rebuild's re-adopt waits for the stale PUT.
+        const rebuildPull = w.api.pullState(true);
         releaseG3();
+        await rebuildPull;
         await flush();
         w.gate = null; w.putFail = null;
         ok(w.prefs._layout.columns.length === 3 && !w.api.st().inFlight,
