@@ -1386,7 +1386,10 @@ return [setHostMode('p', 'c', info), snap('p')];
 @pytest.mark.parametrize("origin", [
     "http://localhost:4448", "http://127.0.0.1:4448", "http://127.9.9.9:4448",
     "http://[::1]:4448", "http://0.0.0.0:4448", "http://[::]:4448",
-    "http://app.localhost:4448"])
+    "http://app.localhost:4448",
+    # codex review: IPv4-mapped loopback/unspecified, as the URL parser
+    # serializes them ([::ffff:7f00:1], [::ffff:0:0])
+    "http://[::ffff:127.0.0.1]:4448", "http://[::ffff:0.0.0.0]:4448"])
 def test_a_local_only_origin_never_keeps_a_token(tmp_path, origin):
     """S1: `localhost` typed in the browser is the browser's machine; the same
     string in this broker's config is this broker's. Equal strings, maybe two
@@ -1598,3 +1601,12 @@ def test_an_older_mints_late_success_does_not_clear_a_newer_refusal(tmp_path):
     assert out["results"][0].endswith("ticket=T")
     assert "peer_busy" in out["results"][1]
     assert out["refusal"] == "peer_busy"
+
+
+def test_a_mapped_lan_address_is_not_local_only(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+return [originIsLocalOnly('http://[::ffff:10.0.0.1]:4448'),
+        originIsLocalOnly('http://box:4448'),
+        originIsLocalOnly('http://[::ffff:127.0.0.1]:4448')];
+""")
+    assert out == [False, False, True]

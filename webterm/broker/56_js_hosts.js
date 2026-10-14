@@ -163,9 +163,12 @@
             let u;
             try { u = new URL(origin); } catch (_) { return true; }
             const host = u.hostname.toLowerCase().replace(/\.$/, '');
+            // An IPv4-mapped address is serialized in hex by the URL parser
+            // ([::ffff:127.0.0.1] -> [::ffff:7f00:1]).
             return host === 'localhost' || host.endsWith('.localhost')
                 || host === '0.0.0.0' || host === '[::]' || host === '[::1]'
-                || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+                || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+                || /^\[::ffff:(7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\]$/.test(host);
         }
         // Switch a remote host between DIRECT (peerId null) and FROM SERVER
         // (reached through this broker's /peer/<peerId>/). `info` is
