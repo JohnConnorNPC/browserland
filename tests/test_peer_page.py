@@ -450,3 +450,17 @@ return { local: local, status: r.status, calls: calls };
         assert key not in out["local"]
     assert out["status"] == 200
     assert [c["url"] for c in out["calls"]] == ["/info"]
+
+
+
+def test_a_cannot_proxy_answer_is_asked_again(tmp_path):
+    """NIT 8: the synthetic 503 drops the memo, so a peer added to this
+    broker after the page loaded is used on the next call."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [{ ok: true, peers: {}, peer_proxy: true }, INFO];
+const r1 = await hostFetch(hostById('rb'), '/sessions');
+const r2 = await hostFetch(hostById('rb'), '/sessions');
+return { s1: r1.status, s2: r2.status, calls: calls.map(c => c.url) };
+""".replace("INFO", json.dumps(INFO)))
+    assert out["s1"] == 503 and out["s2"] == 200
+    assert out["calls"] == ["/info", "/info", "/peer/b/sessions"]

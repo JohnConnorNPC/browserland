@@ -59,16 +59,22 @@ def test_the_section_states_what_the_code_does():
     assert peers.SANDBOX_CSP in s
     assert (f"**{peers.PEER_MAX_DIALS_PER_PEER} per peer within "
             f"{peers.PEER_MAX_DIALS} overall**") in s
+    assert (f"**{peers.PEER_MCP_MAX_DIALS_PER_PEER} per peer within "
+            f"{peers.PEER_MCP_MAX_DIALS}**") in s
+    assert f"**{peers.PEER_DIAL_MAX_S:g} s**" in s
+    assert f"at most {peers.PEER_MCP_MAX_BODY // 2**20} MiB, within " \
+        f"{peers.PEER_MCP_BODY_DEADLINE_S:g} s" in s
     assert f"Connect timeout {peers.PEER_CONNECT_TIMEOUT_S:g} s" in s
     assert f"read timeout {peers.PEER_READ_TIMEOUT_S:g} s" in s
     code = ((REPO / "webterm" / "broker" / "app.py").read_text(
         encoding="utf-8")
         + (REPO / "webterm" / "broker" / "peers.py").read_text(
             encoding="utf-8"))
-    documented = set(re.findall(r"\b(?:40\d|50\d) `([a-z_]+)`", s))
+    documented = set(re.findall(r"\b(?:4\d\d|5\d\d) `([a-z_]+)`", s))
     assert documented == {"auth_required", "unknown_peer",
                           "proxy_unavailable", "peer_hop_refused",
                           "not_relayed", "peer_origin_changed", "bad_scope",
-                          "peer_busy"}
+                          "peer_busy", "body_too_large", "bad_length",
+                          "body_timeout", "peer_timeout"}
     for code_name in documented:
         assert f'"{code_name}"' in code, code_name

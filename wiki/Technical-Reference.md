@@ -264,7 +264,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
 | `GET`/`POST`/`PUT /peer/<id>/…` (peer proxy, #252) | **two gates**, see [Peer proxy](#peer-proxy-252): browser routes take **this broker's token as the bearer** (header only — a `?token=` does not count here) **plus** the peer's own token in `X-Browserland-Peer-Token` and the pairing in `X-Browserland-Peer-Origin`; `/peer/<id>/mcp/*` takes the **peer's MCP token alone**, and only for a peer configured with `mcp: true`. `OPTIONS` is not routed (405). |
-| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three egresses (with `/update/check` and the configured peers): an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
+| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three HTTP-library egresses (`/status/fetch`, `/update/check`, the configured peers) plus the update apply's `git fetch` subprocess: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
 | CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
 | Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token), and CSP `script-src` — see below. |
 
@@ -434,8 +434,8 @@ operator names each peer in `broker_config.json`:
 
 | Gate | Credential | Refusals, in order |
 |---|---|---|
-| browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 404 `unknown_peer` → 503 `proxy_unavailable` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
-| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → 400 `bad_scope` → 503 `peer_busy` |
+| browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 503 `proxy_unavailable` → 404 `unknown_peer` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
+| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
 
 Every refusal happens before anything is dialed. Browser-gate bodies are
 `{"ok": false, "error": …}`; MCP-gate bodies are `{"error": …}`, the MCP
@@ -473,19 +473,26 @@ scopes and admin credential do not apply to it.
 `/ws` and `/control`. A path naming another `/peer/` hop is refused
 (`peer_hop_refused`). `OPTIONS` is not routed on the prefix (405, never
 dialed): the page is same-origin with this broker, so no preflight arises.
-The path is decoded once and the **table's** path is what is dialed, never
-the client's bytes.
+Sanic resolves `.` and `..` segments before the relay sees the path
+(`/peer/b/./info` is `/peer/b/info`; `/peer/b/../info` is the peer named
+`info`); the relay then decodes the rest once, and the **table's** path is
+what is dialed, never the client's bytes. A body sent with a bodiless
+method (`GET`) is read and dropped, never forwarded.
 
 **What crosses.** Allowlists both ways. Upstream: `Content-Type`,
-`Content-Length`, `Content-Encoding`, `Accept`, exactly one
+`Content-Length` (only when a body is sent), `Content-Encoding`, `Accept`,
+exactly one
 `X-Browserland-Scope`, `X-Webterm-Admin` only when the caller sent it and
 only on the browser gate, `X-Browserland-Mcp-Admin` only on the MCP gate, and the one `Authorization` this broker sets (the
-peer's token). This broker's own bearer, the peer-token and pairing headers,
+peer's token). The upstream client adds no headers of its own (no
+`User-Agent`) and keeps no cookies. This broker's own bearer, the peer-token and pairing headers,
 `Cookie`, `Host`, `Origin`, `X-Forwarded-*` and every hop-by-hop header never
 cross, and `token` / `auth` are dropped from the forwarded query. Back:
-`Content-Length`, `Content-Encoding`, `Cache-Control`, `ETag`,
-`Last-Modified`, `Content-Disposition`. `Set-Cookie`, `Location` and every
-`Access-Control-*` are dropped.
+`Content-Length`, `Content-Encoding`, `Content-Disposition`. `Set-Cookie`,
+`Location`, every `Access-Control-*` and every cache header (`Cache-Control`,
+`ETag`, `Last-Modified`, `Expires`, `Age`) are dropped, and every `/peer/*`
+response is `Cache-Control: no-store`, so a peer cannot pin its answers in
+the browser.
 
 **A relayed body is never a page.** `Content-Type` is forced:
 `application/json` when the peer said JSON, otherwise
@@ -501,8 +508,13 @@ advisory only. The origin's host name is resolved when it is dialed, so name
 a peer by an address, or by a name whose DNS you control. The "not this
 broker" check catches a typo, not every alias of this machine; the hop
 refusal is what stops a loop. Concurrent dials
-are capped at **8 per peer within 32 overall**; over either: 503 `peer_busy`,
-never a queue. Connect timeout 2.5 s (under the page's 3 s fetch deadline),
+on the browser gate are capped at **8 per peer within 32 overall**; the MCP
+gate (whose callers this broker cannot authenticate) has its own pool of
+**2 per peer within 8**, so it can never take a browser-gate slot, and it
+reads each request body whole (at most 1 MiB, within 5 s) before it takes a
+slot. Over either cap: 503 `peer_busy`, never a queue. A whole dial ends
+after **600 s** however steadily the peer drips (504 `peer_timeout`, or a
+dropped connection once the answer has started). Connect timeout 2.5 s (under the page's 3 s fetch deadline),
 read timeout 30 s (past the 15 s `/mcp/read` wait and the 10 s desktop relay).
 Bodies stream both ways, one chunk at a time — a 256 MiB recording is never
 held whole; a body that dies half-way drops the connection rather than

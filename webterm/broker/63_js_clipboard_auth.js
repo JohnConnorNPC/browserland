@@ -659,6 +659,10 @@
         async function _peerFetch(host, path, opts) {
             const info = await localPeers();
             if (!info.proxy || typeof info.peers[host.peerId] !== 'string') {
+                // Not memoized as an answer: a peer added to this broker (or
+                // the proxy extra installed) after this page loaded is seen
+                // on the next poll, not only after a reload.
+                forgetLocalPeers();
                 return new Response(JSON.stringify({
                     ok: false, error: 'proxy_unavailable',
                     message: PROXY_UNAVAILABLE_MSG }), {
