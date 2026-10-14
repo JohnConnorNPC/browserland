@@ -285,7 +285,7 @@ async def test_a_ticket_works_once(live, fake):
     ws1 = await page(live, "b", "ws", "clientId=c1", t)
     await recv_n(ws1, 2)
     ws2 = await page(live, "b", "ws", "clientId=c1", t)
-    assert await closed_with(ws2, 1.0) == (4401, "ticket")
+    assert await closed_with(ws2, 1.0) == (4403, "ticket")
     assert len(fake.handshakes) == n + 1
     await ws1.close()
 
@@ -297,26 +297,26 @@ async def test_a_ticket_works_once(live, fake):
     ("b", "control", ""),                          # no clientId
     ("b", "control", "clientId=%20c1"),            # padded: no strip (Q18)
 ])
-async def test_a_mis_bound_ticket_is_4401_and_burned(live, fake, peer, route,
+async def test_a_mis_bound_ticket_is_4403_and_burned(live, fake, peer, route,
                                                      qs):
     t = await ticket(live, "b", fake.origin, route="control", cid="c1")
     n = len(fake.handshakes)
     ws = await page(live, peer, route, qs, t)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     # Burned: the right presentation fails too.
     ws = await page(live, "b", "control", "clientId=c1", t)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     assert len(fake.handshakes) == n
     assert live.app.ctx.peer_sock_cap._busy == {}
 
 
-async def test_an_expired_ticket_is_4401(live, fake, monkeypatch):
+async def test_an_expired_ticket_is_4403(live, fake, monkeypatch):
     monkeypatch.setattr(ps, "PEER_TICKET_TTL_S", 0.2)
     t = await ticket(live, "b", fake.origin)
     await asyncio.sleep(0.4)
     n = len(fake.handshakes)
     ws = await page(live, "b", "ws", "clientId=c1", t)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     assert len(fake.handshakes) == n
 
 
@@ -393,17 +393,17 @@ async def test_revoke_closes_one_peer_and_voids_its_tickets(live, fake):
     spare = await ticket(live, "b", fake.origin, cid="c9")
     n = len(fake.handshakes)
     _on_loop(live, live.app.ctx.peer_sockets.revoke, "b")
-    # Q14: B's leg 1000, the page 4401 -- never the shutdown 1001.
-    assert await closed_with(wb) == (4401, "revoked")
+    # Q14: B's leg 1000, the page 4403 -- never the shutdown 1001.
+    assert await closed_with(wb) == (4403, "revoked")
     assert conn_closed(cb) == (1000, "")
     ws = await page(live, "b", "ws", "clientId=c9", spare)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     assert len(fake.handshakes) == n
     # c's pair is still open.
     await wc.send("still here")
     assert await wait_for(lambda: cc.frames_in == ["still here"])
     _on_loop(live, live.app.ctx.peer_sockets.revoke)
-    assert await closed_with(wc) == (4401, "revoked")
+    assert await closed_with(wc) == (4403, "revoked")
     assert await wait_for(lambda: len(live.app.ctx.peer_sockets) == 0)
     assert await wait_for(lambda: live.app.ctx.peer_sock_cap._busy == {})
 
@@ -419,10 +419,10 @@ async def test_a_changed_origin_is_swept_at_the_next_mint(live, fake):
     await asyncio.sleep(0.3)
     assert wb.protocol.close_rcvd is None     # nothing until the next event
     await ticket(live, "c", fake.origin, cid="other")
-    assert await closed_with(wb) == (4401, "revoked")
+    assert await closed_with(wb) == (4403, "revoked")
     assert conn_closed(cb) == (1000, "")
     ws = await page(live, "b", "ws", "clientId=c9", spare)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     assert wc.protocol.close_rcvd is None
     await wc.close()
 
@@ -434,8 +434,8 @@ async def test_a_changed_token_is_swept_at_the_next_redemption(live, fake):
     _on_loop(live, setattr, live.app.ctx, "auth_token", "rotated-token")
     # The redemption of c's ticket sweeps first: both go.
     wc = await page(live, "c", "ws", "clientId=c1", tc)
-    assert await closed_with(wb) == (4401, "revoked")
-    assert await closed_with(wc) == (4401, "ticket")
+    assert await closed_with(wb) == (4403, "revoked")
+    assert await closed_with(wc) == (4403, "ticket")
 
 
 async def test_apply_change_sweeps_without_a_mint(live, fake):
@@ -446,7 +446,7 @@ async def test_apply_change_sweeps_without_a_mint(live, fake):
     await asyncio.sleep(0.3)
     assert wb.protocol.close_rcvd is None
     _on_loop(live, peers.apply_change, live.app)
-    assert await closed_with(wb) == (4401, "revoked")
+    assert await closed_with(wb) == (4403, "revoked")
 
 
 async def test_a_change_during_the_dial_is_caught(live, fake, monkeypatch):
@@ -468,7 +468,7 @@ async def test_a_change_during_the_dial_is_caught(live, fake, monkeypatch):
     _on_loop(live, live.app.ctx.peers["b"].__setitem__, "origin", moved)
     _on_loop(live, peers.apply_change, live.app)
     gate.set()
-    assert await closed_with(ws) == (4401, "revoked")
+    assert await closed_with(ws) == (4403, "revoked")
     assert conn_closed(fake.wait_conn(n + 1)) == (1000, "")
     assert await wait_for(lambda: live.app.ctx.peer_sock_cap._busy == {})
     assert len(live.app.ctx.peer_sockets) == 0
@@ -479,7 +479,7 @@ async def test_a_repeated_client_id_is_refused(live, fake):
     t = await ticket(live, "b", fake.origin, cid="c1")
     n = len(fake.handshakes)
     ws = await page(live, "b", "ws", "clientId=c1&clientId=c2", t)
-    assert await closed_with(ws) == (4401, "ticket")
+    assert await closed_with(ws) == (4403, "ticket")
     assert len(fake.handshakes) == n
 
 
@@ -505,6 +505,8 @@ async def test_a_page_close_closes_the_peer_1000(live, fake):
 
 @pytest.mark.parametrize("script, want", [
     ("close-4409", (4409, "deactivated")),
+    # Review round 1b: 4401 on these routes is only ever the peer's own.
+    ("close-4401", (4401, "auth required")),
     ("close-2000", (1012, "")),
     ("close-empty", (1012, "")),
 ])

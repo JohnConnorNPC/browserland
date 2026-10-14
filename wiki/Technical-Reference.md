@@ -265,7 +265,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
 | `GET`/`POST`/`PUT /peer/<id>/…` (peer proxy, #252) | **two gates**, see [Peer proxy](#peer-proxy-252): browser routes take **this broker's token as the bearer** (header only — a `?token=` does not count here) **plus** the peer's own token in `X-Browserland-Peer-Token` and the pairing in `X-Browserland-Peer-Origin`; `/peer/<id>/mcp/*` takes the **peer's MCP token alone**, and only for a peer configured with `mcp: true`. `OPTIONS` is not routed (405). |
-| `POST /peer/<id>/ws-ticket`, `WS /peer/<id>/ws`, `WS /peer/<id>/control` (peer proxy sockets, #252) | the mint takes the **browser gate** above and answers a one-time ticket; the two socket routes take **only** `?ticket=` — no token of any kind — and close **4401** on a bad, expired, reused or revoked one. See [Sockets](#sockets). |
+| `POST /peer/<id>/ws-ticket`, `WS /peer/<id>/ws`, `WS /peer/<id>/control` (peer proxy sockets, #252) | the mint takes the **browser gate** above and answers a one-time ticket; the two socket routes take **only** `?ticket=` — no token of any kind — and close **4403** on a bad, expired, reused or revoked one. See [Sockets](#sockets). |
 | `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three HTTP-library egresses (`/status/fetch`, `/update/check`, the configured peers) plus the update apply's `git fetch` subprocess: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
 | CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
 | Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token), and CSP `script-src` — see below. |
@@ -548,8 +548,11 @@ A page cannot set headers on a WebSocket handshake, so a proxied host's
    either, 503 `peer_busy`.
 3. **The socket.** `WS /peer/<id>/ws?session=…&clientId=…&ticket=…` (or
    `/control?clientId=…&ticket=…`) carries the ticket and nothing else. A
-   bad, expired, reused, mis-bound or voided ticket closes it **4401**
-   after the upgrade, before anything is dialed.
+   bad, expired, reused, mis-bound or voided ticket closes it **4403**
+   (this broker's own code; a 4401 on these routes only ever comes from
+   the peer) after the upgrade, before anything is dialed. The page
+   answers a 4403 by minting a new ticket once, at once, and a second
+   4403 in a row backs off like any failed dial.
 4. **The upstream handshake.** This broker dials the peer's own `/ws` or
    `/control` with the page's query minus `ticket`, `token` and `auth`, and
    with the peer's token **only in the handshake's `Authorization`
@@ -579,7 +582,7 @@ pair.
 **Revocation.** Every ticket mint and every redemption first closes each
 pair, and voids each ticket, whose peer is gone, whose origin is no longer
 the configured one, or that was opened under another token of this
-broker's: the peer's leg gets 1000, then the page's 4401 `revoked`. Neither
+broker's: the peer's leg gets 1000, then the page's 4403 `revoked`. Neither
 changes at runtime today — a changed config takes effect on restart; a
 future editor calls `apply_change` after it writes — so existing sockets
 stay open until the next mint or redemption, or `apply_change`.
@@ -589,8 +592,9 @@ stay open until the next mint or redemption, or `apply_change`.
 | the peer's code and reason | the page | the peer closed with a code a close frame may carry |
 | 1012 | the page | the peer vanished (no close frame), or its code is one no close frame may carry (1005, 1006, 2000, …) |
 | 1011 `peer_unreachable` | the page | the dial at redemption failed (its slot is released) |
-| 4401 `ticket` | the page | the ticket was bad, expired, reused, mis-bound or voided |
-| 4401 `revoked` | the page (the peer gets 1000) | a peer, origin or token change unbound the pair |
+| 4403 `ticket` | the page | the ticket was bad, expired, reused, mis-bound or voided |
+| 4403 `revoked` | the page (the peer gets 1000) | a peer, origin or token change unbound the pair |
+| 4401 | the page | only ever the peer's own (it refused its token), passed through: the page asks for the peer's password |
 | 1000 | the peer | the page went: its close, a lost connection, or a close this broker started for it (1009 for an oversized message, say) |
 | 1001 | both | this broker is stopping (signalled before Sanic cancels the socket handlers, never guessed from who closed first) |
 | 1011 | both | anything else (one log line naming the error class) |
@@ -602,8 +606,7 @@ or its query (the `websockets` logger is held at WARNING).
 **Limits.** A peer checks its token at the handshake only, so a relayed
 socket outlives a change of the peer's token until either side closes it,
 and the peer's own sockets to other clients are not this broker's to
-close. A 4401 from a refused ticket and a 4401 the peer sends through look
-the same to the page: both open the proxied host's login overlay. The peer
+close. The peer
 sees every proxied client as this broker (its logs lose the client
 address).
 

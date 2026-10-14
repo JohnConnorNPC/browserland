@@ -359,6 +359,9 @@ function closeWindow() {}
 function dispatchTermOut(w, t) { written.push(t); }
 function hostMenuState() { return 'ok'; }
 function _retireControlSocket() {}
+function homeHostId() { return 'local'; }
+function _armLostContact() {}
+function _clearLostContact() {}
 const settle = async () => { for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 0)); } };
 function mkWin(hid) {
@@ -374,6 +377,7 @@ def _dial_src():
     s75 = _src("75_js_taskbar_hosts.js")
     return (VIA_STUBS + _func(s64, "openControlWs")
             + _func(s64, "_dialControl") + _func(s64, "closeControlWs")
+            + _func(s64, "_controlSocketGone")
             + _func(s73, "attachWebSocket")
             + _func(s75, "hostNeedsAttention") + _func(s75, "hostChipTip"))
 
@@ -551,6 +555,98 @@ return { during: during, winMinting: !!win.minting, made: wsMade,
     assert out["reattached"] == ["win"]
     assert out["made"] == 0
     assert out["refusal"] == "error"
+
+
+THREE_CLOSES = """
+const mints = () => calls.filter(c => c.url.endsWith('/ws-ticket')).length;
+"""
+
+
+def test_a_4403_re_mints_once_then_backs_off(tmp_path):
+    # Review round 1b: THIS broker's refusal (4403) is not the peer's
+    # password. One immediate re-mint, then the ordinary back-off.
+    out = _dial(tmp_path, THREE_CLOSES + """
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+const first = win.ws;
+first.onclose({ code: 4403, reason: 'ticket' });
+await settle();
+const second = win.ws;
+const afterOne = { made: wsMade, mints: mints(),
+                   reattached: reattached.slice() };
+second.onclose({ code: 4403, reason: 'ticket' });
+await settle();
+return { afterOne: afterOne, renewed: first !== second, made: wsMade,
+         mints: mints(), reattached: reattached, overlays: overlays,
+         failed: !!win.authFailed };
+""", OK_TICKET)
+    assert out["afterOne"] == {"made": 2, "mints": 2, "reattached": []}
+    assert out["renewed"] is True
+    assert (out["made"], out["mints"]) == (2, 2)
+    assert out["reattached"] == ["win"]
+    assert out["overlays"] == [] and out["failed"] is False
+
+
+def test_a_4403_after_the_peer_spoke_re_mints_again(tmp_path):
+    out = _dial(tmp_path, THREE_CLOSES + """
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+win.ws.onclose({ code: 4403, reason: 'ticket' });
+await settle();
+win.ws.onmessage({ data: new ArrayBuffer(1) });   // the peer answered
+win.ws.onclose({ code: 4403, reason: 'revoked' });
+await settle();
+return { made: wsMade, mints: mints(), reattached: reattached };
+""", OK_TICKET)
+    assert (out["made"], out["mints"]) == (3, 3)
+    assert out["reattached"] == []
+
+
+def test_the_peers_own_4401_still_opens_the_overlay(tmp_path):
+    out = _dial(tmp_path, THREE_CLOSES + """
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+win.ws.onclose({ code: 4401, reason: 'auth required' });
+await settle();
+openControlWs(hostById('rb'));
+await settle();
+controlSockets.get('rb').ws.onclose({ code: 4401, reason: 'auth required' });
+await settle();
+return { made: wsMade, mints: mints(), overlays: overlays,
+         failed: !!win.authFailed, reattached: reattached };
+""", OK_TICKET)
+    assert out["overlays"] == ["rb", "rb"]
+    assert out["failed"] is True
+    assert (out["made"], out["mints"]) == (2, 2)
+    assert out["reattached"] == []
+
+
+def test_a_control_4403_re_mints_once_then_backs_off(tmp_path):
+    out = _dial(tmp_path, THREE_CLOSES + """
+openControlWs(hostById('rb'));
+await settle();
+const rec = controlSockets.get('rb');
+rec.ws.onclose({ code: 4403, reason: 'ticket' });
+await settle();
+const afterOne = { made: wsMade, mints: mints(),
+                   reattached: reattached.slice() };
+rec.ws.onmessage({ data: 'not json' });         // the peer answered
+rec.ws.onclose({ code: 4403, reason: 'revoked' });
+await settle();
+const afterReset = { made: wsMade, reattached: reattached.slice() };
+rec.ws.onclose({ code: 4403, reason: 'ticket' });
+await settle();
+return { afterOne: afterOne, afterReset: afterReset, made: wsMade,
+         mints: mints(), reattached: reattached, overlays: overlays };
+""", OK_TICKET)
+    assert out["afterOne"] == {"made": 2, "mints": 2, "reattached": []}
+    assert out["afterReset"] == {"made": 3, "reattached": []}
+    assert (out["made"], out["mints"]) == (3, 3)
+    assert out["reattached"] == ["ctl:rb"]
+    assert out["overlays"] == []
 
 
 def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):

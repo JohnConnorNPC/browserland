@@ -101,3 +101,7 @@ def test_the_sockets_part_states_what_the_code_does():
     assert "The server-side handshake never follows a redirect" in flat
     assert f"`websockets` {peers.PEER_WS_MIN_MAJOR} or later" in flat
     assert "until phase 2" not in s and "Phase 1 limits" not in s
+    # Review round 1b: A's own refusals are 4403; a 4401 is the peer's.
+    assert "| %d `ticket` |" % ps.PEER_TICKET_REFUSED in s
+    assert "| %d `revoked` |" % ps.PEER_TICKET_REFUSED in s
+    assert "4401 `ticket`" not in s and "4401 `revoked`" not in s

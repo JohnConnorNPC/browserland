@@ -65,6 +65,13 @@ ROUTES = ("ws", "control")
 #: The longest clientId a ticket binds (the page's is a 36-character UUID).
 PEER_CLIENT_ID_MAX = 128
 
+#: THIS broker's own refusal of a socket: a missing, unknown, expired,
+#: burned or mis-bound ticket (reason ``ticket``) or a pair a sweep or
+#: revoke unbound (reason ``revoked``). Not 4401: on these routes a 4401
+#: only ever comes from the peer (its token was refused) and crosses
+#: unchanged, so the page can tell "mint again" from "ask for a password".
+PEER_TICKET_REFUSED = 4403
+
 
 def cid8(cid: Optional[str]) -> str:
     """#248 A6: log lines name a client by an 8-char prefix of its clientId,
@@ -340,7 +347,7 @@ async def relay_sockets(down, up, *, peer_id: str, route: str, stop=None,
       code like 1005 or 2000).
     * ``stop`` (a future, :class:`Pair`) resolved with ``(why, page code,
       page reason, peer code)``: the peer's leg is closed first, then the
-      page's, each with its own code (revoked: 1000, then 4401).
+      page's, each with its own code (revoked: 1000, then 4403).
     * Anything else: both 1011, one log line naming the exception class.
 
     Each direction awaits its send before reading again, so a slow reader
@@ -443,9 +450,10 @@ class Pair:
         self.stop = asyncio.get_running_loop().create_future()
 
     def revoke(self, reason: str = "revoked") -> None:
-        """Close the peer's leg 1000, then the page's 4401 ``reason``."""
+        """Close the peer's leg 1000, then the page's 4403 ``reason``."""
         if not self.stop.done():
-            self.stop.set_result(("revoked", 4401, reason, 1000))
+            self.stop.set_result(("revoked", PEER_TICKET_REFUSED, reason,
+                                  1000))
 
     def __repr__(self) -> str:
         return "<Pair peer=%s route=%s cid=%s>" % (

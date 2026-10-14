@@ -9000,7 +9000,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 token_id=live)
             if ticket is None:
                 # Bad, expired, reused, mis-bound or revoked: one answer.
-                await ws.close(code=4401, reason="ticket")
+                await ws.close(code=peer_sockets.PEER_TICKET_REFUSED,
+                               reason="ticket")
                 return
             # From here this handler owns the ticket's socket slot.
             pair = None
@@ -9024,7 +9025,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if ((ctx.peers.get(peer_id) or {}).get("origin") != origin
                         or peer_sockets.token_id(ctx.auth_token) != live):
                     await peer_sockets.quiet_close(up, 1000)
-                    await ws.close(code=4401, reason="revoked")
+                    await ws.close(code=peer_sockets.PEER_TICKET_REFUSED,
+                                   reason="revoked")
                     return
                 pair = peer_sockets.Pair(peer_id, client_id, route, origin,
                                          live)

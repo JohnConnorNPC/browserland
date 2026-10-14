@@ -446,6 +446,8 @@
             };
             ws.onmessage = (ev) => {
                 if (st.done) return;
+                // #252: the peer answered, so a later 4403 starts afresh.
+                rec.ticketRetried = false;
                 let msg;
                 try { msg = JSON.parse(ev.data); } catch (_) { return; }
                 if (!msg) return;
@@ -709,6 +711,15 @@
             // A replacement in flight takes charge when it reports; its own
             // failure re-dials (above).
             if (rec.cand) return;
+            // #252: THIS broker refused the ticket (it expired while the
+            // page slept, or a sweep revoked the pair) -- not the peer's
+            // password. Mint a new one once, at once; a second 4403 before
+            // the peer has reported takes the ordinary back-off below.
+            if (ev && ev.code === 4403 && !rec.ticketRetried) {
+                rec.ticketRetried = true;
+                const h = hostById(rec.hostId);
+                if (h) { openControlWs(h); return; }
+            }
             // 1012: the broker closed us because ONE status/push send missed
             // its 0.5 s budget -- the path is fine, and if that was the
             // holder's only socket the lease was just released, so another

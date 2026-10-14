@@ -170,6 +170,8 @@
 
             ws.onmessage = (event) => {
                 if (win.disposed) return;
+                // #252: the peer answered, so a later 4403 starts afresh.
+                win.ticketRetried = false;
                 if (event.data instanceof ArrayBuffer) {
                     if (heldResized) flushHeldResized();
                     // The PTY byte path. The tap gets its OWN copy of these
@@ -302,6 +304,16 @@
                 }
                 if (win.disposed) return;
                 win.wsOpen = false;
+                if (ev && ev.code === 4403 && !win.ticketRetried) {
+                    // #252: THIS broker refused the window's ticket (it
+                    // expired while the page slept, or a sweep revoked the
+                    // pair) -- not the peer's password, so no overlay. Mint
+                    // a new one once, at once; a second 4403 before the peer
+                    // has said anything takes the ordinary back-off below.
+                    win.ticketRetried = true;
+                    attachWebSocket(win);
+                    return;
+                }
                 if (ev && ev.code === 4401) {
                     // Broker rejected our token post-upgrade. Never
                     // auto-retried — the overlay (or its chip) is the only

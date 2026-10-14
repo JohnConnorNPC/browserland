@@ -87,6 +87,11 @@ async def _raw_close(ws, frame):
     ws.transport.abort()
 
 
+async def _close_4401(conn, ws):
+    # B refusing its token after the upgrade, as a real broker does.
+    await ws.close(4401, "auth required")
+
+
 async def _close_2000(conn, ws):
     await _raw_close(ws, CLOSE_2000)
 
@@ -113,6 +118,7 @@ async def _tick(conn, ws):
 #: path -> what the socket does once open. Every socket also records the
 #: frames it receives and, on the echo paths, sends each one back.
 SCRIPTS = {"/ws": _ws, "/control": _control, "/close-4409": _close_4409,
+           "/close-4401": _close_4401,
            "/close-2000": _close_2000, "/close-empty": _close_empty,
            "/never": _never, "/burst": _burst, "/tick": _tick}
 ECHO = {"/ws", "/control"}
