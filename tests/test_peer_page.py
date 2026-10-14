@@ -91,6 +91,12 @@ async function fetch(url, o) {
     if (peerAnswer) {
         const a = peerAnswer;
         if (a.hook) a.hook();
+        if (a.stall) {
+            // The headers arrive; the body never does.
+            return { status: a.status, ok: a.status >= 200 && a.status < 300,
+                     headers: new Headers(a.headers || {}),
+                     json: () => new Promise(() => {}) };
+        }
         return new Response(JSON.stringify(a.body), {
             status: a.status, headers: a.headers || {} });
     }
@@ -526,6 +532,25 @@ return { minting: minting, made: wsMade, records: controlSockets.size,
     assert out["made"] == 0
     assert out["records"] == 0
     assert out["reattached"] == []
+
+
+def test_a_mint_whose_body_stalls_backs_off(tmp_path):
+    # Review round 1 (Q25): fetch() resolves on the headers, so the body
+    # read races FETCH_TIMEOUT_MS; a stalled one is a failed mint.
+    out = _dial(tmp_path, """
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+const during = !!win.minting;
+await new Promise(r => setTimeout(r, FETCH_TIMEOUT_MS + 300));
+return { during: during, winMinting: !!win.minting, made: wsMade,
+         reattached: reattached, refusal: pollStateFor('rb').wsRefusal };
+""", {"status": 200, "stall": True})
+    assert out["during"] is True
+    assert out["winMinting"] is False
+    assert out["reattached"] == ["win"]
+    assert out["made"] == 0
+    assert out["refusal"] == "error"
 
 
 def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):

@@ -771,8 +771,21 @@
                     renderHostStatus();
                     return null;
                 }
+                // fetch() resolves on the HEADERS, and hostFetch's deadline
+                // is disarmed by then: the body read gets its own, or an
+                // answer whose body stalls would leave the site minting
+                // forever. A late body is a failed mint (back-off).
                 let body = null;
-                try { body = await r.json(); } catch (_) {}
+                let bodyTimer = null;
+                try {
+                    body = await Promise.race([r.json(), new Promise(
+                        (_, reject) => { bodyTimer = setTimeout(
+                            () => reject(new Error('timeout')),
+                            FETCH_TIMEOUT_MS); })]);
+                } catch (_) {
+                } finally {
+                    clearTimeout(bodyTimer);
+                }
                 if (!r.ok || !body || typeof body.ticket !== 'string') {
                     // Only THIS broker's marker names the refusal (_peerFetch's
                     // own cannot-proxy answer carries the code in its body).
