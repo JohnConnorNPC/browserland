@@ -30,7 +30,7 @@ its `broker_config.json` and restart it.
 A host reached that way is fetched through `/peer/b/` on the broker that
 served the page, so the phone dials only that broker. (The host list does
 not have a control to mark a host this way yet; it comes with a later
-release, together with the terminals below.) You still need the other
+release.) You still need the other
 broker's password: it is sent along with this broker's own, and this broker
 never stores it. It is tied to the address the operator configured — if the
 operator points `b` somewhere else, the password is forgotten and you are
@@ -42,8 +42,11 @@ To let agents use the other broker's MCP interface through this one as well,
 the operator adds `"mcp": true` to that peer; the agent then uses
 `http://<this broker>/peer/b` with the **other** broker's MCP token.
 
-For now, a host reached this way lists its sessions, files, profiles and
-recordings, but its terminals do not open yet; each terminal window says so.
+Its terminals open through the same prefix: each window's connection first
+takes a one-time ticket from this broker, so no password ever appears in a
+terminal's connection address. If the other broker is busy (too many
+terminals open through this one) or this broker cannot relay, the host's
+status chip says so and the window retries on its own.
 See [[Technical-Reference#peer-proxy-252]] for the routes, the headers and every refusal.
 
 ## Sharing your broker list

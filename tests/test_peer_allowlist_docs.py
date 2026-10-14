@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from webterm.broker import peers
+from webterm.broker import peer_sockets, peers
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -75,6 +75,29 @@ def test_the_section_states_what_the_code_does():
                           "proxy_unavailable", "peer_hop_refused",
                           "not_relayed", "peer_origin_changed", "bad_scope",
                           "peer_busy", "body_too_large", "bad_length",
-                          "body_timeout", "peer_timeout"}
+                          "body_timeout", "peer_timeout", "bad_ticket"}
     for code_name in documented:
         assert f'"{code_name}"' in code, code_name
+
+
+def test_the_sockets_part_states_what_the_code_does():
+    # #252 phase 2: every number of the ticket and socket scheme, from the
+    # code's own constants.
+    s = _section()
+    ps = peer_sockets
+    assert "#### Sockets" in s
+    assert f"lives **{ps.PEER_TICKET_TTL_S:g} s**" in s
+    assert f'"ttl": {ps.PEER_TICKET_TTL_S:g}' in s
+    assert (f"**{ps.PEER_MAX_TICKETS_PER_PEER} per peer within "
+            f"{ps.PEER_MAX_TICKETS} tickets**") in s
+    assert (f"**{ps.PEER_MAX_SOCKETS_PER_PEER} per peer within "
+            f"{ps.PEER_MAX_SOCKETS} sockets**") in s
+    assert f"**{ps.PEER_WS_IDLE_S:g} s**" in s
+    kw = ps.UPSTREAM_WS_KWARGS
+    flat = " ".join(s.split())          # the prose wraps anywhere
+    assert f"at most {kw['max_queue']} frames buffered" in flat
+    assert (f"pings the peer every {kw['ping_interval']:g} s and drops it "
+            f"after {kw['ping_timeout']:g} s") in flat
+    assert "The server-side handshake never follows a redirect" in flat
+    assert f"`websockets` {peers.PEER_WS_MIN_MAJOR} or later" in flat
+    assert "until phase 2" not in s and "Phase 1 limits" not in s

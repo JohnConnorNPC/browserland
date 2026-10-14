@@ -9002,7 +9002,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 ctx.peer_sockets.add(pair)
                 LOGGER.info("peer %s: %s socket for %s opened", peer_id,
                             route, cid)
-                why = "shutdown"
+                # Sanic cancels this handler once the page's connection is
+                # gone, and at server stop; relay_sockets has closed the
+                # peer's leg (1000 or 1001) before the cancel propagates.
+                why = "cancelled"
                 try:
                     why = await peer_sockets.relay_sockets(
                         ws, up, peer_id=peer_id, route=route,

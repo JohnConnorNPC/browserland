@@ -4,6 +4,16 @@ Breaking changes, what they cost you, and how to recover. Newest first.
 
 ---
 
+## The peer proxy needs websockets 15 (#252)
+
+A broker that relays to peers now needs `websockets` 15 or later as well as
+`httpx` (`pip install webterm[proxy]` installs both): with an older
+`websockets` its whole `/peer/*` prefix answers 503 `proxy_unavailable`, and
+the startup line names the missing version. Brokers without peers are
+unaffected. See [[Technical-Reference#peer-proxy-252]].
+
+---
+
 ## Broker roles: hub and node, and `terminals: false` (#253)
 
 Nothing changes for an existing deploy. A config without the new `terminals`

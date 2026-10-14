@@ -230,8 +230,9 @@ accident — `hostFetch(host, path, opts)` is the only way to call the API.
 Two places still carry `?token=`, both unavoidable and both deliberate:
 
 * **WebSocket dials** (`/ws`, `/control`, `/browserland`). The browser WebSocket API
-  cannot set request headers on the handshake, so `hostWsUrl` appends the token. Closing
-  this needs a short-lived connect-ticket scheme, not a refactor.
+  cannot set request headers on the handshake, so `hostWsUrl` appends the token. A host
+  reached through this broker is the exception: it dials with a one-time ticket instead
+  (see [Peer proxy → Sockets](#sockets)), so no token rides that URL.
 * **The `?token=` deep link** (`http://host:4445/?token=…`). It is how a token reaches a
   fresh browser at all; it is adopted into localStorage and scrubbed from the address bar
   via `history.replaceState` on load.
@@ -264,6 +265,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
 | `GET`/`POST`/`PUT /peer/<id>/…` (peer proxy, #252) | **two gates**, see [Peer proxy](#peer-proxy-252): browser routes take **this broker's token as the bearer** (header only — a `?token=` does not count here) **plus** the peer's own token in `X-Browserland-Peer-Token` and the pairing in `X-Browserland-Peer-Origin`; `/peer/<id>/mcp/*` takes the **peer's MCP token alone**, and only for a peer configured with `mcp: true`. `OPTIONS` is not routed (405). |
+| `POST /peer/<id>/ws-ticket`, `WS /peer/<id>/ws`, `WS /peer/<id>/control` (peer proxy sockets, #252) | the mint takes the **browser gate** above and answers a one-time ticket; the two socket routes take **only** `?ticket=` — no token of any kind — and close **4401** on a bad, expired, reused or revoked one. See [Sockets](#sockets). |
 | `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three HTTP-library egresses (`/status/fetch`, `/update/check`, the configured peers) plus the update apply's `git fetch` subprocess: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
 | CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
 | Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token), and CSP `script-src` — see below. |
@@ -424,11 +426,14 @@ operator names each peer in `broker_config.json`:
   config at dial time. `GET /info` publishes `peers` as `{id: origin}` (never
   the `mcp` flag, never a token) and `peer_proxy` (true when this broker has
   peers **and** the proxy extra).
-* **The `proxy` extra.** The upstream client is `httpx`, installed by
-  `pip install webterm[proxy]` (core stays `websockets` + `sanic`). A broker
-  that names peers without it logs one line
-  (`peer proxy unavailable: install webterm[proxy] (httpx); …`) and answers
-  every `/peer/*` with **503 `proxy_unavailable`**.
+* **The `proxy` extra.** The upstream clients are `httpx` and `websockets`
+  15 or later (its asyncio client, for the [sockets](#sockets)), installed by
+  `pip install webterm[proxy]`; core stays `websockets` 12 or later +
+  `sanic`. One check covers HTTP and sockets: a broker that names peers
+  without both logs one line naming what is missing
+  (`peer proxy unavailable: install webterm[proxy]: websockets 13.1 < 15; …`)
+  and answers every `/peer/*`, the ticket mint included, with
+  **503 `proxy_unavailable`**.
 
 **The two gates.** The first decoded segment after `/peer/<id>/` decides:
 
@@ -469,8 +474,8 @@ scopes and admin credential do not apply to it.
 **Anything absent is denied** (exact match, no prefixes). Never relayed:
 `GET /`, `/help-corpus.json`, `/vendor/*`, `/mods/<id>/<gen>/*`,
 `/mods/install|uninstall|rescan|installed`, `POST /restart`,
-`WS /browserland`, `GET`/`PUT /state`, `/status/fetch`, and — until phase 2 —
-`/ws` and `/control`. A path naming another `/peer/` hop is refused
+`WS /browserland`, `GET`/`PUT /state` and `/status/fetch` (`/ws` and
+`/control` cross as [sockets](#sockets)). A path naming another `/peer/` hop is refused
 (`peer_hop_refused`). `OPTIONS` is not routed on the prefix (405, never
 dialed): the page is same-origin with this broker, so no preflight arises.
 Sanic resolves `.` and `..` segments before the relay sees the path
@@ -522,11 +527,82 @@ arriving short. Nothing is retried. Log lines name the peer **id**, the
 method, the table path and the error class — never the upstream URL or its
 query (the `httpx` loggers are held at WARNING for that reason).
 
-**Phase 1 limits.** A host reached through this broker lists sessions, reads
-files, profiles and recordings, but its terminals do not open yet: the page
-does not dial `/ws` or `/control` for it and each terminal window says
-*proxied terminals arrive in the next phase*. The peer sees every proxied
-client as this broker (its logs lose the client address).
+#### Sockets
+
+A page cannot set headers on a WebSocket handshake, so a proxied host's
+`/ws` and `/control` take a **one-time ticket** instead of a token.
+
+1. **The mint.** `POST /peer/<id>/ws-ticket` with the body
+   `{"route": "ws" | "control", "clientId": "<this page's client id>"}`
+   (at most 4 KiB) goes through the browser gate above — the same
+   credentials and the same refusals in the same order — and answers
+   `{"ok": true, "ticket": "<43 characters>", "ttl": 30}`. A body that is
+   not that is 400 `bad_ticket`; a `GET` is 405.
+2. **The ticket** lives **30 s** and works **once**: its first presentation
+   burns it whatever the outcome, so a ticket shown with the wrong peer,
+   route or clientId is gone. It is bound to the peer, the route, the
+   clientId, the peer's origin and this broker's token as they were at the
+   mint. At most **16 per peer within 64 tickets** wait unredeemed; over
+   either, 503 `peer_busy`.
+3. **The socket.** `WS /peer/<id>/ws?session=…&clientId=…&ticket=…` (or
+   `/control?clientId=…&ticket=…`) carries the ticket and nothing else. A
+   bad, expired, reused, mis-bound or voided ticket closes it **4401**
+   after the upgrade, before anything is dialed.
+4. **The upstream handshake.** This broker dials the peer's own `/ws` or
+   `/control` with the page's query minus `ticket`, `token` and `auth`, and
+   with the peer's token **only in the handshake's `Authorization`
+   header** — never in a URI, never logged. The server-side handshake never
+   follows a redirect (a 3xx fails the dial), reads no proxy from the
+   environment, sends no `User-Agent` and negotiates no compression. A peer
+   on a build before this one needs nothing new: it reads that header when
+   there is no `?token=`.
+5. **The relay.** One upstream socket per page socket. Frames cross
+   verbatim both ways — text stays text, binary stays binary, nothing is
+   parsed — and each direction waits for its send before it reads again,
+   with at most 2 frames buffered from the peer, so a slow page slows the
+   peer. Nothing reconnects here: the page's own reattach does, with a new
+   ticket.
+
+**Pools.** Relayed sockets have a pool of their own, apart from the dial
+pools: **32 per peer within 128 sockets**. A ticket holds its slot from the
+mint, so an upgrade never fails for the pool; the refusal is the mint's
+503 `peer_busy`.
+
+**Idle ceiling.** A pair with no frame in either direction for **3600 s**
+is closed (1000 `idle` both ways). Protocol pings are not frames; this
+broker pings the peer every 20 s and drops it after 20 s without an answer.
+
+**Revocation.** Every ticket mint and every redemption first closes each
+pair, and voids each ticket, whose peer is gone, whose origin is no longer
+the configured one, or that was opened under another token of this
+broker's: the peer's leg gets 1000, then the page's 4401 `revoked`. Neither
+changes at runtime today — a changed config takes effect on restart; a
+future editor calls `apply_change` after it writes — so existing sockets
+stay open until the next mint or redemption, or `apply_change`.
+
+| Close code | Sent to | When |
+|---|---|---|
+| the peer's code and reason | the page | the peer closed with a code a close frame may carry |
+| 1012 | the page | the peer vanished (no close frame), or its code is one no close frame may carry (1005, 1006, 2000, …) |
+| 1011 `peer_unreachable` | the page | the dial at redemption failed (its slot is released) |
+| 4401 `ticket` | the page | the ticket was bad, expired, reused, mis-bound or voided |
+| 4401 `revoked` | the page (the peer gets 1000) | a peer, origin or token change unbound the pair |
+| 1000 `idle` | both | the idle ceiling |
+| 1000 | the peer | the page closed |
+| 1001 | both | this broker is stopping |
+| 1011 | both | anything else (one log line naming the error class) |
+
+Log lines name the peer id, the route, the first 8 characters of the
+clientId and why a pair ended — never a ticket, a token, the upstream URL
+or its query (the `websockets` logger is held at WARNING).
+
+**Limits.** A peer checks its token at the handshake only, so a relayed
+socket outlives a change of the peer's token until either side closes it,
+and the peer's own sockets to other clients are not this broker's to
+close. A 4401 from a refused ticket and a 4401 the peer sends through look
+the same to the page: both open the proxied host's login overlay. The peer
+sees every proxied client as this broker (its logs lose the client
+address).
 
 ## Linux deployment
 
