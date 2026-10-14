@@ -397,6 +397,34 @@ async def test_missing_extra_is_503(tmp_path, upstream, monkeypatch):
     assert upstream.seen == []
 
 
+@pytest.mark.parametrize("shim", ["websockets-12", "no-asyncio-client"])
+async def test_websockets_below_15_is_proxy_unavailable(tmp_path, upstream,
+                                                        monkeypatch, shim):
+    # Q11: core needs websockets 12; the proxy's sockets need 15 (the extra).
+    import types
+    with monkeypatch.context() as m:
+        if shim == "websockets-12":
+            old = types.ModuleType("websockets")
+            old.__version__ = "12.0"
+            m.setitem(sys.modules, "websockets", old)
+        else:
+            m.setitem(sys.modules, "websockets.asyncio.client", None)
+        assert peers.proxy_available() is False
+        app = _make_app(tmp_path, {"b": {"origin": upstream.origin}})
+    assert peers.proxy_available() is True
+    assert app.ctx.peer_proxy is False
+    srv = LiveApp(app).start()
+    try:
+        r = await _get(srv, "/info", {"Authorization": "Bearer " + TEST_TOKEN})
+        assert r.status_code == 200 and r.json()["peer_proxy"] is False
+        r = await _get(srv, "/peer/b/info", browser(upstream.origin))
+        assert r.status_code == 503
+        assert r.json() == {"ok": False, "error": "proxy_unavailable"}
+    finally:
+        srv.stop()
+    assert upstream.seen == []
+
+
 # ---- R4: nothing logs the upstream URL ------------------------------------------------
 
 async def test_no_log_record_names_the_upstream(live, upstream, caplog):

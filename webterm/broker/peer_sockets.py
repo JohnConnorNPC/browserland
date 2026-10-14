@@ -17,9 +17,12 @@ token only inside an unredeemed ticket, and A's token never (only a digest,
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import secrets
 import time
+import urllib.parse
 from typing import Dict, Optional
 
 from . import peers
@@ -169,3 +172,198 @@ class TicketStore:
                     if (peer_map.get(t.peer_id) or {}).get("origin")
                     != t.origin or t.token_id != live_token_id]:
             self._drop(tid)
+
+
+# ---- the upstream leg ---------------------------------------------------------
+
+def upstream_ws_url(origin: str, route: str, raw_qs: str) -> str:
+    """The peer's own ``/ws`` or ``/control`` for ``origin``, with the
+    client's query minus ``ticket``, ``token`` and ``auth``. No credential
+    ever rides the URI: the peer's token goes in the handshake's
+    ``Authorization`` header (:func:`dial_upstream`)."""
+    scheme, rest = origin.split(":", 1)
+    query = urllib.parse.urlencode(
+        [(k, v) for k, v in urllib.parse.parse_qsl(
+            peers.upstream_query(raw_qs), keep_blank_values=True)
+         if k != "ticket"])
+    return (("wss" if scheme == "https" else "ws") + ":" + rest + "/"
+            + route + ("?" + query if query else ""))
+
+
+_PEER_WS_CONNECT = []
+
+
+def peer_ws_connect():
+    """``PeerWsConnect``: websockets' ``connect`` that never follows a
+    redirect. The stock one follows up to ten, cross-origin included, and
+    sends ``additional_headers`` -- the peer's ``Authorization`` -- on every
+    hop; returning the exception makes a 3xx a failed dial.
+
+    Built on first use: the asyncio client and ``connect(proxy=)`` need
+    websockets 15 (the ``proxy`` extra), while core needs only 12, so
+    nothing here imports websockets at module level
+    (:func:`peers.proxy_available` checks the version before any route
+    lets a socket through)."""
+    if not _PEER_WS_CONNECT:
+        from websockets.asyncio.client import connect
+
+        class PeerWsConnect(connect):
+            def process_redirect(self, exc):
+                return exc
+
+        _PEER_WS_CONNECT.append(PeerWsConnect)
+    return _PEER_WS_CONNECT[0]
+
+
+#: Every keyword of the upstream handshake, in one place. No environment
+#: proxy (the stock default reads ``HTTPS_PROXY``/``WSS_PROXY``), no
+#: User-Agent, no compression (frames cross verbatim, and a deflate context
+#: per socket is memory the relay has no use for), the broker's own frame
+#: cap, and connect and close deadlines below the page's 3 s.
+#: ``max_queue=2``: at most two frames buffered from the peer (the default
+#: is 16); its low-water mark is ``2 // 4 = 0``, so reading resumes only once
+#: the buffer is empty -- a slow page slows the peer instead of filling this
+#: broker's memory. The peer is pinged every 20 s; a ping is not a frame for
+#: the idle ceiling.
+UPSTREAM_WS_KWARGS = {
+    "proxy": None,
+    "user_agent_header": None,
+    "compression": None,
+    "max_size": PEER_WS_FRAME_MAX,
+    "max_queue": 2,
+    "open_timeout": peers.PEER_CONNECT_TIMEOUT_S,
+    "close_timeout": peers.PEER_CONNECT_TIMEOUT_S,
+    "ping_interval": 20,
+}
+
+
+async def dial_upstream(url: str, peer_token: str):
+    """One upstream socket; raises when the dial fails. Awaited once:
+    ``async for`` over a ``connect`` would reconnect on its own."""
+    # websockets logs the request line and headers at DEBUG -- the URI and
+    # the peer's Authorization. The broker's own lines name a peer id.
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+    PeerWsConnect = peer_ws_connect()
+    return await PeerWsConnect(
+        url, additional_headers=[("Authorization", "Bearer " + peer_token)],
+        **UPSTREAM_WS_KWARGS)
+
+
+# ---- the relay ----------------------------------------------------------------
+
+def _sendable(code: Optional[int], reason: str):
+    """``(code, reason)`` when a close frame may carry them, else 1012
+    (the peer vanished, or sent a code nobody may send on)."""
+    from websockets.exceptions import ProtocolError
+    from websockets.frames import Close
+    if code is None:
+        return 1012, ""
+    try:
+        Close(code, reason).check()
+    except ProtocolError:
+        return 1012, ""
+    return code, reason
+
+
+async def _quiet_close(ws, code: int, reason: str = "") -> None:
+    try:
+        await asyncio.wait_for(ws.close(code, reason),
+                               peers.PEER_CONNECT_TIMEOUT_S)
+    except BaseException:  # noqa: BLE001 -- a close never raises out
+        pass
+
+
+async def _cancel(tasks) -> None:
+    for t in tasks:
+        t.cancel()
+    for t in tasks:
+        try:
+            await t
+        except BaseException:  # noqa: BLE001 -- already decided
+            pass
+
+
+async def relay_sockets(down, up, *, peer_id: str, route: str,
+                        idle_s: Optional[float] = None, log) -> str:
+    """Relay frames between the page's socket ``down`` (Sanic's) and the
+    peer's ``up`` until either ends, verbatim both ways: a text frame stays
+    text, a binary one binary, nothing is parsed. Returns why it ended:
+    ``page``, ``shutdown``, ``peer``, ``idle`` or ``error``.
+
+    * The page closed: the peer gets 1000. This broker going away (Sanic
+      sent the page a close first, or cancelled this handler): 1001.
+    * The peer closed: the page gets the peer's code and reason when a
+      close frame may carry them, else 1012 (no close frame at all, or a
+      code like 1006 or 2000).
+    * No frame either way for ``idle_s`` (:data:`PEER_WS_IDLE_S`): both get
+      1000 ``idle``.
+    * Anything else: both 1011, one log line naming the exception class.
+
+    Each direction awaits its send before reading again, so a slow reader
+    slows the writer (Sanic's ``send`` waits for the transport to drain;
+    the upstream buffer is ``max_queue`` frames). Nothing reconnects."""
+    from websockets.protocol import State
+    loop = asyncio.get_running_loop()
+    idle_s = PEER_WS_IDLE_S if idle_s is None else idle_s
+    last = [loop.time()]
+
+    async def down_to_up():
+        while True:
+            # Sanic's recv returns None only on a timeout (none is set); a
+            # close RAISES (CancelledError mid-wait, WebsocketClosed after).
+            frame = await down.recv()
+            if frame is None:
+                continue
+            last[0] = loop.time()
+            await up.send(frame)
+
+    async def up_to_down():
+        async for frame in up:
+            last[0] = loop.time()
+            await down.send(frame)
+
+    async def watchdog():
+        while True:
+            left = last[0] + idle_s - loop.time()
+            if left <= 0:
+                return
+            await asyncio.sleep(left)
+
+    tasks = [loop.create_task(down_to_up()), loop.create_task(up_to_down()),
+             loop.create_task(watchdog())]
+    try:
+        done, _ = await asyncio.wait(tasks,
+                                     return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        # Sanic cancels a socket's handler when the server stops.
+        await _cancel(tasks)
+        await _quiet_close(up, 1001)
+        raise
+    await _cancel(tasks)
+    if tasks[2] in done:
+        await _quiet_close(down, 1000, "idle")
+        await _quiet_close(up, 1000)
+        return "idle"
+    if up.state in (State.CLOSING, State.CLOSED):
+        # The peer's own close frame, read as soon as it arrived
+        # (``close_code`` stays None until the TCP connection is gone).
+        rcvd = up.protocol.close_rcvd
+        code, reason = _sendable(rcvd.code if rcvd else None,
+                                 rcvd.reason if rcvd else "")
+        await _quiet_close(down, code, reason)
+        return "peer"
+    proto = down.ws_proto
+    if proto.state in (State.CLOSING, State.CLOSED):
+        # Who spoke first: a close this broker sent before the page's is
+        # the server going away (Sanic's shutdown sends the page 1001).
+        ours = (proto.close_sent is not None
+                and proto.close_rcvd_then_sent is not True)
+        await _quiet_close(up, 1001 if ours else 1000)
+        return "shutdown" if ours else "page"
+    exc = next((t.exception() for t in tasks
+                if t.done() and not t.cancelled() and t.exception()), None)
+    log("peer %s: %s socket ended (%s)", peer_id, route,
+        type(exc).__name__ if exc is not None else "no error")
+    await _quiet_close(down, 1011)
+    await _quiet_close(up, 1011)
+    return "error"

@@ -4333,7 +4333,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         LOGGER.info("peer proxy: %s", ", ".join(sorted(app.ctx.peers)))
         if not app.ctx.peer_proxy:
             LOGGER.warning("peer proxy unavailable: install webterm[proxy] "
-                           "(httpx); /peer/* answers 503 proxy_unavailable")
+                           "(httpx, websockets>=15); /peer/* answers 503 "
+                           "proxy_unavailable")
     # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
     # a set so they aren't GC'd mid-flight; each self-removes on completion.
     app.ctx.bg_tasks = set()

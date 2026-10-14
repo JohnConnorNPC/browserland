@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import types
 
 import pytest
 
@@ -217,17 +218,25 @@ def test_boot_line_names_the_peer_ids(tmp_path, caplog):
     assert not [ln for ln in lines if "unavailable" in ln]
 
 
+@pytest.mark.parametrize("missing", ["httpx", "websockets-12"])
 def test_missing_extra_is_one_line_and_no_capability(tmp_path, caplog,
-                                                     monkeypatch):
+                                                     monkeypatch, missing):
     # httpx is installed in the test interpreter (via mcp and sanic-testing),
     # so its absence is simulated -- which only works because peers.py
-    # imports it lazily, inside a function.
-    monkeypatch.setitem(sys.modules, "httpx", None)
+    # imports it lazily, inside a function. Q11: so is a websockets below
+    # 15 (core's floor is 12; the socket half needs 15).
+    if missing == "httpx":
+        monkeypatch.setitem(sys.modules, "httpx", None)
+    else:
+        old = types.ModuleType("websockets")
+        old.__version__ = "12.1"
+        monkeypatch.setitem(sys.modules, "websockets", old)
     app, lines = _boot_lines(caplog, tmp_path, peers={
         "b": {"origin": "http://b:1"}, "c": {"origin": "http://c:1"}})
     warned = [ln for ln in lines if ln.startswith("peer proxy unavailable")]
     assert warned == ["peer proxy unavailable: install webterm[proxy] "
-                      "(httpx); /peer/* answers 503 proxy_unavailable"]
+                      "(httpx, websockets>=15); /peer/* answers 503 "
+                      "proxy_unavailable"]
     assert app.ctx.peer_proxy is False
 
 

@@ -15,11 +15,17 @@ see a library it does not name, so a new egress library belongs in its sets.
   functions (core never imports it; it is the optional ``proxy`` extra), and
   one ``AsyncClient`` built in ``make_client`` with no redirects and no env
   proxies;
+* the configured peers' sockets (#252 phase 2): ``websockets``, imported by
+  peer_sockets.py inside functions only (the client needs websockets 15, the
+  ``proxy`` extra; core needs 12), and one ``PeerWsConnect`` (a ``connect``
+  that follows no redirect) dialed in ``dial_upstream`` with no env proxy;
 * not an HTTP library but still egress: the update apply's ``git fetch``
   child process (``_git_mutation(["fetch", url, branch])`` in
   ``perform_apply``), found by its argument list.
 
-So: three HTTP-library egresses plus the update apply's git fetch.
+So: three HTTP-library egresses, the peers' sockets, and the update apply's
+git fetch. A module counts by prefix: ``import websockets.asyncio.client``
+and ``from http.client import x`` are ``websockets`` and ``http.client``.
 
 ``vendor_codemirror.py`` is a dev-only vendoring script that nothing in the
 broker imports; it is excluded and that exclusion is itself asserted.
@@ -31,7 +37,7 @@ import ast
 import re
 from pathlib import Path
 
-from webterm.broker import peers
+from webterm.broker import peer_sockets, peers
 
 REPO = Path(__file__).resolve().parents[1]
 BROKER = REPO / "webterm" / "broker"
@@ -39,7 +45,7 @@ BROKER = REPO / "webterm" / "broker"
 #: Callables that open (or build something that opens) an outbound socket.
 NET_CALLS = {"urlopen", "build_opener", "urlretrieve", "open_connection",
              "create_connection", "AsyncClient", "Client", "HTTPConnection",
-             "HTTPSConnection", "connect"}
+             "HTTPSConnection", "connect", "PeerWsConnect"}
 #: Modules whose import is itself an outbound-capable surface.
 NET_MODULES = {"httpx", "requests", "aiohttp", "urllib3", "http.client",
                "websockets"}
@@ -50,17 +56,33 @@ NET_GIT_VERBS = {"fetch", "pull", "clone", "ls-remote", "push"}
 #: The two stdlib openers; their `.open(` call sites are egress too.
 OPENER_NAMES = {"_STATUS_OPENER", "_OPENER"}
 
+
+def _net_module(name):
+    """Is ``name`` one of NET_MODULES or inside one (a prefix match on
+    whole dotted parts: ``http.client`` yes, ``http.cookiejar`` no)?"""
+    return any(name == n or name.startswith(n + ".") for n in NET_MODULES)
+
 EXPECTED = {
     ("app.py", "call urllib.request.build_opener", "<module>"),
     ("app.py", "call _STATUS_OPENER.open", "_fetch_status_blocking"),
     ("update.py", "call urllib.request.build_opener", "<module>"),
     ("update.py", "call _OPENER.open", "fetch_json"),
     ("peers.py", "import httpx", "proxy_available"),
+    ("peers.py", "import websockets", "proxy_available"),
+    ("peers.py", "import websockets.asyncio.client", "proxy_available"),
     ("peers.py", "import httpx", "make_client"),
     ("peers.py", "import httpx", "_relay"),
     # Not an HTTP library, still an egress: the update apply's git fetch.
     ("update.py", "git fetch", "perform_apply"),
     ("peers.py", "call httpx.AsyncClient", "make_client"),
+    # #252 phase 2: the peers' sockets. Every websockets import sits inside
+    # a function: the client needs websockets 15 (the proxy extra), core 12.
+    ("peer_sockets.py", "import websockets.asyncio.client",
+     "peer_ws_connect"),
+    ("peer_sockets.py", "import websockets.exceptions", "_sendable"),
+    ("peer_sockets.py", "import websockets.frames", "_sendable"),
+    ("peer_sockets.py", "import websockets.protocol", "relay_sockets"),
+    ("peer_sockets.py", "call PeerWsConnect", "dial_upstream"),
 }
 
 
@@ -94,10 +116,10 @@ def _inventory():
                                        scope))
                 elif isinstance(child, ast.Import):
                     for alias in child.names:
-                        if alias.name in NET_MODULES:
+                        if _net_module(alias.name):
                             found.add((rel, "import " + alias.name, scope))
                 elif isinstance(child, ast.ImportFrom):
-                    if (child.module or "") in NET_MODULES:
+                    if _net_module(child.module or ""):
                         found.add((rel, "import " + child.module, scope))
                 visit(child, inner)
 
@@ -107,6 +129,23 @@ def _inventory():
 
 def test_the_broker_egress_inventory_is_exact():
     assert _inventory() == EXPECTED
+
+
+def test_no_websockets_import_at_a_module_top_of_the_broker():
+    # Q11: app.py imports every broker module; websockets 12 (the core
+    # floor) has no asyncio client, so a top-level import would break boot.
+    assert not [row for row in _inventory()
+                if row[1].startswith("import websockets")
+                and row[2] == "<module>"]
+
+
+def test_a_module_counts_by_prefix():
+    for name in ("websockets", "websockets.asyncio.client", "http.client",
+                 "httpx", "aiohttp.client"):
+        assert _net_module(name), name
+    for name in ("http", "http.cookiejar", "httpxy", "websocketsx",
+                 "webterm.websockets", ""):
+        assert not _net_module(name), name
 
 
 def test_vendor_script_is_imported_by_nothing():
@@ -131,13 +170,20 @@ async def test_the_peer_client_follows_no_redirects_and_no_env_proxies():
         assert dict(client.headers) == {}
     finally:
         await client.aclose()
+    # Phase 2: the peers' sockets read no env proxy and follow no redirect.
+    assert peer_sockets.UPSTREAM_WS_KWARGS["proxy"] is None
+    exc = RuntimeError("302")
+    assert peer_sockets.peer_ws_connect().process_redirect(None, exc) is exc
 
 
 def test_core_dependencies_stay_websockets_and_sanic():
     text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     deps = re.search(r"^dependencies = \[(.*?)\]", text, re.M | re.S).group(1)
     assert re.findall(r'"([a-z0-9_-]+)', deps) == ["websockets", "sanic"]
-    assert re.search(r'^proxy = \["httpx>=[0-9.]+"\]$', text, re.M)
+    assert re.search(r'^proxy = \["httpx>=[0-9.]+", "websockets>=15"\]$',
+                     text, re.M)
+    # Q11: the core floor stays 12; the extra carries the client's 15.
+    assert re.findall(r'"(websockets>=[0-9.]+)"', deps) == ["websockets>=12"]
 
 
 def test_the_no_cookie_jar_stores_nothing():

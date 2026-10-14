@@ -192,14 +192,28 @@ def parse_peers(raw: Any, self_port: int,
     return out, None
 
 
+#: The socket half (phase 2) needs websockets' asyncio client and
+#: ``connect(proxy=)``: websockets 15, which the ``proxy`` extra pins. Core
+#: needs only websockets 12.
+PEER_WS_MIN_MAJOR = 15
+
+
 def proxy_available() -> bool:
-    """Is the ``proxy`` extra (httpx) importable? Lazy on purpose: core never
-    imports httpx, and a test simulates its absence through ``sys.modules``."""
+    """Is the ``proxy`` extra importable: httpx, and websockets at least
+    :data:`PEER_WS_MIN_MAJOR` with its asyncio client? Lazy on purpose: core
+    never imports either client, and a test simulates their absence through
+    ``sys.modules``."""
     try:
         import httpx  # noqa: F401 -- the probe IS the import
+        import websockets
+        import websockets.asyncio.client  # noqa: F401
     except ImportError:
         return False
-    return True
+    try:
+        major = int(str(getattr(websockets, "__version__", "0")).split(".")[0])
+    except ValueError:
+        return False
+    return major >= PEER_WS_MIN_MAJOR
 
 
 class NoCookieJar(http.cookiejar.CookieJar):
