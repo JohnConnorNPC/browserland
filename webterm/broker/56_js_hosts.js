@@ -103,19 +103,37 @@
                     // The broker run this answer came from: seeds the
                     // bootId noteLocalBootId compares against. A build
                     // without it leaves the seed alone (never a forget).
+                    // Only while this read is still THE memo: an answer
+                    // that lost a race to a newer read (this broker
+                    // restarted meanwhile) seeds nothing.
                     const boot = j && j.restart && j.restart.bootId;
-                    if (typeof boot === 'string' && boot) _localBootSeen = boot;
+                    if (typeof boot === 'string' && boot && _localPeersP === p) {
+                        _localBootSeen = boot;
+                    }
                     return { proxy: !!(j && j.peer_proxy === true),
                              peers: peers };
                 })();
                 _localPeersP = p;
+                // A failed read also forgets the answer painted from an
+                // earlier one (its peers may be gone with that broker run);
+                // the next render shows what is known. No render from here.
                 p.catch(function () {
-                    if (_localPeersP === p) _localPeersP = null;
+                    if (_localPeersP === p) {
+                        _localPeersP = null;
+                        _localPeersLast = null;
+                    }
                 });
             }
-            return _localPeersP.then(function (info) {
-                rePairPeers(info);
-                _localPeersLast = info;
+            // Committed (re-pairing, the painted answer) only while this is
+            // still THE memo: a read that was forgotten while it was out
+            // (a new bootId, a pairing refusal) answers its caller and
+            // changes nothing.
+            const mine = _localPeersP;
+            return mine.then(function (info) {
+                if (_localPeersP === mine) {
+                    rePairPeers(info);
+                    _localPeersLast = info;
+                }
                 return info;
             });
         }

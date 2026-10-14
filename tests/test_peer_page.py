@@ -86,6 +86,9 @@ async function fetch(url, o) {
                  body: o && o.body });
     if (url === '/info') {
         const next = infoAnswers.length ? infoAnswers.shift() : null;
+        if (next && next.__delay) {
+            await new Promise(r => setTimeout(r, next.__delay));
+        }
         if (next === 'reject') throw new TypeError('Failed to fetch');
         if (typeof next === 'number') {
             return new Response('{}', { status: next });
@@ -1697,3 +1700,44 @@ const r = await hostFetch(hostById('rb'), '/sessions');
 return [r.status, hostById('rb').peerOrigin, isOsc52Allowed('rb')];
 """.replace("INFO", json.dumps(INFO)), extra_src=_osc_src())
     assert out == [401, "http://b:4448", False]
+
+
+def test_an_info_answer_that_lost_the_race_commits_nothing(tmp_path):
+    """codex 6/10: this broker restarts while an /info read is out (its
+    control status brings a new bootId, which forgets the memo) and the new
+    run publishes the peer elsewhere. The newer read wins; the older answer,
+    landing last, re-pairs nothing, paints nothing and seeds no bootId."""
+    old = dict(INFO, peers={"b": "http://old:4448"}, restart={"bootId": "b0"},
+               __delay=60)
+    new = dict(INFO, restart={"bootId": "b1"})
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [OLD, NEW, NEW];
+const p1 = localPeers();
+await new Promise(r => setTimeout(r, 10));
+noteLocalBootId('b0'); noteLocalBootId('b1');   // the restart, seen live
+const p2 = localPeers();
+await Promise.all([p1, p2]);
+const rb = hostById('rb');
+const known = localPeersKnown().peers.b;
+const infosBefore = calls.filter(c => c.url === '/info').length;
+noteLocalBootId('b1'); await localPeers();      // b1 is the seed: no re-read
+return { token: rb.token, peerOrigin: rb.peerOrigin, known: known,
+         reread: calls.filter(c => c.url === '/info').length - infosBefore };
+""".replace("OLD", json.dumps(old)).replace("NEW", json.dumps(new)))
+    assert out == {"token": B_TOKEN, "peerOrigin": "http://b:4448",
+                   "known": "http://b:4448", "reread": 0}
+
+
+def test_a_failed_info_read_forgets_the_painted_answer(tmp_path):
+    """codex 5: after a failed read the Hosts row no longer offers the peers
+    of an answer from before (without a render of its own -- S6)."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, 'reject'];
+await localPeers();
+const before = !!localPeersKnown();
+forgetLocalPeers();
+try { await localPeers(); } catch (_) {}
+await new Promise(r => setTimeout(r, 10));
+return [before, localPeersKnown()];
+""".replace("INFO", json.dumps(INFO)))
+    assert out == [True, None]
