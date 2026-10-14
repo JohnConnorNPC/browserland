@@ -730,11 +730,13 @@
                     ? 'wss:' : 'ws:';
                 base = proto + '//' + window.location.host;
             }
-            // The ONE place a token still rides a URL, and it is unavoidable:
-            // the browser WebSocket API cannot set request headers on the
-            // handshake. /ws, /control and /browserland therefore keep
-            // ?token=. Documented in wiki/Technical-Reference.md rather than papered
-            // over — closing it needs a connect-ticket scheme, not a refactor.
+            // The ONE place a token still rides a URL: the browser WebSocket
+            // API cannot set request headers on the handshake, so a DIRECT
+            // host's /ws, /control and /browserland keep ?token=. A host
+            // reached through this broker already avoids it with a one-time
+            // ticket (_peerWsUrl below, #252); a direct host would need the same
+            // ticket scheme on its own broker. Documented in
+            // wiki/Technical-Reference.md rather than papered over.
             if (!host || !host.token) return base + path;
             return base + path + (path.indexOf('?') === -1 ? '?' : '&')
                 + 'token=' + encodeURIComponent(host.token);

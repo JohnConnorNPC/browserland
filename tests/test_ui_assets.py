@@ -666,8 +666,9 @@ def test_websocket_is_the_only_remaining_token_in_url():
     """The documented exception, pinned so it stays deliberate.
 
     The browser WebSocket API cannot set request headers on the handshake, so
-    /ws, /control and /browserland keep `?token=`. Closing that needs a
-    connect-ticket scheme, not a refactor -- see wiki/Technical-Reference.md. This test
+    a direct host's /ws, /control and /browserland keep `?token=` (a host
+    reached through this broker uses #252's one-time ticket instead) -- see
+    wiki/Technical-Reference.md. This test
     exists so the exception can't quietly grow to cover HTTP again.
     """
     auth_src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(
