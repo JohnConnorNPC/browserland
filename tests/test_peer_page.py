@@ -1295,3 +1295,122 @@ noteLocalBootId('b1'); await localPeers();
 return calls.filter(c => c.url === '/info').length;
 """.replace("I0", json.dumps(info0)).replace("INFO", json.dumps(INFO)))
     assert out == 2
+
+
+MODE_STUBS = DUP_STUBS + r"""
+const emitted = [];
+function _emitModEvent(n, p) { emitted.push([n, p.hostId]); }
+"""
+
+
+def _mode(tmp_path, hosts, body, info=INFO):
+    return _run(tmp_path, {"_hosts": [{"id": "local", "token": A_TOKEN}]
+                           + hosts},
+                # localPeers()'s shape, which setHostMode takes
+                "const info = " + json.dumps({"proxy": info["peer_proxy"],
+                                              "peers": info["peers"]})
+                + ";\n" + body,
+                extra_src=MODE_STUBS + _osc_src())
+
+
+SNAP = """
+const snap = (id) => { const h = hostById(id); return h && {
+    url: h.url, token: h.token, via: h.via || null, peerId: h.peerId || null,
+    peerOrigin: h.peerOrigin === undefined ? null : h.peerOrigin,
+    brokerId: h.brokerId === undefined ? null : h.brokerId }; };
+"""
+
+
+def test_switching_a_host_to_from_server_and_back(tmp_path):
+    """P3-1 (A7): the token survives a switch only where it was paired with
+    the address now dialed; caches are invalidated, the identity is dropped,
+    the change is announced."""
+    out = _mode(tmp_path, [
+        _direct("same", token="T1", brokerId="B-ID"),
+        _direct("other", url="http://d:4445", token="T2"),
+        _via("paired", token="T3"),
+        _via("unpaired", token="T4", peerOrigin=""),
+    ], SNAP + """
+const r = {};
+r.same = [setHostMode('same', 'b', info), snap('same')];
+r.other = [setHostMode('other', 'b', info), snap('other')];
+r.paired = [setHostMode('paired', null, info), snap('paired')];
+r.unpaired = [setHostMode('unpaired', null, info), snap('unpaired')];
+r.local = setHostMode('local', 'b', info);
+r.unknownPeer = setHostMode('other', 'zz', info);
+r.samePeer = setHostMode('other', 'b', info);
+r.unknownId = setHostMode('nope', null, info);
+return { r: r, invalidated: invalidated, emitted: emitted,
+         saves: saves.length };
+""")
+    r = out["r"]
+    assert r["same"] == [True, {"url": "http://b:4448", "token": "T1",
+                                "via": "server", "peerId": "b",
+                                "peerOrigin": "http://b:4448",
+                                "brokerId": ""}]
+    assert r["other"] == [True, {"url": "http://b:4448", "token": "",
+                                 "via": "server", "peerId": "b",
+                                 "peerOrigin": "http://b:4448",
+                                 "brokerId": ""}]
+    assert r["paired"] == [True, {"url": "http://b:4448", "token": "T3",
+                                  "via": None, "peerId": None,
+                                  "peerOrigin": None, "brokerId": ""}]
+    assert r["unpaired"][1]["token"] == "" and r["unpaired"][1]["via"] is None
+    assert [r["local"], r["unknownPeer"], r["samePeer"], r["unknownId"]] \
+        == [False, False, False, False]
+    assert out["invalidated"] == ["same", "other", "paired", "unpaired"]
+    assert out["emitted"] == [["host:changed", h] for h in
+                              ("same", "other", "paired", "unpaired")]
+    assert out["saves"] == 4
+
+
+def test_a_host_on_a_broker_that_cannot_proxy_can_still_go_direct(tmp_path):
+    out = _mode(tmp_path, [_direct("d", token="T"), _via("p", token="T3")],
+                SNAP + """
+return [setHostMode('d', 'b', info), snap('d').via,
+        setHostMode('p', null, info), snap('p').via, snap('p').token];
+""", info={"ok": True, "peers": {"b": "http://b:4448"}, "peer_proxy": False})
+    assert out == [False, None, True, None, "T3"]
+
+
+def test_a_proxied_host_moved_to_another_peer_drops_its_token(tmp_path):
+    info = dict(INFO, peers={"b": "http://b:4448", "c": "http://b:4448"})
+    out = _mode(tmp_path, [_via("p", token="T3")], SNAP + """
+return [setHostMode('p', 'c', info), snap('p')];
+""", info=info)
+    assert out[0] is True
+    assert out[1]["token"] == "" and out[1]["peerId"] == "c"
+
+
+@pytest.mark.parametrize("origin", [
+    "http://localhost:4448", "http://127.0.0.1:4448", "http://127.9.9.9:4448",
+    "http://[::1]:4448", "http://0.0.0.0:4448", "http://[::]:4448",
+    "http://app.localhost:4448"])
+def test_a_local_only_origin_never_keeps_a_token(tmp_path, origin):
+    """S1: `localhost` typed in the browser is the browser's machine; the same
+    string in this broker's config is this broker's. Equal strings, maybe two
+    machines: the token is asked again, both ways."""
+    info = dict(INFO, peers={"l": origin})
+    out = _mode(tmp_path, [
+        _direct("d", url=origin, token="T1"),
+        _via("p", peer="l", url=origin, peerOrigin=origin, token="T2"),
+    ], SNAP + """
+return [setHostMode('d', 'l', info), snap('d').token,
+        setHostMode('p', null, info), snap('p').token];
+""", info=info)
+    assert out == [True, "", True, ""]
+
+
+def test_a_switch_and_back_does_not_revive_an_osc52_grant(tmp_path):
+    """S2: grant on direct, switch to from server and back with no OSC 52
+    check in between: the url is the same again, so only the prune run by the
+    switch keeps the old grant from re-arming."""
+    out = _mode(tmp_path, [_direct("d", token="T1")], """
+setOsc52Allowed('d', true);
+const before = isOsc52Allowed('d');
+setHostMode('d', 'b', info);
+const mid = stored().length;
+setHostMode('d', null, info);
+return [before, mid, isOsc52Allowed('d')];
+""")
+    assert out == [True, 0, False]

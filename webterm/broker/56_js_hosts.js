@@ -148,6 +148,69 @@
                 try { invalidateHost(h.id); } catch (_) {}
             }
         }
+        // ---- switching a host's mode (#252 phase 3) ---------------------------
+        // An origin whose host means "this machine" (or "any") names a
+        // DIFFERENT machine depending on who dials it: the browser's
+        // `localhost` is the browser's box, the same string in this broker's
+        // peers config is this broker's. A token never survives a mode switch
+        // to or from one of those -- equal strings, maybe another machine.
+        function originIsLocalOnly(origin) {
+            let u;
+            try { u = new URL(origin); } catch (_) { return true; }
+            const host = u.hostname.toLowerCase().replace(/\.$/, '');
+            return host === 'localhost' || host.endsWith('.localhost')
+                || host === '0.0.0.0' || host === '[::]' || host === '[::1]'
+                || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+        }
+        // Switch a remote host between DIRECT (peerId null) and FROM SERVER
+        // (reached through this broker's /peer/<peerId>/). `info` is
+        // localPeers()'s answer. True when the record changed.
+        //   -> from server: only a peer this broker publishes while it can
+        //      proxy. The token is kept only when it was entered for that
+        //      very origin on a direct record (the (peerId, origin) pairing
+        //      rule of phase 1: never re-point a token).
+        //   -> direct: always allowed (a host whose broker can no longer
+        //      proxy must have a way back). The token is kept only when it
+        //      was paired with the address the page now dials itself.
+        // The broker identity learned for the old way in is dropped (#200:
+        // another dialer is another endpoint until it answers for itself),
+        // and so is the OSC 52 grant (its key carries the pairing, and the
+        // prune runs NOW, so switching back cannot revive it unchecked).
+        function setHostMode(id, peerId, info) {
+            const h = hostById(id);
+            if (!h || h.id === 'local') return false;
+            if (peerId) {
+                if (!info || !info.proxy || !info.peers) return false;
+                const origin = info.peers[peerId];
+                if (typeof origin !== 'string') return false;
+                if (hostIsProxied(h) && h.peerId === peerId) return false;
+                const keep = !hostIsProxied(h) && !!h.token
+                    && normalizeHostUrl(h.url) === origin
+                    && !originIsLocalOnly(origin);
+                if (!keep) h.token = '';
+                h.via = 'server';
+                h.peerId = peerId;
+                h.peerOrigin = origin;
+                h.url = origin;
+            } else {
+                if (!hostIsProxied(h)) return false;
+                const keep = !!h.token && !!h.peerOrigin
+                    && h.peerOrigin === h.url && !originIsLocalOnly(h.url);
+                if (!keep) h.token = '';
+                delete h.via;
+                delete h.peerId;
+                delete h.peerOrigin;
+            }
+            h.brokerId = '';
+            savePrefs();
+            invalidateHost(h.id);
+            try { _osc52PruneStale(loadOsc52Hosts()); } catch (_) {}
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('host:changed', { hostId: h.id });
+            }
+            return true;
+        }
+
         // #190: a host added after this page's boot can't be reached until
         // reload. The CSP is per-document — a loaded page keeps the
         // connect-src it was served with, and adding a host mid-session only

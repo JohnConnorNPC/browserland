@@ -12933,6 +12933,10 @@ _EMIT_SITES = [
     # a missing edge is unfixable from a mod (there is nothing to poll).
     ("host:changed", "56_js_hosts.js",
      "_emitModEvent('host:changed', { hostId: id });"),
+    # #252 phase 3: switching a host between direct and "from server"
+    # rewrites its url, token and pairing -- the Hosts row's mode control.
+    ("host:changed", "56_js_hosts.js",
+     "_emitModEvent('host:changed', { hostId: h.id });"),
     ("host:changed", "83_js_broker_identity.js",
      "_emitModEvent('host:changed', { hostId: host.id });"),
     ("host:removed", "83_js_broker_identity.js",
