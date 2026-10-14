@@ -1306,8 +1306,8 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None),
-                                    ("b", "https://y:4445", "t2", None, None)]
+    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None, None),
+                                    ("b", "https://y:4445", "t2", None, None, None)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1335,7 +1335,7 @@ def test_resolve_hosts_single_default(monkeypatch):
     monkeypatch.delenv(m.HOSTS_ENV, raising=False)
     args = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None,
-                                       None)]
+                                       None, None)]
 
 
 def test_resolve_hosts_multi_from_env(monkeypatch):
@@ -1343,7 +1343,7 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None, None)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1352,7 +1352,7 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None, None)]
 
 
 def _hosts_json(*entries):
@@ -1365,8 +1365,8 @@ def _hosts_json(*entries):
 def test_parse_hosts_reads_a_per_host_scope():
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
-    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None),
-                                    ("b", "http://b:4445", "t", None, None)]
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None, None),
+                                    ("b", "http://b:4445", "t", None, None, None)]
 
 
 @pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
@@ -1375,8 +1375,8 @@ def test_an_absent_or_empty_host_scope_inherits(entry):
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, entry)
     assert m._parse_hosts(raw, "proc") == [
-        ("a", "http://a:4445", "t", "teamA", None),
-        ("b", "http://b:4445", "t", "proc", None)]
+        ("a", "http://a:4445", "t", "teamA", None, None),
+        ("b", "http://b:4445", "t", "proc", None, None)]
 
 
 @pytest.mark.parametrize("bad", ["a b", "a:b", "x" * 65, "-lead", 5, None,
@@ -1403,7 +1403,7 @@ def test_the_scope_env_applies_to_every_host(monkeypatch):
                                                        "envscope"]
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         "envscope", None)]
+                                         "envscope", None, None)]
 
 
 def test_a_host_scope_beats_the_env(monkeypatch):
@@ -1420,7 +1420,7 @@ def test_the_scope_flag_beats_the_env(monkeypatch):
     args = m._parse_args(["--scope", "flagscope", "--token", "t",
                           "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t",
-                                       "flagscope", None)]
+                                       "flagscope", None, None)]
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])
@@ -1449,8 +1449,8 @@ def test_main_wires_scopes_into_configure(monkeypatch):
     monkeypatch.setattr(server.mcp, "run", lambda: None)
     raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
     assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None),
-                                 ("b", "http://b:4445", "t", "teamB", None)]
+    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None, None),
+                                 ("b", "http://b:4445", "t", "teamB", None, None)]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1865,8 +1865,8 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None),
-                                 ("b", "http://y:4445", "tb", None, None)]
+    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None, None),
+                                 ("b", "http://y:4445", "tb", None, None, None)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------
@@ -2248,8 +2248,9 @@ def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
     raw = _hosts_json({"name": "a", "admin_token": "per-host"},
                       {"name": "b"})
     assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", None,
-                                    "per-host"),
-                                   ("b", "http://b:4445", "t", None, None)]
+                                    "per-host", None),
+                                   ("b", "http://b:4445", "t", None, None,
+                                    None)]
     with pytest.raises(ValueError) as ei:
         m._parse_hosts(_hosts_json({"name": "a", "admin_token": 5}))
     assert "admin_token" in str(ei.value) and "'a'" in str(ei.value)
@@ -2258,7 +2259,7 @@ def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
     monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "env-admin")
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         None, "env-admin")]
+                                         None, "env-admin", None)]
 
 
 def test_get_client_carries_the_hosts_admin_token():
@@ -2910,3 +2911,101 @@ def test_desktop_error_codes_map_to_readable_messages():
             _reset_server()
         assert ei.value.code == code
         assert fragment in str(ei.value), (code, str(ei.value))
+
+
+# ---- #252 phase 3 (A10): a host reached through a hub's /peer/<id> prefix --
+
+def _seen_headers(**kw):
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.headers))
+        return httpx.Response(200, json={"ok": True, "terminals": []})
+    c = BrowserlandClient(base="http://hub:4445/peer/m", token="t",
+                          transport=httpx.MockTransport(handler), **kw)
+    c._send("GET", "/mcp/terminals")
+    return seen[0]
+
+
+def test_a_configured_peer_origin_rides_every_request():
+    from webterm.protocol import PEER_ORIGIN_HEADER
+    h = _seen_headers(peer_origin="http://b:4448")
+    assert h[PEER_ORIGIN_HEADER.lower()] == "http://b:4448"
+
+
+@pytest.mark.parametrize("kw", [{}, {"peer_origin": None},
+                                {"peer_origin": ""}])
+def test_without_a_peer_origin_the_requests_are_as_before(kw):
+    """An mcptool host config without peer_origin sends exactly what it sent
+    before #252 phase 3: the same header set, no pairing header."""
+    from webterm.protocol import PEER_ORIGIN_HEADER
+    h = _seen_headers(**kw)
+    assert PEER_ORIGIN_HEADER.lower() not in h
+    assert sorted(h) == sorted(_seen_headers())
+    assert h["authorization"] == "Bearer t"
+
+
+@pytest.mark.parametrize("raw, canon", [
+    ("http://B:4445/", "http://b:4445"),
+    ("http://b:80", "http://b"),
+    ("http://b./", "http://b"),
+    ("http://[::1]:4445", "http://[::1]:4445"),
+    ("HTTPS://Hub.Example:443", "https://hub.example"),
+])
+def test_the_peer_origin_is_sent_in_the_hubs_own_form(raw, canon):
+    """M2: the client sends the very form the hub compares against (the
+    hub's config goes through the same normalize_origin), so a correct
+    config never reads as a re-pointed peer."""
+    from webterm.broker import peers
+    from webterm.protocol import PEER_ORIGIN_HEADER
+    assert peers.normalize_origin(raw)[0] == canon
+    assert _seen_headers(peer_origin=raw)[PEER_ORIGIN_HEADER.lower()] == canon
+
+
+def test_a_bad_peer_origin_is_refused_at_construction():
+    with pytest.raises(ValueError):
+        BrowserlandClient(base="http://hub:4445", token="t",
+                          peer_origin="http://b:4448/path")
+
+
+def test_a_pairing_refusal_reads_as_such():
+    def handler(request):
+        return httpx.Response(409, json={"error": "peer_origin_changed"},
+                              headers={"X-Browserland-Peer-Refusal":
+                                       "peer_origin_changed"})
+    c = BrowserlandClient(base="http://hub:4445/peer/m", token="t",
+                          transport=httpx.MockTransport(handler),
+                          peer_origin="http://b:4448")
+    with pytest.raises(BrowserlandError) as ei:
+        c._send("GET", "/mcp/terminals")
+    assert ei.value.code == "peer_origin_changed"
+    assert "publishes this peer at another address" in str(ei.value)
+    assert "HTTP 409" in str(ei.value)
+
+
+def test_hosts_entries_carry_a_canonical_peer_origin():
+    from webterm.mcptool import __main__ as m
+    raw = _hosts_json({"name": "a", "peer_origin": "http://B:4448/"},
+                      {"name": "b", "peer_origin": ""})
+    assert [h[5] for h in m._parse_hosts(raw)] == ["http://b:4448", None]
+
+
+@pytest.mark.parametrize("bad", ["http://b:4448/p", "http://b:4448/?q=1",
+                                 "http://u:p@b:4448", "ftp://b:4448", 5])
+def test_a_bad_hosts_peer_origin_names_the_host(bad):
+    from webterm.mcptool import __main__ as m
+    with pytest.raises(ValueError) as ei:
+        m._parse_hosts(_hosts_json({"name": "a", "peer_origin": bad}))
+    assert "peer_origin" in str(ei.value) and "'a'" in str(ei.value)
+
+
+def test_get_client_carries_the_hosts_peer_origin():
+    from webterm.mcptool import server
+    server.configure([("a", "http://hub:4445/peer/m", "t", None, None,
+                       "http://b:4448"),
+                      ("b", "http://b:4445", "t")])
+    try:
+        assert server._get_client("a").peer_origin == "http://b:4448"
+        assert server._get_client("b").peer_origin is None
+    finally:
+        server.configure([])

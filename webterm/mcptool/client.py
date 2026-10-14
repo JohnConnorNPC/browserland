@@ -24,7 +24,8 @@ import httpx
 # The header names come from the dependency-free protocol module, never from
 # webterm.broker: this package is the optional `mcp` extra and must not pull
 # in the broker (and sanic with it).
-from ..protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
+from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
+                        normalize_origin)
 
 # Broker error codes -> human-readable messages. Source of truth is the error
 # table in wiki/Technical-Reference.md ("MCP HTTP interface" error reference). Codes not
@@ -33,6 +34,9 @@ _ERROR_MESSAGES = {
     "mcp_disabled": "MCP interface is disabled on the broker "
                     "(enable it and set a token in Control Panel → MCP access).",
     "auth_required": "MCP token missing or invalid.",
+    "peer_origin_changed": "The hub now publishes this peer at another "
+                           "address than this host's peer_origin; check "
+                           "peer_origin (and the hub's peers config).",
     "bad_json": "Broker rejected the request body as malformed JSON.",
     "bad_id": "Window id is missing or not an integer.",
     "unknown_or_off": "No such terminal, or its MCP access mode is 'off'.",
@@ -153,7 +157,8 @@ class BrowserlandClient:
                  timeout: float = 10.0, read_timeout: float = 30.0,
                  transport: Optional[httpx.BaseTransport] = None,
                  scope: Optional[str] = None, name: Optional[str] = None,
-                 admin_token: Optional[str] = None):
+                 admin_token: Optional[str] = None,
+                 peer_origin: Optional[str] = None):
         self.base = base.rstrip("/")
         #: The scope this client declares (#232), or None. An empty string is
         #: unscoped, exactly as the broker reads an empty header.
@@ -166,6 +171,17 @@ class BrowserlandClient:
         #: unlocks admin-only ops on brokers that have an admin token
         #: configured; a broker without one ignores the header.
         self.admin_token = admin_token or None
+        #: #252 phase 3: for a host reached through a hub's /peer/<id>/mcp
+        #: prefix, the origin this client expects the hub to dial for that
+        #: peer, in the hub's own canonical form -- or None. When set, it is
+        #: sent on every request and the hub refuses a re-pointed peer (409
+        #: peer_origin_changed) instead of handing it this MCP token.
+        self.peer_origin = None
+        if peer_origin:
+            origin, why = normalize_origin(peer_origin)
+            if origin is None:
+                raise ValueError(f"peer_origin {peer_origin!r}: {why}")
+            self.peer_origin = origin
         # `read` does a producer round-trip on the broker, so it gets a longer
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
@@ -175,6 +191,8 @@ class BrowserlandClient:
             headers[SCOPE_HEADER] = self.scope
         if self.admin_token:
             headers[MCP_ADMIN_HEADER] = self.admin_token
+        if self.peer_origin:
+            headers[PEER_ORIGIN_HEADER] = self.peer_origin
         # Set once /mcp/info has echoed our scope; see _check_scope.
         self._scope_confirmed = False
         # Cached /mcp/info capability flags (#243/#244/#245), or None before

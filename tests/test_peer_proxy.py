@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from .auth_helpers import TEST_TOKEN
-from .peer_upstream import Answer, FakeUpstream, LiveApp
+from .peer_upstream import Answer, FakeUpstream, LiveApp, json_answer
 from webterm.broker import peers
 from webterm.broker.app import ADMIN_HEADER, create_app
 from webterm.protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
@@ -756,3 +756,29 @@ async def test_the_mcp_pairing_rung_sits_after_the_gate_and_before_the_table(
     assert r.status_code == 404
     assert r.json()["error"] != "peer_origin_changed"
     assert upstream.seen == []
+
+
+async def test_the_mcptool_client_and_the_gate_agree_on_the_pairing(
+        live, upstream):
+    """M1: the header the mcptool client sends is the one this gate reads --
+    a matching pairing is relayed, a stale one is refused before any dial."""
+    import asyncio
+    from webterm.mcptool import BrowserlandClient, BrowserlandError
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer({"ok": True})
+
+    def call(origin):
+        c = BrowserlandClient(base=live.url + "/peer/m", token=B_MCP,
+                              peer_origin=origin)
+        try:
+            return c._send("GET", "/mcp/terminals")
+        except BrowserlandError as exc:
+            return exc.code
+        finally:
+            c.close()
+    loop = asyncio.get_running_loop()
+    good = await loop.run_in_executor(None, call, upstream.origin)
+    assert good == {"ok": True}
+    assert upstream.hits("/mcp/terminals") == 1
+    stale = await loop.run_in_executor(None, call, "http://elsewhere:4445")
+    assert stale == "peer_origin_changed"
+    assert upstream.hits("/mcp/terminals") == 1

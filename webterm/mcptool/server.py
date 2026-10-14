@@ -34,15 +34,18 @@ class HostConfig(NamedTuple):
     URL, the MCP token, the optional declared scope and the optional per-host
     admin token. This NamedTuple replaces the positional tuples configure()
     used to store, so a growing host map stays self-describing. Plain tuples
-    ``(name, base, token[, scope[, admin_token]])`` are still accepted at the
-    configure() seam and normalized (missing fields default to None), which
-    keeps every existing caller and test injection working."""
+    ``(name, base, token[, scope[, admin_token[, peer_origin]]])`` are still
+    accepted at the configure() seam and normalized (missing fields default to None), which
+    keeps every existing caller and test injection working. ``peer_origin``
+    (#252) is the origin a hub is expected to dial for a host reached
+    through its ``/peer/<id>`` prefix, or None."""
 
     name: str
     base: str
     token: str
     scope: Optional[str] = None
     admin_token: Optional[str] = None
+    peer_origin: Optional[str] = None
 
 
 def _as_host_config(name: str, raw: Any) -> HostConfig:
@@ -52,7 +55,8 @@ def _as_host_config(name: str, raw: Any) -> HostConfig:
         return raw
     scope = raw[2] if len(raw) > 2 else None
     admin = raw[3] if len(raw) > 3 else None
-    return HostConfig(name, raw[0], raw[1], scope, admin)
+    peer_origin = raw[4] if len(raw) > 4 else None
+    return HostConfig(name, raw[0], raw[1], scope, admin, peer_origin)
 
 
 # Multi-host config (#24). configure() stores an ordered name -> HostConfig
@@ -120,7 +124,8 @@ def _handle_for(nid: str) -> Optional[str]:
 def configure(hosts) -> None:
     """Install the host map from an ordered iterable of descriptors —
     :class:`HostConfig` or a positional ``(name, base, token[, scope[,
-    admin_token]])`` tuple (scope/admin_token None = unset). Closes any
+    admin_token[, peer_origin]]])`` tuple (scope/admin_token/peer_origin None
+    = unset). Closes any
     previously-built clients so their sockets aren't leaked; the new clients
     are built lazily on first use. Also clears, atomically with the rebuild,
     every cross-config state: the launch-handle store and the admin-host set
@@ -202,7 +207,8 @@ def _get_client(name: str) -> BrowserlandClient:
             cfg = _as_host_config(name, _host_configs[name])
             client = BrowserlandClient(base=cfg.base, token=cfg.token,
                                        scope=cfg.scope,
-                                       admin_token=cfg.admin_token, name=name)
+                                       admin_token=cfg.admin_token, name=name,
+                                       peer_origin=cfg.peer_origin)
             _clients[name] = client
         return client
 

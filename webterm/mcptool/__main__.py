@@ -14,7 +14,7 @@ from typing import Optional
 
 # The broker's scope grammar, from the dependency-free protocol module (this
 # package must not import webterm.broker).
-from ..protocol import SCOPE_RE
+from ..protocol import SCOPE_RE, normalize_origin
 
 DEFAULT_URL = "http://127.0.0.1:4445"
 
@@ -103,19 +103,26 @@ def _resolve_admin_token(args: argparse.Namespace) -> Optional[str]:
 
 def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     """Parse the ``--hosts`` / ``$BROWSERLAND_MCP_HOSTS`` JSON into an ordered
-    list of ``(name, url, token, scope, admin_token)`` host descriptors.
+    list of ``(name, url, token, scope, admin_token, peer_origin)`` host
+    descriptors.
 
     An entry's optional ``"scope"`` (#232) is that host's declared scope; an
     empty or absent one inherits ``scope``, the process-wide value (None =
     unscoped). An entry's optional ``"admin_token"`` (#245) is that host's own
     admin credential; an empty or absent one means none (it never inherits a
-    process-wide value — one admin credential, one host).
+    process-wide value — one admin credential, one host). An entry's
+    optional ``"peer_origin"`` (#252) is, for a host reached through a hub's
+    ``/peer/<id>`` prefix, the origin the hub is expected to dial for that
+    peer; it is canonicalised exactly as the hub compares it, and the hub
+    then refuses a re-pointed peer instead of receiving this token. Empty or
+    absent means none.
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
     a JSON array, an empty array, a non-object entry, a missing/empty field, a
     name containing ``':'`` (the namespaced-id separator), a duplicate name, a
     ``"scope"`` that is not a string or not a valid scope name, or an
-    ``"admin_token"`` that is not a string (the message names the host)."""
+    ``"admin_token"`` that is not a string, or a ``"peer_origin"`` that is
+    not a string or not an origin (the message names the host)."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -153,16 +160,27 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
         if not isinstance(admin, str):
             raise ValueError(f"--hosts[{i}] ({name!r}) 'admin_token' must be "
                              "a string")
-        hosts.append((name, url, token, host_scope or scope, admin or None))
+        peer_origin = item.get("peer_origin", "")
+        if not isinstance(peer_origin, str):
+            raise ValueError(f"--hosts[{i}] ({name!r}) 'peer_origin' must be "
+                             "a string")
+        if peer_origin:
+            origin, why = normalize_origin(peer_origin)
+            if origin is None:
+                raise ValueError(f"--hosts[{i}] ({name!r}) peer_origin "
+                                 f"{peer_origin!r}: {why}")
+            peer_origin = origin
+        hosts.append((name, url, token, host_scope or scope, admin or None,
+                      peer_origin or None))
     return hosts
 
 
 def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
-    """Resolve the host map as ``(name, url, token, scope, admin_token)``
-    tuples. With ``--hosts``/env set, parse it (multi-host). Otherwise fall
-    back to the single-host ``--broker-url``/``--token`` shorthand under the
-    name ``"default"``, carrying ``--admin-token``/env as that host's admin
-    credential (#245). Every host inherits the process-wide ``--scope`` unless
+    """Resolve the host map as ``(name, url, token, scope, admin_token,
+    peer_origin)`` tuples. With ``--hosts``/env set, parse it (multi-host).
+    Otherwise fall back to the single-host ``--broker-url``/``--token``
+    shorthand under the name ``"default"``, carrying ``--admin-token``/env as
+    that host's admin credential (#245) and no peer_origin. Every host inherits the process-wide ``--scope`` unless
     its own entry names one. Returns ``None`` when single-host mode has no
     resolvable token (so the caller can print the token help and exit)."""
     scope = _resolve_scope(args)
@@ -172,7 +190,7 @@ def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
     if not token:
         return None
     return [("default", args.broker_url, token, scope,
-             _resolve_admin_token(args))]
+             _resolve_admin_token(args), None)]
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
