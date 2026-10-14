@@ -8959,13 +8959,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(data, dict):
             data = {}
         route, client_id = data.get("route"), data.get("clientId")
+        # One clientId value end to end: a non-canonical one (empty, padded
+        # or over PEER_CLIENT_ID_MAX) is refused, never normalised, so the
+        # bound value is byte for byte the one the socket must present and
+        # the one the peer reads.
         if (route not in peer_sockets.ROUTES
-                or not isinstance(client_id, str) or not client_id.strip()):
+                or not isinstance(client_id, str) or not client_id
+                or len(client_id) > peer_sockets.PEER_CLIENT_ID_MAX
+                or client_id != client_id.strip()):
             return _peer_refusal(False, 400, "bad_ticket")
         peers.apply_change(app)
         try:
             ticket = app.ctx.peer_tickets.mint(
-                peer_id, route, client_id.strip(), peer["origin"], bearer,
+                peer_id, route, client_id, peer["origin"], bearer,
                 peer_sockets.token_id(app.ctx.auth_token))
         except peers.PolicyError as exc:
             return _peer_refusal(False, exc.status, exc.error)
@@ -8977,10 +8983,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             ctx = app.ctx
             live = peer_sockets.token_id(ctx.auth_token)
             peers.apply_change(app)
-            # Exactly one clientId: the binding is checked on the value the
-            # peer will read, never one of several the two parsers might pick.
+            # Exactly one clientId, compared with the bound one byte for byte
+            # (no strip): the forwarded query carries this same value, so the
+            # peer reads exactly what the ticket was minted for.
             ids = request.args.getlist("clientId") or []
-            client_id = ids[0].strip() if len(ids) == 1 else None
+            client_id = ids[0] if len(ids) == 1 else None
             ticket = ctx.peer_tickets.redeem(
                 request.args.get("ticket"), peer_id=peer_id, route=route,
                 client_id=client_id,

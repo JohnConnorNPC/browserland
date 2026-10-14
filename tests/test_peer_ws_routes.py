@@ -211,6 +211,10 @@ async def test_the_mint_is_503_without_the_proxy_extra(tmp_path, fake,
     b'{"route": "ws"}',
     b'{"route": "ws", "clientId": "  "}',
     b'{"route": "ws", "clientId": 7}',
+    # Review round 1 (Q18): refused, never normalised.
+    b'{"route": "ws", "clientId": " c1"}',
+    b'{"route": "ws", "clientId": "c1 "}',
+    b'{"route": "ws", "clientId": "' + b"c" * 129 + b'"}',
     b'["ws", "c1"]',
     b"not json",
     b'{"route": "ws", "clientId": "c1", "pad": "' + b"x" * 5000 + b'"}',
@@ -272,6 +276,7 @@ async def test_a_ticket_works_once(live, fake):
     ("b", "control", "clientId=c2"),               # another client
     ("c", "control", "clientId=c1"),               # another peer
     ("b", "control", ""),                          # no clientId
+    ("b", "control", "clientId=%20c1"),            # padded: no strip (Q18)
 ])
 async def test_a_mis_bound_ticket_is_4401_and_burned(live, fake, peer, route,
                                                      qs):

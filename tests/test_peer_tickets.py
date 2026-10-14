@@ -255,6 +255,7 @@ def test_the_ruled_numbers(tmp_path):
     assert (ps.PEER_MAX_TICKETS_PER_PEER, ps.PEER_MAX_TICKETS) == (16, 64)
     assert (ps.PEER_MAX_SOCKETS_PER_PEER, ps.PEER_MAX_SOCKETS) == (32, 128)
     assert ps.PEER_WS_IDLE_S == 3600.0
+    assert ps.PEER_CLIENT_ID_MAX == 128
     assert ps.PEER_WS_FRAME_MAX == 16 * 2**20
     app = create_app({"state_path": str(tmp_path / "s.json"),
                       "auth_token": A_TOKEN, "serve_ui": False},

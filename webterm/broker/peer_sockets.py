@@ -58,6 +58,9 @@ PEER_WS_FRAME_MAX = 16 * 2**20
 
 ROUTES = ("ws", "control")
 
+#: The longest clientId a ticket binds (the page's is a 36-character UUID).
+PEER_CLIENT_ID_MAX = 128
+
 
 def cid8(cid: Optional[str]) -> str:
     """#248 A6: log lines name a client by an 8-char prefix of its clientId,
