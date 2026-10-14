@@ -352,6 +352,7 @@ function scheduleControlReattach(id) { reattached.push('ctl:' + id); }
 function closeWindow() {}
 function dispatchTermOut(w, t) { written.push(t); }
 function hostMenuState() { return 'ok'; }
+function _retireControlSocket() {}
 const settle = async () => { for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 0)); } };
 function mkWin(hid) {
@@ -366,7 +367,8 @@ def _dial_src():
     s73 = _src("73_js_window_runtime.js")
     s75 = _src("75_js_taskbar_hosts.js")
     return (VIA_STUBS + _func(s64, "openControlWs")
-            + _func(s64, "_dialControl") + _func(s73, "attachWebSocket")
+            + _func(s64, "_dialControl") + _func(s64, "closeControlWs")
+            + _func(s73, "attachWebSocket")
             + _func(s75, "hostNeedsAttention") + _func(s75, "hostChipTip"))
 
 
@@ -504,6 +506,26 @@ return { made: wsMade, tip: hostChipTip(host, 'ok'), reattached: reattached };
     assert out["made"] == 0
     assert out["tip"].endswith(" — terminals: " + phrase)
     assert out["reattached"] == ["win"]
+
+
+def test_a_control_record_closed_during_the_mint_is_not_dialed(tmp_path):
+    # Review round 1 SHOULD 1: the host was removed (or its cache
+    # invalidated) while its /control ticket was being minted. The answer
+    # must not dial a socket no record owns.
+    out = _dial(tmp_path, """
+openControlWs(hostById('rb'));
+const minting = !!(controlSockets.get('rb') || {}).minting;
+closeControlWs('rb');
+await settle();
+return { minting: minting, made: wsMade, records: controlSockets.size,
+         reattached: reattached,
+         mints: calls.filter(c => c.url === '/peer/b/ws-ticket').length };
+""", OK_TICKET)
+    assert out["minting"] is True
+    assert out["mints"] == 1
+    assert out["made"] == 0
+    assert out["records"] == 0
+    assert out["reattached"] == []
 
 
 def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):
