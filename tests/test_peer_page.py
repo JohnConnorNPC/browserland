@@ -873,3 +873,64 @@ return { s1: r1.status, s2: r2.status, calls: calls.map(c => c.url) };
 """.replace("INFO", json.dumps(INFO)))
     assert out["s1"] == 503 and out["s2"] == 200
     assert out["calls"] == ["/info", "/info", "/peer/b/sessions"]
+
+
+# ---- phase 3 ----------------------------------------------------------------
+
+STATE_STUBS = r"""
+const hostStateCache = new Map();
+const hostSaveChains = new Map();
+let _stateRev = 0;
+const CLIENT_ID = 'cid';
+const notices = [];
+function showNotice(t) { notices.push(t); }
+function normalizeSettings(s) { return s; }
+function getSettings() { return {}; }
+function getLayout() { return {}; }
+"""
+
+
+def _state_src():
+    s53 = _src("53_js_remote_host_cache.js")
+    return (STATE_STUBS + _func(s53, "fetchHostState")
+            + _func(s53, "putHostState") + _func(s53, "_putHostStateOnce"))
+
+
+def test_a_proxied_hosts_state_is_never_fetched_or_put(tmp_path):
+    """P3-5 (A1): /state is never relayed, so a proxied host's settings cache
+    neither GETs nor PUTs it -- not even with the entry a settings tab
+    captured -- while a direct host still does both."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+const entry = () => ({ rev: 1, settings: {}, layout: {}, layoutLoaded: true });
+const g1 = await fetchHostState('rb');
+const p1 = await putHostState('rb', entry());
+const via = calls.length;
+const g2 = await fetchHostState('rd');
+const p2 = await putHostState('rd', entry());
+return { g1: g1, p1: p1, via: via, g2: !!g2, p2: p2,
+         direct: calls.map(c => [c.method || 'GET', c.url]) };
+""".replace("INFO", json.dumps(INFO)), extra_src=_state_src())
+    assert out["g1"] is None and out["p1"] == "skipped"
+    assert out["via"] == 0
+    assert out["g2"] is True and out["p2"] == "ok"
+    assert out["direct"] == [["GET", "http://d:4445/state"],
+                             ["PUT", "http://d:4445/state"]]
+
+
+def test_a_proxied_hosts_settings_tab_says_why(tmp_path):
+    s81 = _src("81_js_control_panel.js")
+    out = _run(tmp_path, _prefs(), """
+return [hostSettingsLoadError('rb'), hostSettingsLoadError('rd')];
+""", extra_src=_func(s81, "hostSettingsLoadError"))
+    assert out == ["settings are not available for a host reached through "
+                   "this broker", "could not load this broker’s settings"]
+
+
+def test_a_proxied_hosts_settings_tab_wording_is_used():
+    """The call site (non-behavioural pin): the failed-load branch of
+    selectSettingsTab shows hostSettingsLoadError's text."""
+    tab = _func(_src("81_js_control_panel.js"), "selectSettingsTab")
+    a = tab.index("if (!entry) {")
+    assert ("setHostLoadingEl.textContent = hostSettingsLoadError(tabId);"
+            in tab[a:a + 400])

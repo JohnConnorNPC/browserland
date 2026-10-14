@@ -215,6 +215,16 @@
             setHostLoadingEl.textContent = 'loading settings…';
             if (setPaneHost) setPaneHost.classList.remove('loading');
         }
+        // Why a remote tab has no settings form. A host reached through this
+        // broker (#252) has none to load: the prefix never relays /state, so
+        // its per-host settings are defaults. Its browser-local controls (the
+        // OSC 52 box above all) still work.
+        function hostSettingsLoadError(hostId) {
+            return hostIsProxied(hostById(hostId))
+                ? 'settings are not available for a host reached through '
+                    + 'this broker'
+                : 'could not load this broker’s settings';
+        }
         // Switch tabs. Browser + local are synchronous; a remote host awaits a
         // fresh /state GET (with a "loading…" placeholder) before its form is
         // populated and editable.
@@ -286,8 +296,7 @@
             if (!entry) {
                 settingsTarget = null;
                 setHostLoadingEl.style.display = '';
-                setHostLoadingEl.textContent =
-                    'could not load this broker’s settings';
+                setHostLoadingEl.textContent = hostSettingsLoadError(tabId);
                 return;
             }
             setHostLoadingEl.textContent = 'loading settings…';

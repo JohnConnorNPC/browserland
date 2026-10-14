@@ -32,6 +32,10 @@
             }
             const host = hostById(hostId);
             if (!host) return null;
+            // #252: a host reached through this broker has no /state here --
+            // the prefix never relays it -- so asking would only collect a
+            // refusal on every warm tick. Its per-host settings are defaults.
+            if (hostIsProxied(host)) return null;
             // ONE deadline covering connect THROUGH body (hence timeoutMs: 0 —
             // hostFetch's built-in deadline stops at the response headers, and a
             // remote broker that answers and then stalls its body would leave
@@ -86,6 +90,11 @@
         function putHostState(hostId, entry) {
             // Local writes go through the untouched F0 path.
             if (hostId === 'local') { savePrefs(); return Promise.resolve('ok'); }
+            // #252: never relayed (see fetchHostState), whatever entry a
+            // caller hands in.
+            if (hostIsProxied(hostById(hostId))) {
+                return Promise.resolve('skipped');
+            }
             // Use the entry the settings tab CAPTURED (makeRemoteTarget passes it)
             // — never re-read hostStateCache here: an in-flight background prefetch
             // can replace the cached object after the tab fetched it, and PUTting
