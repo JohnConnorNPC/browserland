@@ -831,8 +831,18 @@
             const route = path.indexOf('/control') === 0 ? 'control' : 'ws';
             const gen = (_peerMintGen.get(host.id) || 0) + 1;
             _peerMintGen.set(host.id, gen);
+            // The peer this ticket is for, fixed now: the record may be
+            // switched to direct, or to another peer, while the mint is out
+            // (the switch re-dials that host's windows itself). A mint that
+            // settles after that touches nothing and dials nothing (null).
+            const peerId = host.peerId;
+            const moved = () => {
+                const live = hostById(host.id);
+                return !live || live.via !== 'server' || live.peerId !== peerId;
+            };
             const newest = () => _peerMintGen.get(host.id) === gen;
             const refused = (code) => {
+                if (moved()) return null;
                 if (newest()) {
                     pollStateFor(host.id).wsRefusal = code;
                     renderHostStatus();
@@ -844,6 +854,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ route: route, clientId: CLIENT_ID }),
             }).then(async (r) => {
+                if (moved()) return null;
                 if (r.status === 401) {
                     pollStateFor(host.id).authNeeded = true;
                     showAuthOverlay(host);
@@ -865,10 +876,11 @@
                 } finally {
                     clearTimeout(bodyTimer);
                 }
+                if (moved()) return null;
                 if (!r.ok || !body || typeof body.ticket !== 'string') {
                     // Only THIS broker's marker names the refusal (_peerFetch's
                     // own cannot-proxy answer carries the code in its body).
-                    refused(r.headers.get(PEER_REFUSAL_HEADER)
+                    return refused(r.headers.get(PEER_REFUSAL_HEADER)
                         || (body && (body.error === 'proxy_unavailable'
                                      || body.error === 'hub_auth_required')
                             ? body.error : 'error'));
@@ -881,7 +893,7 @@
                 const proto = window.location.protocol === 'https:'
                     ? 'wss:' : 'ws:';
                 return proto + '//' + window.location.host + '/peer/'
-                    + encodeURIComponent(host.peerId) + path
+                    + encodeURIComponent(peerId) + path
                     + (path.indexOf('?') === -1 ? '?' : '&')
                     + 'ticket=' + encodeURIComponent(body.ticket);
             }, () => refused('error'));    // the mint itself failed

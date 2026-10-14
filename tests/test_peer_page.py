@@ -101,11 +101,19 @@ async function fetch(url, o) {
             await new Promise(r => setTimeout(r, a.delay));
             peerInflight -= 1;
         }
+        if (a.throws) throw new TypeError('Failed to fetch');
         if (a.stall) {
             // The headers arrive; the body never does.
             return { status: a.status, ok: a.status >= 200 && a.status < 300,
                      headers: new Headers(a.headers || {}),
                      json: () => new Promise(() => {}) };
+        }
+        if (a.bodyDelay) {
+            // The headers arrive at once; the body after bodyDelay ms.
+            return { status: a.status, ok: a.status >= 200 && a.status < 300,
+                     headers: new Headers(a.headers || {}),
+                     json: () => new Promise(r => setTimeout(
+                         () => r(a.body), a.bodyDelay)) };
         }
         return new Response(JSON.stringify(a.body), {
             status: a.status, headers: a.headers || {} });
@@ -1628,3 +1636,35 @@ const r = await Promise.all([p1, p2]);
 return { r: r, puts: calls.filter(c => c.method === 'PUT').map(c => c.url) };
 """, extra_src=_state_src())
     assert out == {"r": ["ok", "skipped"], "puts": ["http://d:4445/state"]}
+
+
+MOVED_BODY = """
+peerAnswer = ANSWER;
+const p = hostWsUrl(hostById('rb'), '/ws?session=1').catch(e => 'threw: ' + e);
+await new Promise(r => setTimeout(r, 10));
+MOVE
+const out = await p;
+await settle();
+return { out: out, refusal: pollStateFor('rb').wsRefusal || null,
+         overlays: overlays };
+"""
+TO_DIRECT = ("const h = hostById('rb'); delete h.via; delete h.peerId; "
+             "delete h.peerOrigin;")
+TO_C = "hostById('rb').peerId = 'c';"
+
+
+@pytest.mark.parametrize("answer", [
+    dict(BUSY, delay=60), dict(OK_TICKET, delay=60), dict(PEERS_401, delay=60),
+    # moved while the body is still on its way
+    dict(OK_TICKET, bodyDelay=60), dict(BUSY, bodyDelay=60),
+    # moved, then the mint itself fails
+    {"status": 0, "throws": True, "delay": 60}])
+@pytest.mark.parametrize("move", [TO_DIRECT, TO_C])
+def test_a_mint_that_settles_after_a_switch_touches_nothing(tmp_path, answer,
+                                                            move):
+    """codex 3/9: the record was switched to direct, or to another peer,
+    while its ticket mint was out: the late answer paints no reason, opens
+    no overlay and dials nothing (the switch re-dialed the windows itself)."""
+    out = _dial(tmp_path, MOVED_BODY.replace("ANSWER", json.dumps(answer))
+                .replace("MOVE", move))
+    assert out == {"out": None, "refusal": None, "overlays": []}
