@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 START = "        // ---- single-active-browser control channel (F-ACTIVECLIENT) -------"
 END = "        // ---- desktop relay (#244)"
 
-EXPECTED_ASSERTS = 93
+EXPECTED_ASSERTS = 95
 
 _HARNESS = r"""
 'use strict';
@@ -744,6 +744,17 @@ w.api.desktopReply(w.rpcs[0].rec, w.rpcs[0].ws, 7, { ok: true });
 ok(RESULTS(s1).length === 0 && (s0.attempts || 0) === att0 && (s1.attempts || 0) === att1,
     'R4 no socket in charge: dropped (no send attempted on any socket)');
 
+// ---- #252 phase 3 (A6): a restarted HOME broker's bootId reaches 56 -------
+const boots = [];
+w = mkWorld({ env: { noteLocalBootId: function (id) { boots.push(id); } } });
+s0 = connected(w, ST(true, { bootId: 'X' }));
+s0._recv(ST(true, { bootId: 'X', gen: 2 }));
+ok(boots.length === 1 && boots[0] === 'X',
+    'BL1 the FIRST status of the home socket hands its bootId to noteLocalBootId, once');
+w.api.openControlWs(w.env.hostById('rb'));
+const rs = w.last(); rs._open(); rs._recv(ST(true, { bootId: 'R' }));
+ok(boots.length === 1,
+    'BL2 a status from a remote host never reaches noteLocalBootId');
 console.log(pass + ' passed, ' + fail + ' failed');
 """
 
@@ -836,6 +847,15 @@ def test_wake_probe(run, label):
     "P5 a remote host pong lease reaches that host remote handler",
 ])
 def test_pong_lease_goes_through_on_control_status(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "BL1 the FIRST status of the home socket hands its bootId to noteLocalBootId, once",
+    "BL2 a status from a remote host never reaches noteLocalBootId",
+])
+def test_a_new_home_bootid_reaches_the_info_memo(run, label):
+    # #252 phase 3 (A6): 56's localPeers() memo is read again after a restart.
     _ok(run, label)
 
 

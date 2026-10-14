@@ -1244,3 +1244,54 @@ def test_the_hosts_row_names_the_mode():
     pass shows it)."""
     rows = _func(_src("83_js_broker_identity.js"), "renderHostsList")
     assert ": host.label + ' — ' + host.url + hostViaNote(host);" in rows
+
+
+def test_the_info_memo_is_read_again_after_this_broker_restarts(tmp_path):
+    """P3-6 (A6): the localPeers() memo survives the same bootId and drops on
+    a new one; the /info answer seeds the id it came from, and a missing id
+    (an older build) never forgets."""
+    info0 = dict(INFO, restart={"bootId": "b0"})
+    out = _run(tmp_path, _prefs(), """
+const n = () => calls.filter(c => c.url === '/info').length;
+infoAnswers = [I0, INFO, INFO, INFO];
+await localPeers(); await localPeers();
+const once = n();
+noteLocalBootId('b0'); await localPeers();
+const sameAsSeed = n();
+noteLocalBootId(null); noteLocalBootId(''); noteLocalBootId(undefined);
+await localPeers();
+const missing = n();
+noteLocalBootId('b1'); await localPeers();
+const restarted = n();
+noteLocalBootId('b1'); await localPeers();
+const steady = n();
+return { once: once, sameAsSeed: sameAsSeed, missing: missing,
+         restarted: restarted, steady: steady };
+""".replace("I0", json.dumps(info0)).replace("INFO", json.dumps(INFO)))
+    assert out == {"once": 1, "sameAsSeed": 1, "missing": 1,
+                   "restarted": 2, "steady": 2}
+
+
+def test_without_a_seed_the_first_bootid_only_seeds(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+await localPeers();
+noteLocalBootId('x'); await localPeers();
+const a = calls.length;
+noteLocalBootId('y'); await localPeers();
+return [a, calls.length];
+""".replace("INFO", json.dumps(INFO)))
+    assert out == [1, 2]
+
+
+def test_the_info_answer_seeds_the_bootid(tmp_path):
+    """The memo read under run b0, then a control status from run b1 (this
+    broker restarted between the two): the memo is stale, read again."""
+    info0 = dict(INFO, restart={"bootId": "b0"})
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [I0, INFO];
+await localPeers();
+noteLocalBootId('b1'); await localPeers();
+return calls.filter(c => c.url === '/info').length;
+""".replace("I0", json.dumps(info0)).replace("INFO", json.dumps(INFO)))
+    assert out == 2

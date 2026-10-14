@@ -568,6 +568,12 @@
                 // the socket's life, so it still names where an rpc came from
                 // after the socket is promoted away.
                 st.bootId = typeof msg.bootId === 'string' ? msg.bootId : null;
+                // #252: a restarted HOME broker may publish other peers; its
+                // /info memo (56) is read again.
+                if (rec.hostId === homeHostId()
+                        && typeof noteLocalBootId === 'function') {
+                    noteLocalBootId(st.bootId);
+                }
                 if (st.bootId === null && typeof _desktopForgetRun === 'function') {
                     _desktopForgetRun(rec.hostId);
                 }

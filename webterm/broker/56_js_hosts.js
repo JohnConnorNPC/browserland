@@ -96,6 +96,11 @@
                             if (typeof raw[k] === 'string') peers[k] = raw[k];
                         }
                     }
+                    // The broker run this answer came from: seeds the
+                    // bootId noteLocalBootId compares against. A build
+                    // without it leaves the seed alone (never a forget).
+                    const boot = j && j.restart && j.restart.bootId;
+                    if (typeof boot === 'string' && boot) _localBootSeen = boot;
                     return { proxy: !!(j && j.peer_proxy === true),
                              peers: peers };
                 })();
@@ -112,6 +117,18 @@
         // Drop the memo, so the next caller reads /info again (a 409
         // peer_origin_changed says the memo is stale).
         function forgetLocalPeers() { _localPeersP = null; }
+        // This broker restarted (a different bootId on its /control status,
+        // 64): its peers config may have changed with it, so the memo is
+        // read again. The first id seen only seeds; a missing or empty id
+        // (an older build) never forgets.
+        let _localBootSeen = null;
+        function noteLocalBootId(id) {
+            if (typeof id !== 'string' || !id) return;
+            if (_localBootSeen !== null && _localBootSeen !== id) {
+                forgetLocalPeers();
+            }
+            _localBootSeen = id;
+        }
         // Runs on every resolve: a proxied host whose peer is now published
         // at a DIFFERENT origin than its token was paired with loses the
         // token (it was entered for another machine), and its display url
