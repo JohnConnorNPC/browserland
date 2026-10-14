@@ -252,6 +252,8 @@ class FakeDown:
         #: Cleared, every send waits on it (a page that stopped reading).
         self.drain = asyncio.Event()
         self.drain.set()
+        #: When set, close() waits on it first (a slow close handshake).
+        self.close_gate: Optional[asyncio.Event] = None
         self._incoming: asyncio.Queue = asyncio.Queue()
         self._cancel: Optional[asyncio.Future] = None
 
@@ -312,6 +314,8 @@ class FakeDown:
         self.sent.append(frame)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
+        if self.close_gate is not None:
+            await self.close_gate.wait()
         if self.ws_proto.state is not State.OPEN:
             return
         self.ws_proto.close_sent = Close(code, reason)

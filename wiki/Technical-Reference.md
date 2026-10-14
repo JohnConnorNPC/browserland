@@ -409,7 +409,9 @@ Any producer can register the same way:
 A broker can relay an allowlisted set of **another** broker's HTTP routes, so a
 page or a phone that can reach only this broker (say, the public one) still
 reaches a broker behind it (on its LAN or tailnet), and that broker needs no
-upgrade and no CORS. This broker stores **no credential** of the peer's. The
+upgrade and no CORS. This broker stores **no credential** of the peer's
+(a [socket ticket](#sockets) holds the peer's token in memory until it is
+used or its 30 s run out). The
 operator names each peer in `broker_config.json`:
 
 ```json
@@ -556,11 +558,11 @@ A page cannot set headers on a WebSocket handshake, so a proxied host's
    environment, sends no `User-Agent` and negotiates no compression. A peer
    on a build before this one needs nothing new: it reads that header when
    there is no `?token=`.
-5. **The relay.** One upstream socket per page socket. Frames cross
-   verbatim both ways — text stays text, binary stays binary, nothing is
-   parsed — and each direction waits for its send before it reads again,
-   with at most 2 frames buffered from the peer, so a slow page slows the
-   peer. Nothing reconnects here: the page's own reattach does, with a new
+5. **The relay.** One upstream socket per page socket. Messages cross
+   unchanged both ways — text stays text, binary stays binary, nothing is
+   parsed (each leg keeps its own framing and its own pings) — and each
+   direction waits for its send before it reads again, with at most 2
+   messages buffered from the peer, so a slow page slows the peer. Nothing reconnects here: the page's own reattach does, with a new
    ticket.
 
 **Pools.** Relayed sockets have a pool of their own, apart from the dial
@@ -568,8 +570,9 @@ pools: **32 per peer within 128 sockets**. A ticket holds its slot from the
 mint, so an upgrade never fails for the pool; the refusal is the mint's
 503 `peer_busy`.
 
-**Idle ceiling.** A pair with no frame in either direction for **3600 s**
-is closed (1000 `idle` both ways). Protocol pings are not frames; this
+**Idle ceiling.** A pair with no message in either direction for
+**3600 s** is closed (1000 `idle` both ways). Protocol pings are not
+messages; this
 broker pings the peer every 20 s and drops it after 20 s without an answer.
 
 **Revocation.** Every ticket mint and every redemption first closes each
@@ -588,8 +591,8 @@ stay open until the next mint or redemption, or `apply_change`.
 | 4401 `ticket` | the page | the ticket was bad, expired, reused, mis-bound or voided |
 | 4401 `revoked` | the page (the peer gets 1000) | a peer, origin or token change unbound the pair |
 | 1000 `idle` | both | the idle ceiling |
-| 1000 | the peer | the page closed |
-| 1001 | both | this broker is stopping |
+| 1000 | the peer | the page went: its close, a lost connection, or a close this broker started for it (1009 for an oversized message, say) |
+| 1001 | both | this broker is stopping (signalled before Sanic cancels the socket handlers, never guessed from who closed first) |
 | 1011 | both | anything else (one log line naming the error class) |
 
 Log lines name the peer id, the route, the first 8 characters of the

@@ -416,12 +416,57 @@ async def test_a_changed_token_is_swept_at_the_next_redemption(live, fake):
 
 async def test_apply_change_sweeps_without_a_mint(live, fake):
     tb = await ticket(live, "b", fake.origin)
-    wb = await page(live, "b", "ws", "clientId=c1&fake=never", tb)
+    wb, _ = await opened(fake, live, "b", "ws", "clientId=c1&fake=never", tb)
+    assert await wait_for(lambda: len(live.app.ctx.peer_sockets) == 1)
     _on_loop(live, live.app.ctx.peers.pop, "b")
     await asyncio.sleep(0.3)
     assert wb.protocol.close_rcvd is None
     _on_loop(live, peers.apply_change, live.app)
     assert await closed_with(wb) == (4401, "revoked")
+
+
+async def test_a_change_during_the_dial_is_caught(live, fake, monkeypatch):
+    # Codex MUST 2: the sweep runs while the upstream handshake is still in
+    # flight, so it sees neither the ticket nor a pair.
+    gate = __import__("threading").Event()
+    real = ps.dial_upstream
+
+    async def slow_dial(url, token):
+        while not gate.is_set():
+            await asyncio.sleep(0.02)
+        return await real(url, token)
+    monkeypatch.setattr(ps, "dial_upstream", slow_dial)
+    t = await ticket(live, "b", fake.origin)
+    n = len(fake.conns)
+    ws = await page(live, "b", "ws", "clientId=c1&fake=never", t)
+    await asyncio.sleep(0.2)
+    moved = "http://127.0.0.2:%d" % fake.port
+    _on_loop(live, live.app.ctx.peers["b"].__setitem__, "origin", moved)
+    _on_loop(live, peers.apply_change, live.app)
+    gate.set()
+    assert await closed_with(ws) == (4401, "revoked")
+    assert conn_closed(fake.wait_conn(n + 1)) == (1000, "")
+    assert await wait_for(lambda: live.app.ctx.peer_sock_cap._busy == {})
+    assert len(live.app.ctx.peer_sockets) == 0
+
+
+async def test_a_repeated_client_id_is_refused(live, fake):
+    # Codex SHOULD 7: one clientId, the one the peer will read.
+    t = await ticket(live, "b", fake.origin, cid="c1")
+    n = len(fake.handshakes)
+    ws = await page(live, "b", "ws", "clientId=c1&clientId=c2", t)
+    assert await closed_with(ws) == (4401, "ticket")
+    assert len(fake.handshakes) == n
+
+
+async def test_an_abandoned_ticket_expires_on_its_own(live, fake,
+                                                      monkeypatch):
+    # Codex SHOULD 5: no later mint is needed to drop it (and B's token).
+    monkeypatch.setattr(ps, "PEER_TICKET_TTL_S", 0.2)
+    await ticket(live, "b", fake.origin)
+    assert len(live.app.ctx.peer_tickets) == 1
+    assert await wait_for(lambda: len(live.app.ctx.peer_tickets) == 0, 2.0)
+    assert live.app.ctx.peer_sock_cap._busy == {}
 
 
 # ---- closes through the route ---------------------------------------------------
@@ -443,6 +488,23 @@ async def test_the_peer_close_reaches_the_page(live, fake, script, want):
     t = await ticket(live, "b", fake.origin)
     ws = await page(live, "b", "ws", "clientId=c1&fake=" + script, t)
     assert await closed_with(ws) == want
+
+
+async def test_an_oversized_page_message_is_no_shutdown(tmp_path, fake):
+    # Codex MUST 3 through real Sanic: Sanic closes the page 1009 itself,
+    # which is not this broker stopping, so the peer hears 1000.
+    app = _make_app(tmp_path, {"b": {"origin": fake.origin}})
+    app.config.WEBSOCKET_MAX_SIZE = 1024
+    srv = LiveApp(app).start()
+    try:
+        t = await ticket(srv, "b", fake.origin)
+        ws, conn = await opened(fake, srv, "b", "ws",
+                                "clientId=c1&fake=never", t)
+        await ws.send("x" * 4096)
+        assert (await closed_with(ws))[0] == 1009
+        assert conn_closed(conn) == (1000, "")
+    finally:
+        srv.stop()
 
 
 async def test_a_killed_peer_is_1012(live, fake):

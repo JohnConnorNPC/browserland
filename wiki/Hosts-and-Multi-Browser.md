@@ -32,7 +32,8 @@ served the page, so the phone dials only that broker. (The host list does
 not have a control to mark a host this way yet; it comes with a later
 release.) You still need the other
 broker's password: it is sent along with this broker's own, and this broker
-never stores it. It is tied to the address the operator configured — if the
+never saves it (opening a terminal holds it in memory for at most 30
+seconds, until that terminal connects). It is tied to the address the operator configured — if the
 operator points `b` somewhere else, the password is forgotten and you are
 asked again. If this broker cannot relay (no peers, no `proxy` extra, or an
 older build) the host says **this broker cannot proxy** and nothing is

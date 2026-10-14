@@ -95,7 +95,7 @@ def test_the_sockets_part_states_what_the_code_does():
     assert f"**{ps.PEER_WS_IDLE_S:g} s**" in s
     kw = ps.UPSTREAM_WS_KWARGS
     flat = " ".join(s.split())          # the prose wraps anywhere
-    assert f"at most {kw['max_queue']} frames buffered" in flat
+    assert f"at most {kw['max_queue']} messages buffered" in flat
     assert (f"pings the peer every {kw['ping_interval']:g} s and drops it "
             f"after {kw['ping_timeout']:g} s") in flat
     assert "The server-side handshake never follows a redirect" in flat

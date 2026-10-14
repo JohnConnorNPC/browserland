@@ -8925,14 +8925,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # /peer/<id>/ws-ticket through the browser gate (both tokens and the
     # pairing header), then WS /peer/<id>/ws|control?ticket=... with nothing
     # else. The ticket is the socket's only credential. A dials B with B's
-    # token in the handshake's Authorization header and relays frames
-    # verbatim (peer_sockets). Sockets have a pool of their own, a ticket
+    # token in the handshake's Authorization header and relays messages
+    # unchanged (peer_sockets). Sockets have a pool of their own, a ticket
     # holds its slot, and every mint and redemption first sweeps the pairs
     # and tickets a changed peer origin or token unbinds (peers.apply_change).
     app.ctx.peer_sock_cap = peers.DialCap(
         peer_sockets.PEER_MAX_SOCKETS, peer_sockets.PEER_MAX_SOCKETS_PER_PEER)
     app.ctx.peer_tickets = peer_sockets.TicketStore(app.ctx.peer_sock_cap)
     app.ctx.peer_sockets = peer_sockets.SocketRegistry(app.ctx.peer_tickets)
+    # Set by _peer_sockets_stopping (registered after the socket routes)
+    # before Sanic cancels the socket handlers; cleared on every start.
+    app.ctx.peer_stopping = False
+
+    @app.before_server_start
+    async def _peer_sockets_starting(app_, loop):
+        app_.ctx.peer_stopping = False
 
     async def _peer_ws_ticket(request: Request, peer_id: str):
         peer = app.ctx.peers.get(peer_id)
@@ -8970,7 +8977,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             ctx = app.ctx
             live = peer_sockets.token_id(ctx.auth_token)
             peers.apply_change(app)
-            client_id = (request.args.get("clientId") or "").strip()
+            # Exactly one clientId: the binding is checked on the value the
+            # peer will read, never one of several the two parsers might pick.
+            ids = request.args.getlist("clientId") or []
+            client_id = ids[0].strip() if len(ids) == 1 else None
             ticket = ctx.peer_tickets.redeem(
                 request.args.get("ticket"), peer_id=peer_id, route=route,
                 client_id=client_id,
@@ -8997,6 +9007,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     return
                 finally:
                     ticket = None     # B's token is the dial's, not ours
+                # The dial awaited: a sweep that ran meanwhile saw neither a
+                # ticket nor a pair, so the binding is checked once more.
+                if ((ctx.peers.get(peer_id) or {}).get("origin") != origin
+                        or peer_sockets.token_id(ctx.auth_token) != live):
+                    await peer_sockets.quiet_close(up, 1000)
+                    await ws.close(code=4401, reason="revoked")
+                    return
                 pair = peer_sockets.Pair(peer_id, client_id, route, origin,
                                          live)
                 ctx.peer_sockets.add(pair)
@@ -9009,7 +9026,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 try:
                     why = await peer_sockets.relay_sockets(
                         ws, up, peer_id=peer_id, route=route,
-                        stop=pair.stop, log=LOGGER.warning)
+                        stop=pair.stop,
+                        stopping=lambda: app.ctx.peer_stopping,
+                        log=LOGGER.warning)
                 finally:
                     LOGGER.info("peer %s: %s socket for %s closed (%s)",
                                 peer_id, route, cid, why)
@@ -11277,6 +11296,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                             name="peer_ws")
     app.add_websocket_route(_peer_socket("control"),
                             "/peer/<peer_id:str>/control", name="peer_control")
+
+    # Registered AFTER every socket route on purpose: Sanic runs shutdown
+    # listeners in reverse order of registration, and its own listener that
+    # cancels every socket handler is registered with the first socket
+    # route. So this runs first, and a relayed pair cancelled by the stop
+    # knows it is the stop (1001 both ways), not a page that went.
+    @app.before_server_stop
+    async def _peer_sockets_stopping(app_, loop):
+        app_.ctx.peer_stopping = True
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])

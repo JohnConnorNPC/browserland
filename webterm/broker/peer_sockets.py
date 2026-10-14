@@ -6,7 +6,7 @@ request does. Instead it asks A for a one-time **ticket** over the browser
 gate (A's bearer, B's token in :data:`peers.PEER_TOKEN_HEADER`, the pairing
 header), then opens ``/peer/<id>/ws`` or ``/peer/<id>/control`` with only
 ``?ticket=``. A redeems the ticket once, dials B with B's token, and relays
-frames verbatim.
+messages unchanged.
 
 A ticket is bound to the peer, the route, the clientId, the peer's origin
 and this broker's token AT MINT TIME, lives :data:`PEER_TICKET_TTL_S`, and is
@@ -69,8 +69,8 @@ def cid8(cid: Optional[str]) -> str:
 
 def token_id(token: Optional[str]) -> str:
     """What a ticket remembers of this broker's token: enough to see that
-    the token changed, never the token itself."""
-    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:16]
+    the token changed, never the token itself (its SHA-256, in hex)."""
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
 
 class Ticket:
@@ -135,9 +135,19 @@ class TicketStore:
         if not self.sock_cap.acquire(peer_id):
             raise peers.PolicyError(503, "peer_busy")
         tid = secrets.token_urlsafe(32)
+        while tid in self._tickets:          # never overwrite a held slot
+            tid = secrets.token_urlsafe(32)
         self._tickets[tid] = Ticket(
             peer_id, route, client_id, origin, token_id, peer_token,
             self._clock() + PEER_TICKET_TTL_S)
+        # Expiry is not left to the next mint: an unredeemed ticket (and
+        # the peer token in it) is dropped, and its slot released, just
+        # after its deadline even if nothing else happens.
+        try:
+            asyncio.get_running_loop().call_later(
+                PEER_TICKET_TTL_S + 0.05, self.sweep_expired)
+        except RuntimeError:                 # no loop: a synchronous caller
+            pass
         return tid
 
     def redeem(self, ticket_id: Optional[str], *, peer_id: str, route: str,
@@ -217,7 +227,7 @@ def peer_ws_connect():
 
 #: Every keyword of the upstream handshake, in one place. No environment
 #: proxy (the stock default reads ``HTTPS_PROXY``/``WSS_PROXY``), no
-#: User-Agent, no compression (frames cross verbatim, and a deflate context
+#: User-Agent, no compression (messages cross unchanged, and a deflate context
 #: per socket is memory the relay has no use for), the broker's own frame
 #: cap, and connect and close deadlines below the page's 3 s.
 #: ``max_queue=2``: at most two frames buffered from the peer (the default
@@ -266,7 +276,7 @@ def _sendable(code: Optional[int], reason: str):
     return code, reason
 
 
-async def _quiet_close(ws, code: int, reason: str = "") -> None:
+async def quiet_close(ws, code: int, reason: str = "") -> None:
     """Close ``ws``, bounded; a failure is not news (the socket is going
     either way). A cancellation of the caller is NOT swallowed."""
     try:
@@ -297,41 +307,31 @@ async def drain_closes(timeout: float = 2 * peers.PEER_CONNECT_TIMEOUT_S):
 
 
 async def _cancel(tasks) -> None:
-    """Cancel ``tasks`` and wait for them. ``gather`` collects their
-    outcomes (their own CancelledError included) as results, while a
-    cancellation of the caller still raises."""
+    """Cancel ``tasks`` and wait for them, bounded (a pump stuck in a send
+    must not hold the closes behind it)."""
     for t in tasks:
         t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def _page_gone_code(proto, State) -> int:
-    """What the peer is told when the page's leg is gone: 1000 when the page
-    went (it sent the first close frame, or its connection dropped), 1001
-    when this broker is going away (Sanic sent the page a close first, or
-    cancelled the handler with the page's socket still open)."""
-    if proto.state is State.OPEN:
-        return 1001
-    if proto.close_sent is not None and proto.close_rcvd_then_sent is not True:
-        return 1001
-    return 1000
+    await asyncio.wait(tasks, timeout=peers.PEER_CONNECT_TIMEOUT_S)
 
 
 async def relay_sockets(down, up, *, peer_id: str, route: str,
                         idle_s: Optional[float] = None, stop=None,
-                        log) -> str:
-    """Relay frames between the page's socket ``down`` (Sanic's) and the
-    peer's ``up`` until either ends, verbatim both ways: a text frame stays
-    text, a binary one binary, nothing is parsed. Returns why it ended:
-    ``page``, ``shutdown``, ``peer``, ``idle``, ``revoked`` or ``error``.
+                        stopping=lambda: False, log) -> str:
+    """Relay messages between the page's socket ``down`` (Sanic's) and the
+    peer's ``up`` until either ends, unchanged both ways: a text message
+    stays text, a binary one binary, nothing is parsed. (Each leg keeps its
+    own framing and its own pings.) Returns why it ended: ``page``,
+    ``shutdown``, ``peer``, ``idle``, ``revoked`` or ``error``.
 
-    * The page closed: the peer gets 1000. This broker going away (Sanic
-      sent the page a close first, or cancelled this handler): 1001.
+    * The page went (its close, a dropped connection, or a close Sanic
+      started, e.g. 1009 for an oversized message): the peer gets 1000.
+    * ``stopping()`` is true (this broker is stopping -- the caller's
+      explicit signal, never guessed from the close order): both get 1001.
     * The peer closed: the page gets the peer's code and reason when a
       close frame may carry them, else 1012 (no close frame at all, or a
-      code like 1006 or 2000).
-    * No frame either way for ``idle_s`` (:data:`PEER_WS_IDLE_S`): both get
-      1000 ``idle``.
+      code like 1005 or 2000).
+    * No message either way for ``idle_s`` (:data:`PEER_WS_IDLE_S`): both
+      get 1000 ``idle``.
     * ``stop`` (a future, :class:`Pair`) resolved with ``(why, page code,
       page reason, peer code)``: the peer's leg is closed first, then the
       page's, each with its own code (revoked: 1000, then 4401).
@@ -339,7 +339,13 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
 
     Each direction awaits its send before reading again, so a slow reader
     slows the writer (Sanic's ``send`` waits for the transport to drain;
-    the upstream buffer is ``max_queue`` frames). Nothing reconnects."""
+    the upstream buffer is ``max_queue`` messages). Nothing reconnects.
+
+    Sanic cancels this coroutine when the page's connection is lost and
+    when the server stops, possibly more than once. Every close therefore
+    runs in ONE shielded, strongly referenced task (drained at server stop
+    by :func:`drain_closes`): a cancellation still propagates to the
+    caller, but can never abandon a close half-way."""
     from websockets.protocol import State
     loop = asyncio.get_running_loop()
     idle_s = PEER_WS_IDLE_S if idle_s is None else idle_s
@@ -370,56 +376,61 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
     tasks = [loop.create_task(down_to_up()), loop.create_task(up_to_down()),
              loop.create_task(watchdog())]
     waits = tasks + ([stop] if stop is not None else [])
+    cancelled = False
     try:
         done, _ = await asyncio.wait(waits,
                                      return_when=asyncio.FIRST_COMPLETED)
     except asyncio.CancelledError:
-        # Sanic cancels a socket's handler when its connection is lost (the
-        # page closed) and, first thing, when the server stops (its own
-        # before_server_stop listener) -- then it would close the page 1000.
-        # A page socket still open here is the stop: both legs get 1001.
-        # Sanic may cancel again while this runs; the closes are shielded
-        # so a second cancel still propagates but cannot abandon them.
-        code = _page_gone_code(down.ws_proto, State)
+        cancelled, done = True, set()
 
-        async def _closes():
-            await _cancel(tasks)
-            await _quiet_close(up, code)
-            if code == 1001:
-                await _quiet_close(down, 1001)
+    async def teardown() -> str:
+        await _cancel(tasks)
+        if cancelled:
+            # The page's connection is gone, or the server is stopping
+            # (then Sanic would close the page 1000 itself: say 1001).
+            if stopping():
+                await quiet_close(up, 1001)
+                await quiet_close(down, 1001)
+                return "shutdown"
+            await quiet_close(up, 1000)
+            return "page"
+        if tasks[2] in done:
+            await quiet_close(down, 1000, "idle")
+            await quiet_close(up, 1000)
+            return "idle"
+        if stop is not None and stop in done and not stop.cancelled():
+            # Explicit codes, B's leg first.
+            why, down_code, reason, up_code = stop.result()
+            await quiet_close(up, up_code)
+            await quiet_close(down, down_code, reason)
+            return why
+        if up.state in (State.CLOSING, State.CLOSED):
+            # The peer's own close frame, read as soon as it arrived
+            # (``close_code`` stays None until the TCP connection is gone).
+            rcvd = up.protocol.close_rcvd
+            code, reason = _sendable(rcvd.code if rcvd else None,
+                                     rcvd.reason if rcvd else "")
+            await quiet_close(down, code, reason)
+            return "peer"
+        if down.ws_proto.state in (State.CLOSING, State.CLOSED):
+            if stopping():
+                await quiet_close(up, 1001)
+                return "shutdown"
+            await quiet_close(up, 1000)
+            return "page"
+        exc = next((t.exception() for t in tasks
+                    if t.done() and not t.cancelled() and t.exception()),
+                   None)
+        log("peer %s: %s socket ended (%s)", peer_id, route,
+            type(exc).__name__ if exc is not None else "no error")
+        await quiet_close(down, 1011)
+        await quiet_close(up, 1011)
+        return "error"
 
-        await asyncio.shield(_detached(_closes()))
-        raise
-    await _cancel(tasks)
-    if tasks[2] in done:
-        await _quiet_close(down, 1000, "idle")
-        await _quiet_close(up, 1000)
-        return "idle"
-    if stop is not None and stop in done and not stop.cancelled():
-        # Explicit codes, B's leg first: never the close-order rule below.
-        why, down_code, reason, up_code = stop.result()
-        await _quiet_close(up, up_code)
-        await _quiet_close(down, down_code, reason)
-        return why
-    if up.state in (State.CLOSING, State.CLOSED):
-        # The peer's own close frame, read as soon as it arrived
-        # (``close_code`` stays None until the TCP connection is gone).
-        rcvd = up.protocol.close_rcvd
-        code, reason = _sendable(rcvd.code if rcvd else None,
-                                 rcvd.reason if rcvd else "")
-        await _quiet_close(down, code, reason)
-        return "peer"
-    if down.ws_proto.state in (State.CLOSING, State.CLOSED):
-        code = _page_gone_code(down.ws_proto, State)
-        await _quiet_close(up, code)
-        return "shutdown" if code == 1001 else "page"
-    exc = next((t.exception() for t in tasks
-                if t.done() and not t.cancelled() and t.exception()), None)
-    log("peer %s: %s socket ended (%s)", peer_id, route,
-        type(exc).__name__ if exc is not None else "no error")
-    await _quiet_close(down, 1011)
-    await _quiet_close(up, 1011)
-    return "error"
+    why = await asyncio.shield(_detached(teardown()))
+    if cancelled:
+        raise asyncio.CancelledError()
+    return why
 
 
 # ---- the registry -------------------------------------------------------------

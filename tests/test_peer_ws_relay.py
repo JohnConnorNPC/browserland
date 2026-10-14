@@ -69,7 +69,8 @@ class Counting:
             yield frame
 
 
-async def _start(fake, path, idle_s=None, wrap=None, down=None):
+async def _start(fake, path, idle_s=None, wrap=None, down=None,
+                 stopping=False):
     n = len(fake.conns)
     up = await ps.dial_upstream(_url(fake, path), BT)
     conn = fake.wait_conn(n + 1)
@@ -78,7 +79,7 @@ async def _start(fake, path, idle_s=None, wrap=None, down=None):
     relay_up = wrap(up) if wrap else up
     task = asyncio.ensure_future(ps.relay_sockets(
         down, relay_up, peer_id="b", route="ws", idle_s=idle_s,
-        log=lambda *a: logged.append(a)))
+        stopping=lambda: stopping, log=lambda *a: logged.append(a)))
     return up, conn, down, task, logged, relay_up
 
 
@@ -234,8 +235,8 @@ async def test_a_page_close_closes_the_peer_1000(fake):
 
 
 async def test_server_shutdown_closes_the_peer_1001(fake):
-    # Sanic's close_if_idle: the server sends the page 1001 first.
-    up, conn, down, task, _, _ = await _start(fake, "/never")
+    # Sanic's close_if_idle at a stop: the server sends the page 1001 first.
+    up, conn, down, task, _, _ = await _start(fake, "/never", stopping=True)
     await asyncio.sleep(0.1)
     down.server_close(1001)
     assert await asyncio.wait_for(task, 3) == "shutdown"
@@ -244,9 +245,39 @@ async def test_server_shutdown_closes_the_peer_1001(fake):
     assert conn.closed[0] == 1001
 
 
-async def test_a_cancelled_handler_closes_the_peer_1001(fake):
-    # Sanic's _cancel_websocket_tasks, the page's socket still open.
+async def test_a_server_first_close_that_is_no_stop_is_1000(fake):
+    # Codex MUST 3: Sanic also closes first for a 1009 (an oversized
+    # message) or a protocol error. Only the stop signal means 1001.
     up, conn, down, task, _, _ = await _start(fake, "/never")
+    await asyncio.sleep(0.1)
+    down.server_close(1009)
+    assert await asyncio.wait_for(task, 3) == "page"
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, conn.done.wait, 1.0)
+    assert conn.closed[0] == 1000
+
+
+async def test_a_cancel_during_teardown_cannot_abandon_the_closes(fake):
+    # Codex MUST 1: the peer closed, the relay is closing the page, and
+    # Sanic cancels the handler right then: the close still completes.
+    down = FakeDown()
+    down.close_gate = asyncio.Event()
+    up, conn, down, task, _, _ = await _start(fake, "/close-4409", down=down)
+    await asyncio.sleep(0.5)                 # the teardown waits on the gate
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    down.close_gate.set()
+    for _ in range(100):
+        if down.close_code is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert (down.close_code, down.close_reason) == (4409, "deactivated")
+
+
+async def test_a_cancelled_handler_closes_the_peer_1001(fake):
+    # Sanic's _cancel_websocket_tasks at a stop, the page's socket open.
+    up, conn, down, task, _, _ = await _start(fake, "/never", stopping=True)
     await asyncio.sleep(0.1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

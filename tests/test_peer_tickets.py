@@ -82,7 +82,7 @@ def test_a_ticket_is_43_random_chars_and_holds_no_token():
         assert B_TOKEN not in t and A_TOKEN not in t
     # The store never holds A's token, only its digest.
     assert A_TOKEN not in set(_strings(store))
-    assert TID != A_TOKEN and len(TID) == 16
+    assert TID != A_TOKEN and len(TID) == 64       # the full SHA-256
 
 
 def test_a_ticket_redeems_once():
@@ -220,6 +220,15 @@ def test_nothing_of_b_token_survives_a_dropped_ticket():
     t = _mint(store)
     assert _redeem(store, t, cid="other") is None
     assert B_TOKEN not in set(_strings(store))
+
+
+def test_an_id_collision_never_overwrites_a_held_slot(monkeypatch):
+    store, cap, _ = _store()
+    ids = iter(["same", "same", "other"])
+    monkeypatch.setattr(ps.secrets, "token_urlsafe", lambda n: next(ids))
+    assert _mint(store) == "same"
+    assert _mint(store) == "other"
+    assert len(store) == 2 and cap._busy == {"b": 2}
 
 
 def test_a_ticket_repr_names_no_secret():
