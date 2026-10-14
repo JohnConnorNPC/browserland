@@ -27,18 +27,23 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from ..protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
+# The pairing header and the origin's canonical form are shared with the
+# mcptool client (#252 phase 3), which must not import the broker.
+from ..protocol import (MCP_ADMIN_HEADER, ORIGIN_DEFAULT_PORTS as
+                        _DEFAULT_PORTS, ORIGIN_RE as _ORIGIN_RE,
+                        PEER_ORIGIN_HEADER, SCOPE_HEADER, normalize_origin)
 
 #: The browser gate's second credential: B's browser token, carried beside A's
 #: own bearer. A never forwards it under this name (it becomes the upstream
 #: ``Authorization``) and never stores it.
 PEER_TOKEN_HEADER = "X-Browserland-Peer-Token"
 
-#: The pairing header: the origin the page paired that token with. A compares
-#: it to the configured origin BEFORE any dial and answers 409
-#: ``peer_origin_changed`` on a mismatch (a missing header is a mismatch), so a
-#: page that has not seen a re-pointed origin cannot send B's token to it.
-PEER_ORIGIN_HEADER = "X-Browserland-Peer-Origin"
+#: The pairing header (``PEER_ORIGIN_HEADER``) lives in webterm/protocol.py
+#: and is imported above: the origin the page paired that token with. A
+#: compares it to the configured origin BEFORE any dial and answers 409
+#: ``peer_origin_changed`` on a mismatch (a missing header is a mismatch on
+#: the browser gate), so a page that has not seen a re-pointed origin cannot
+#: send B's token to it. On the MCP gate it is checked only when sent.
 
 #: Set on every refusal THIS broker writes for a /peer/* request, naming
 #: the error. It is not on the response allowlist, so a peer can never send
@@ -90,58 +95,13 @@ PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 #: (``"orgin"``) is an error instead of a peer with no origin.
 _PEER_KEYS = frozenset({"origin", "mcp"})
 
-#: Shape of a rebuilt origin (lower-case host chars or a bracketed IPv6
-#: literal, an optional port) -- a last belt over the URL parser's output.
-_ORIGIN_RE = re.compile(
-    r"https?://(?:[a-z0-9.\-]+|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?")
-
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
 #: Host names that reach this machine whatever the bind address says.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0",
                              "::"})
 
 
-def normalize_origin(raw: Any) -> Tuple[Optional[str], Optional[str]]:
-    """``(origin, None)`` for an acceptable peer origin, else ``(None, why)``.
-
-    The origin is ``http`` or ``https`` with a host and an optional port:
-    no userinfo, no path (a lone trailing ``/`` is tolerated and dropped), no
-    query, no fragment. It comes back rebuilt as ``scheme://host[:port]``,
-    lower-case, with a default port dropped -- never the operator's bytes.
-    """
-    if not isinstance(raw, str) or not raw:
-        return None, "origin must be a non-empty string"
-    if any(ch <= " " or ch in "\\\x7f" for ch in raw):
-        return None, "origin must not contain whitespace or backslashes"
-    try:
-        parts = urllib.parse.urlsplit(raw)
-        port = parts.port
-    except ValueError:
-        return None, "origin has an invalid port"
-    if parts.scheme not in _DEFAULT_PORTS:
-        return None, "origin must be http or https"
-    if "@" in parts.netloc or parts.username is not None:
-        return None, "origin must not carry userinfo"
-    if parts.path not in ("", "/"):
-        return None, "origin must not carry a path"
-    if parts.query or "?" in raw:
-        return None, "origin must not carry a query"
-    if parts.fragment or "#" in raw:
-        return None, "origin must not carry a fragment"
-    # A trailing dot is the same DNS name ("localhost." is localhost).
-    host = (parts.hostname or "").lower().rstrip(".")
-    if not host:
-        return None, "origin must name a host"
-    if port is not None and not 1 <= port <= 65535:
-        return None, "origin has an invalid port"
-    netloc = f"[{host}]" if ":" in host else host
-    if port is not None and port != _DEFAULT_PORTS[parts.scheme]:
-        netloc += f":{port}"
-    origin = f"{parts.scheme}://{netloc}"
-    if not _ORIGIN_RE.fullmatch(origin):
-        return None, "origin has an invalid host"
-    return origin, None
+# normalize_origin (and the origin shape it checks) lives in
+# webterm/protocol.py, imported above.
 
 
 def _is_self(origin: str, self_port: int, self_hosts: Iterable[str]) -> bool:

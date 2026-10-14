@@ -54,7 +54,8 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from typing import Any, Dict, Optional
+import urllib.parse
+from typing import Any, Dict, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,69 @@ SCOPE_HEADER = "X-Browserland-Scope"
 #: without pulling in the broker. Deliberately a different header from #191's
 #: ``X-Webterm-Admin`` so the two credential classes never share one slot.
 MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
+
+
+# ---------------------------------------------------------------------------
+# Peer proxy (#252): the pairing header and an origin's canonical form
+# ---------------------------------------------------------------------------
+# Shared by the broker's /peer/ gates (webterm/broker/peers.py) and the
+# mcptool client, which sends the pairing for a host configured with a
+# ``peer_origin``: one spelling of the header, and one canonical form, so a
+# correct config never reads as a re-pointed peer.
+
+#: The pairing header: the origin the client paired the peer's token with.
+#: The browser gate requires it; the MCP gate checks it when it is sent. A
+#: mismatch is 409 ``peer_origin_changed``, before any dial.
+PEER_ORIGIN_HEADER = "X-Browserland-Peer-Origin"
+
+#: Shape of a rebuilt origin (lower-case host chars or a bracketed IPv6
+#: literal, an optional port) -- a last belt over the URL parser's output.
+ORIGIN_RE = re.compile(
+    r"https?://(?:[a-z0-9.\-]+|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?")
+
+ORIGIN_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def normalize_origin(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(origin, None)`` for an acceptable peer origin, else ``(None, why)``.
+
+    The origin is ``http`` or ``https`` with a host and an optional port:
+    no userinfo, no path (a lone trailing ``/`` is tolerated and dropped), no
+    query, no fragment. It comes back rebuilt as ``scheme://host[:port]``,
+    lower-case, with a default port dropped -- never the operator's bytes.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None, "origin must be a non-empty string"
+    if any(ch <= " " or ch in "\\\x7f" for ch in raw):
+        return None, "origin must not contain whitespace or backslashes"
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None, "origin has an invalid port"
+    if parts.scheme not in ORIGIN_DEFAULT_PORTS:
+        return None, "origin must be http or https"
+    if "@" in parts.netloc or parts.username is not None:
+        return None, "origin must not carry userinfo"
+    if parts.path not in ("", "/"):
+        return None, "origin must not carry a path"
+    if parts.query or "?" in raw:
+        return None, "origin must not carry a query"
+    if parts.fragment or "#" in raw:
+        return None, "origin must not carry a fragment"
+    # A trailing dot is the same DNS name ("localhost." is localhost).
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host:
+        return None, "origin must name a host"
+    if port is not None and not 1 <= port <= 65535:
+        return None, "origin has an invalid port"
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != ORIGIN_DEFAULT_PORTS[parts.scheme]:
+        netloc += f":{port}"
+    origin = f"{parts.scheme}://{netloc}"
+    if not ORIGIN_RE.fullmatch(origin):
+        return None, "origin has an invalid host"
+    return origin, None
 
 
 # ---------------------------------------------------------------------------

@@ -696,3 +696,63 @@ async def test_a_declared_oversize_mcp_body_is_refused_unread(live, upstream):
         s.close()
     assert head.startswith(b"HTTP/1.1 413"), head[:60]
     assert upstream.hits("/mcp/read") == 0
+
+
+
+# ---- the MCP gate's pairing (#252 phase 3, A9) ---------------------------------
+
+def _mcp(origin=None, bearer=B_MCP):
+    h = {}
+    if bearer is not None:
+        h["Authorization"] = "Bearer " + bearer
+    if origin is not None:
+        h[peers.PEER_ORIGIN_HEADER] = origin
+    return h
+
+
+async def test_the_mcp_gate_relays_a_matching_pairing(live, upstream):
+    """P3-7: an mcptool host configured with the peer's origin sends it; it
+    matches, the call is relayed, and the header itself never crosses."""
+    r = await _get(live, "/peer/m/mcp/terminals", _mcp(upstream.origin))
+    assert r.status_code == 200, r.text
+    assert upstream.hits("/mcp/terminals") == 1
+    assert upstream.seen[-1].one(peers.PEER_ORIGIN_HEADER) is None
+
+
+async def test_the_mcp_gate_without_the_pairing_relays_as_before(live,
+                                                                upstream):
+    r = await _get(live, "/peer/m/mcp/terminals", _mcp())
+    assert r.status_code == 200, r.text
+    assert upstream.hits("/mcp/terminals") == 1
+
+
+@pytest.mark.parametrize("sent", ["http://elsewhere:4445", ""])
+async def test_a_stale_mcp_pairing_is_409_without_a_dial(live, upstream,
+                                                         sent):
+    """A sent pairing that is not the configured origin -- an empty one
+    included -- is refused before any dial, with this broker's marker."""
+    r = await _get(live, "/peer/m/mcp/terminals", _mcp(sent))
+    assert r.status_code == 409
+    assert r.json() == {"error": "peer_origin_changed"}
+    assert r.headers[peers.PEER_REFUSAL_HEADER] == "peer_origin_changed"
+    _hardened(r)
+    assert upstream.seen == []
+
+
+async def test_the_mcp_pairing_rung_sits_after_the_gate_and_before_the_table(
+        live, upstream):
+    """S8: no bearer is still 401 first, a peer that did not opt in is still
+    404 unknown_peer; a path off the table with a stale pairing is the 409
+    (the check runs before the table), with a good one the table's 404."""
+    r = await _get(live, "/peer/m/mcp/terminals",
+                   _mcp("http://elsewhere:4445", bearer=None))
+    assert r.status_code == 401
+    r = await _get(live, "/peer/b/mcp/terminals",
+                   _mcp("http://elsewhere:4445"))
+    assert (r.status_code, r.json()) == (404, {"error": "unknown_peer"})
+    r = await _get(live, "/peer/m/mcp/nowhere", _mcp("http://elsewhere:4445"))
+    assert (r.status_code, r.json()) == (409, {"error": "peer_origin_changed"})
+    r = await _get(live, "/peer/m/mcp/nowhere", _mcp(upstream.origin))
+    assert r.status_code == 404
+    assert r.json()["error"] != "peer_origin_changed"
+    assert upstream.seen == []
