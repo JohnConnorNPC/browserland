@@ -35,7 +35,9 @@ publishes; the one at the host's own address comes first, marked
 "(same address)"). The menu appears once this broker can relay, and a host
 already reached this way always keeps **direct** as its way back. Switching
 keeps the host's id, label and colour, and its open terminals reconnect the
-new way at once. You still need the other
+new way at once. A switch that would give the list two entries for the same
+way in — two direct hosts at one address, or two hosts through one peer — is
+refused with **host already configured**, as adding one would be. You still need the other
 broker's password: it is sent along with this broker's own, and this broker
 never saves it (opening a terminal holds it in memory for at most 30
 seconds, until that terminal connects). It is tied to the address the operator configured — if the

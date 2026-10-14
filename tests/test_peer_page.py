@@ -1328,7 +1328,8 @@ def _mode(tmp_path, hosts, body, info=INFO):
 #: A dotted DNS name: the only kind of origin a switch keeps a token for
 #: (round 1b S3).
 DOTTED = "https://b.example.com"
-DOTTED_INFO = {"ok": True, "peers": {"b": DOTTED}, "peer_proxy": True}
+DOTTED_INFO = {"ok": True, "peers": {"b": DOTTED, "c": DOTTED, "e": DOTTED},
+               "peer_proxy": True}
 
 
 SNAP = """
@@ -1347,17 +1348,18 @@ def test_switching_a_host_to_from_server_and_back(tmp_path):
     out = _mode(tmp_path, [
         _direct("same", url=DOTTED, token="T1", brokerId="B-ID"),
         _direct("other", url="http://d:4445", token="T2"),
-        _via("paired", url=DOTTED, peerOrigin=DOTTED, token="T3"),
-        _via("unpaired", url=DOTTED, token="T4", peerOrigin=""),
+        _via("paired", peer="c", url=DOTTED, peerOrigin=DOTTED, token="T3"),
+        _via("unpaired", peer="c", url="https://u.example.com", token="T4",
+             peerOrigin=""),
     ], SNAP + """
 const r = {};
 r.same = [setHostMode('same', 'b', info), snap('same')];
-r.other = [setHostMode('other', 'b', info), snap('other')];
+r.other = [setHostMode('other', 'e', info), snap('other')];
 r.paired = [setHostMode('paired', null, info), snap('paired')];
 r.unpaired = [setHostMode('unpaired', null, info), snap('unpaired')];
 r.local = setHostMode('local', 'b', info);
 r.unknownPeer = setHostMode('other', 'zz', info);
-r.samePeer = setHostMode('other', 'b', info);
+r.samePeer = setHostMode('other', 'e', info);
 r.unknownId = setHostMode('nope', null, info);
 return { r: r, invalidated: invalidated, emitted: emitted,
          saves: saves.length };
@@ -1368,7 +1370,7 @@ return { r: r, invalidated: invalidated, emitted: emitted,
                                 "peerOrigin": DOTTED,
                                 "brokerId": ""}]
     assert r["other"] == [True, {"url": DOTTED, "token": "",
-                                 "via": "server", "peerId": "b",
+                                 "via": "server", "peerId": "e",
                                  "peerOrigin": DOTTED,
                                  "brokerId": ""}]
     assert r["paired"] == [True, {"url": DOTTED, "token": "T3",
@@ -1395,8 +1397,10 @@ return [setHostMode('d', 'b', info), snap('d').via,
 
 
 def test_a_proxied_host_moved_to_another_peer_drops_its_token(tmp_path):
-    info = dict(INFO, peers={"b": "http://b:4448", "c": "http://b:4448"})
-    out = _mode(tmp_path, [_via("p", token="T3")], SNAP + """
+    # a dotted origin, so only "it was paired with another peer" drops it
+    info = dict(INFO, peers={"b": DOTTED, "c": DOTTED})
+    out = _mode(tmp_path, [_via("p", url=DOTTED, peerOrigin=DOTTED,
+                                token="T3")], SNAP + """
 return [setHostMode('p', 'c', info), snap('p')];
 """, info=info)
     assert out[0] is True
@@ -1419,10 +1423,10 @@ def test_an_ambiguous_origin_never_keeps_a_token(tmp_path, origin):
     own networks, so only a dotted DNS name outside the local-only suffixes
     is taken to mean one machine to both. Everything else asks again, in
     both directions."""
-    info = dict(INFO, peers={"l": origin})
+    info = dict(INFO, peers={"l": origin, "m": origin})
     out = _mode(tmp_path, [
         _direct("d", url=origin, token="T1"),
-        _via("p", peer="l", url=origin, peerOrigin=origin, token="T2"),
+        _via("p", peer="m", url=origin, peerOrigin=origin, token="T2"),
     ], SNAP + """
 return [setHostMode('d', 'l', info), snap('d').token,
         setHostMode('p', null, info), snap('p').token];
@@ -1434,10 +1438,10 @@ return [setHostMode('d', 'l', info), snap('d').token,
                                     "http://b.example.com:4448",
                                     "https://box.tailnet-x.ts.net"])
 def test_a_dotted_dns_name_keeps_its_token_both_ways(tmp_path, origin):
-    info = dict(INFO, peers={"l": origin})
+    info = dict(INFO, peers={"l": origin, "m": origin})
     out = _mode(tmp_path, [
         _direct("d", url=origin, token="T1"),
-        _via("p", peer="l", url=origin, peerOrigin=origin, token="T2"),
+        _via("p", peer="m", url=origin, peerOrigin=origin, token="T2"),
     ], SNAP + """
 return [originKeepsToken(info.peers.l), setHostMode('d', 'l', info),
         snap('d').token, setHostMode('p', null, info), snap('p').token];
@@ -1525,6 +1529,8 @@ function reattachWindow(w) { redialed.push(w.key); }
 function openControlWs(h) { controlOpened.push(h.id); }
 function renderHostsList() { hostListRenders++; }
 function _emitModEvent() {}
+const hostErrors = [];
+function setHostError(m) { hostErrors.push(m); }
 """
 
 
@@ -1535,11 +1541,13 @@ windows.set('w1', { key: 'w1', hostId: 'rd', reattachAttempts: 3 });
 windows.set('w2', { key: 'w2', hostId: 'rd' });
 windows.set('w3', { key: 'w3', hostId: 'rb' });
 windows.set('w4', { key: 'w4', hostId: 'rd', disposed: true });
-const changed = await switchHostMode('rd', 'b');
+const changed = await switchHostMode('rd', 'c');
 return { changed: changed, redialed: redialed, control: controlOpened,
          attempts: windows.get('w1').reattachAttempts,
          renders: hostListRenders, via: hostById('rd').via };
-""".replace("INFO", json.dumps(INFO)), extra_src=REHOME_STUBS + _osc_src())
+""".replace("INFO", json.dumps(dict(INFO, peers={"b": "http://b:4448",
+                                                 "c": "http://c:4448"}))),
+               extra_src=REHOME_STUBS + _osc_src())
     assert out == {"changed": True, "redialed": ["w1", "w2"],
                    "control": ["rd"], "attempts": 0, "renders": 1,
                    "via": "server"}
@@ -1790,3 +1798,46 @@ def test_the_host_notes_take_their_own_line_under_the_row():
     assert note.get("flex") == "1 0 100%"
     assert note.get("order") == "1"
     assert note.get("white-space") == "normal"
+
+
+TWIN_BODY = SNAP + """
+const before = JSON.stringify(getHosts());
+const r = setHostMode(ID, PEER, info);
+const unchanged = JSON.stringify(getHosts()) === before;
+const ui = await switchHostMode(ID, PEER);
+return { r: r, unchanged: unchanged, ui: ui, errors: hostErrors,
+         saves: saves.length, invalidated: invalidated,
+         redialed: redialed, control: controlOpened,
+         renders: hostListRenders };
+"""
+
+
+@pytest.mark.parametrize("hosts, id_, peer", [
+    # a proxied record switched to direct next to a direct one at its url
+    ([("direct", "d"), ("via", "p")], "p", None),
+    # a direct record switched to a peer another record already uses
+    ([("via", "p"), ("direct", "q", "http://q:4445")], "q", "b"),
+])
+def test_a_switch_that_would_make_a_twin_is_refused(tmp_path, hosts, id_,
+                                                    peer):
+    """Round 1b S2: the add/edit forms refuse a second direct record at one
+    url and a second record for one peer; so does the switch -- the same
+    words, nothing written, nothing re-dialed."""
+    recs = []
+    for h in hosts:
+        if h[0] == "direct":
+            recs.append(_direct(h[1], url=(h[2] if len(h) > 2 else DOTTED),
+                                token="T"))
+        else:
+            recs.append(_via(h[1], url=DOTTED, peerOrigin=DOTTED, token="T"))
+    out = _run(tmp_path, {"_hosts": [{"id": "local", "token": A_TOKEN}]
+                          + recs},
+               "infoAnswers = [" + json.dumps(DOTTED_INFO) + "];\n"
+               "const info = { proxy: true, peers: { b: '" + DOTTED + "' } };\n"
+               + TWIN_BODY.replace("ID", json.dumps(id_))
+               .replace("PEER", json.dumps(peer)),
+               extra_src=REHOME_STUBS + _osc_src())
+    assert out == {"r": False, "unchanged": True, "ui": False,
+                   "errors": ["host already configured"], "saves": 0,
+                   "invalidated": [], "redialed": [], "control": [],
+                   "renders": 1}

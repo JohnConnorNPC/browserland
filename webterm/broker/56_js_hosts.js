@@ -219,7 +219,20 @@
         // another dialer is another endpoint until it answers for itself),
         // and so is the OSC 52 grant (its key carries the pairing, and the
         // prune runs NOW, so switching back cannot revive it unchecked).
+        // Why the last setHostMode refused, when the user should be told
+        // (the Hosts form's own words), else ''.
+        let _hostModeRefusal = '';
+        // Would this switch leave two records for one way in -- a second
+        // direct record at one url, or a second record for one peer id? The
+        // add and edit forms refuse exactly that (83: duplicate chips, and a
+        // Terminate that hits a twin), so the switch refuses it too.
+        function _hostModeTwin(h, peerId) {
+            return getHosts().some(o => o !== h && (peerId
+                ? (o.via === 'server' && o.peerId === peerId)
+                : (o.via !== 'server' && o.url === h.url)));
+        }
         function setHostMode(id, peerId, info) {
+            _hostModeRefusal = '';
             const h = hostById(id);
             if (!h || h.id === 'local') return false;
             if (peerId) {
@@ -227,6 +240,10 @@
                 const origin = info.peers[peerId];
                 if (typeof origin !== 'string') return false;
                 if (hostIsProxied(h) && h.peerId === peerId) return false;
+                if (_hostModeTwin(h, peerId)) {
+                    _hostModeRefusal = 'host already configured';
+                    return false;
+                }
                 const keep = !hostIsProxied(h) && !!h.token
                     && normalizeHostUrl(h.url) === origin
                     && originKeepsToken(origin);
@@ -237,6 +254,10 @@
                 h.url = origin;
             } else {
                 if (!hostIsProxied(h)) return false;
+                if (_hostModeTwin(h, null)) {
+                    _hostModeRefusal = 'host already configured';
+                    return false;
+                }
                 const keep = !!h.token && !!h.peerOrigin
                     && h.peerOrigin === h.url && originKeepsToken(h.url);
                 if (!keep) h.token = '';
@@ -315,6 +336,9 @@
             const changed = setHostMode(id, peerId || null, info);
             if (changed) rehomeHostSockets(id);
             renderHostsList();
+            // After the render: the Hosts form's error line, as the add form
+            // reports the same refusal (the select snaps back on render).
+            if (!changed && _hostModeRefusal) setHostError(_hostModeRefusal);
             return changed;
         }
 

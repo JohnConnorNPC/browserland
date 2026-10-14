@@ -483,7 +483,10 @@ Hosts row's mode control writes them (a registry import never does).
   a name under `.localhost`, `.local`, `.lan`, `.internal`, `.home.arpa` or
   `.localdomain` never keeps it, since the browser and this broker may
   resolve it to different machines. A switch drops the learned broker id and the OSC 52
-  grant, and re-dials that host's sockets.
+  grant, and re-dials that host's sockets. A switch that would make a twin
+  (a second direct record at that url, or a second record for that peer id)
+  is refused like the add form refuses it: nothing written, nothing
+  re-dialed, the Hosts form says "host already configured".
 * **OSC 52** grants are keyed `[id, url]` for a direct host (unchanged) and
   `[id, url, peerId, peerOrigin]` for a proxied one, so a re-pointed,
   re-paired or switched peer loses its grant.
