@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
 import sys
 
@@ -117,8 +118,11 @@ async def ticket(live, peer, origin, route="ws", cid="c1"):
 async def page(live, peer, route, qs, t):
     url = "ws://127.0.0.1:%d/peer/%s/%s?%s%sticket=%s" % (
         live.port, peer, route, qs, "&" if qs else "", t)
+    # The page's own client logs under a name of its own, so a log scan
+    # sees only what the broker under test wrote.
     return await connect(url, proxy=None, open_timeout=5,
-                         compression=None, max_size=None)
+                         compression=None, max_size=None,
+                         logger=logging.getLogger("test.page"))
 
 
 async def opened(fake, live, peer, route, qs, t):
@@ -150,6 +154,21 @@ async def wait_for(pred, timeout=3.0):
             return True
         await asyncio.sleep(0.02)
     return pred()
+
+
+def assert_log_clean(caplog, *secrets):
+    """No record names a token, a ticket, an address of B's, or the text
+    of an exception: a dial failure is logged by its class alone."""
+    text = "\n".join(r.getMessage() for r in caplog.records
+                     if not r.name.startswith("test.page"))
+    for needle in ("token=", "ticket=", TEST_TOKEN, B_TOKEN) + secrets:
+        assert needle not in text, needle
+    failed = [r.getMessage() for r in caplog.records
+              if " socket for " in r.getMessage()
+              and " failed (" in r.getMessage()]
+    assert failed, "no dial-failure line was logged"
+    for line in failed:
+        assert re.search(r" failed \([A-Za-z_][A-Za-z0-9_]*\)$", line), line
 
 
 def conn_closed(conn, timeout=3.0):
@@ -540,7 +559,9 @@ async def test_a_stopping_broker_closes_the_peer_1001(tmp_path, fake):
     ws.transport.abort()
 
 
-async def test_a_dead_peer_is_1011_and_frees_its_slot(tmp_path, fake):
+async def test_a_dead_peer_is_1011_and_frees_its_slot(tmp_path, fake,
+                                                     caplog):
+    caplog.set_level(logging.DEBUG)
     dead = _dead_origin()
     app = _make_app(tmp_path, {"d": {"origin": dead}})
     srv = LiveApp(app).start()
@@ -553,6 +574,26 @@ async def test_a_dead_peer_is_1011_and_frees_its_slot(tmp_path, fake):
         assert r.status_code == 200
     finally:
         srv.stop()
+    # Review round 1: the failure path is scanned too.
+    assert_log_clean(caplog, t, dead.split("//")[1], dead.rsplit(":", 1)[1])
+
+
+async def test_a_redirecting_peer_is_1011_and_followed_nowhere(live, fake,
+                                                              http_b,
+                                                              caplog):
+    caplog.set_level(logging.DEBUG)
+    seen = len(http_b.seen)
+    fake.redirect_to = "ws://127.0.0.1:%d/elsewhere" % http_b.port
+    try:
+        t = await ticket(live, "b", fake.origin)
+        ws = await page(live, "b", "ws", "clientId=c1", t)
+        assert await closed_with(ws, 6.0) == (1011, "peer_unreachable")
+    finally:
+        fake.redirect_to = None
+    assert len(http_b.seen) == seen
+    assert await wait_for(lambda: live.app.ctx.peer_sock_cap._busy == {})
+    assert_log_clean(caplog, t, str(fake.port), str(http_b.port),
+                     "elsewhere")
 
 
 # ---- the log ------------------------------------------------------------------
@@ -568,7 +609,8 @@ async def test_nothing_secret_is_logged(live, fake, caplog):
     reused = await page(live, "b", "ws", "clientId=c1-secretish", t)
     await closed_with(reused)
     await asyncio.sleep(0.2)
-    text = "\n".join(r.getMessage() for r in caplog.records)
+    text = "\n".join(r.getMessage() for r in caplog.records
+                     if not r.name.startswith("test.page"))
     assert "socket for c1-secre opened" in text
     for needle in ("token", B_TOKEN, TEST_TOKEN, t, str(fake.port),
                    "c1-secretish"):
