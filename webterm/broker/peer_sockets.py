@@ -198,7 +198,7 @@ def upstream_ws_url(origin: str, route: str, raw_qs: str) -> str:
     query = urllib.parse.urlencode(
         [(k, v) for k, v in urllib.parse.parse_qsl(
             peers.upstream_query(raw_qs), keep_blank_values=True)
-         if k != "ticket"])
+         if k.lower() != "ticket"])
     return (("wss" if scheme == "https" else "ws") + ":" + rest + "/"
             + route + ("?" + query if query else ""))
 

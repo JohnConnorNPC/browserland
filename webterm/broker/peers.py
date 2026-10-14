@@ -430,12 +430,13 @@ def upstream_headers(headers, *, gate: str, bearer: str,
 
 def upstream_query(raw_qs: str) -> str:
     """The query string A forwards: the client's, minus ``token`` and
-    ``auth``. B reads a query token BEFORE the bearer (auth.provided_token),
-    so a forwarded ``?token=`` would both leak A's token and override the
-    credential A set."""
+    ``auth`` in any letter case. B reads a query token BEFORE the bearer
+    (auth.provided_token), so a forwarded ``?token=`` would both leak A's
+    token and override the credential A set; B reads only the lower-case
+    names, but a ``Token=`` that crossed would still carry A's token to B."""
     pairs = urllib.parse.parse_qsl(raw_qs or "", keep_blank_values=True)
     return urllib.parse.urlencode(
-        [(k, v) for k, v in pairs if k not in ("token", "auth")])
+        [(k, v) for k, v in pairs if k.lower() not in ("token", "auth")])
 
 
 def forced_content_type(upstream_type: Optional[str]) -> str:

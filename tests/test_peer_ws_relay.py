@@ -93,6 +93,10 @@ def test_the_upstream_url_carries_no_credential():
                               "clientId=c1&ticket=T") \
         == "ws://127.0.0.1:4448/control?clientId=c1"
     assert ps.upstream_ws_url("http://b:2", "ws", "") == "ws://b:2/ws"
+    # Review round 1: any letter case.
+    assert ps.upstream_ws_url(
+        "http://b:2", "ws", "clientId=c&Token=X&AUTH=Y&Ticket=T&TICKET=U") \
+        == "ws://b:2/ws?clientId=c"
 
 
 # ---- the handshake ------------------------------------------------------------

@@ -163,6 +163,9 @@ def test_query_loses_token_and_auth_only():
     assert peers.upstream_query(
         "token=AAA&path=a%20b&auth=AAA&x=&id=7") == "path=a+b&x=&id=7"
     assert peers.upstream_query("") == ""
+    # Review round 1: any letter case (a phase-1 behaviour, tightened).
+    assert peers.upstream_query(
+        "Token=AAA&AUTH=AAA&tOkEn=AAA&x=1") == "x=1"
 
 
 @pytest.mark.parametrize("ctype,forced", [
