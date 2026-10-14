@@ -102,23 +102,34 @@
         // normalized origin when ids are unknown). hosts[0] is always local, so
         // the local record is the primary and is never itself flagged; a remote
         // pointing back at this broker is flagged dup-of-local.
+        // #252: per MODE. A record reached through this broker is keyed on its
+        // peer id, never on the url it displays, and a broker_id only matches
+        // within one mode: a direct record and a proxied record of the same
+        // broker are two ways in, not a duplicate.
+        function hostDupKey(h) {
+            if (hostIsProxied(h)) return JSON.stringify(['server', h.peerId]);
+            const origin = h.id === 'local'
+                ? window.location.origin : normalizeHostUrl(h.url);
+            return origin ? JSON.stringify(['direct', origin]) : '';
+        }
         function computeHostDuplicates(hosts) {
-            const byId = new Map();          // brokerId -> first host
-            const byOrigin = new Map();      // origin   -> first host
+            const byId = new Map();          // [mode, brokerId] -> first host
+            const byKey = new Map();         // hostDupKey      -> first host
             const dupOf = new Map();
             for (const h of hosts) {
-                const origin = h.id === 'local'
-                    ? window.location.origin : normalizeHostUrl(h.url);
-                if (h.brokerId && byId.has(h.brokerId)) {
-                    dupOf.set(h.id, byId.get(h.brokerId));
+                const key = hostDupKey(h);
+                const idKey = h.brokerId ? JSON.stringify(
+                    [hostIsProxied(h) ? 'server' : 'direct', h.brokerId]) : '';
+                if (idKey && byId.has(idKey)) {
+                    dupOf.set(h.id, byId.get(idKey));
                     continue;
                 }
-                if (!h.brokerId && origin && byOrigin.has(origin)) {
-                    dupOf.set(h.id, byOrigin.get(origin));
+                if (!h.brokerId && key && byKey.has(key)) {
+                    dupOf.set(h.id, byKey.get(key));
                     continue;
                 }
-                if (h.brokerId && !byId.has(h.brokerId)) byId.set(h.brokerId, h);
-                if (origin && !byOrigin.has(origin)) byOrigin.set(origin, h);
+                if (idKey && !byId.has(idKey)) byId.set(idKey, h);
+                if (key && !byKey.has(key)) byKey.set(key, h);
             }
             return dupOf;
         }
@@ -144,7 +155,12 @@
             }
             const hosts = getHosts();
             const editing = editingHostId ? hostById(editingHostId) : null;
-            if (hosts.some(h => h !== editing && h.url === url)) {
+            // #252: a record reached through this broker only DISPLAYS its
+            // url, so a direct record of the same machine is not a twin (both
+            // checks below). Spelled out, not hostIsProxied from 56, so this
+            // form still runs when a harness slices it alone.
+            const directAt = (h) => h.via !== 'server' && h.url === url;
+            if (hosts.some(h => h !== editing && directAt(h))) {
                 setHostError('host already configured');
                 return;
             }
@@ -241,7 +257,7 @@
                     // another browser's synced host list, can have landed the same
                     // URL while we waited). Without this the same broker gets two
                     // records — duplicate chips, and a Terminate that hits a twin.
-                    if (live.some(h => h.url === url)) {
+                    if (live.some(directAt)) {
                         setHostError('host already configured');
                         return;
                     }

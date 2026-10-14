@@ -75,7 +75,8 @@ const invalidated = [];
 let infoAnswers = [];
 let peerAnswer = null;
 let peerInflight = 0, peerInflightMax = 0;
-const window = { location: { protocol: 'http:', host: 'a:4445' } };
+const window = { location: { protocol: 'http:', host: 'a:4445',
+                             origin: 'http://a:4445' } };
 function savePrefs() { saves.push(1); }
 function invalidateHost(id) { invalidated.push(id); }
 async function fetch(url, o) {
@@ -934,3 +935,57 @@ def test_a_proxied_hosts_settings_tab_wording_is_used():
     a = tab.index("if (!entry) {")
     assert ("setHostLoadingEl.textContent = hostSettingsLoadError(tabId);"
             in tab[a:a + 400])
+
+
+DUP_STUBS = r"""
+function normalizeHostUrl(u) { return String(u || '').replace(/\/+$/, ''); }
+"""
+
+
+def _dups(tmp_path, hosts):
+    s83 = _src("83_js_broker_identity.js")
+    out = _run(tmp_path, {"_hosts": hosts}, """
+const m = computeHostDuplicates(getHosts());
+const o = {};
+for (const [k, v] of m) o[k] = v.id;
+return o;
+""", extra_src=DUP_STUBS + _func(s83, "hostDupKey")
+        + _func(s83, "computeHostDuplicates"))
+    return out
+
+
+def _via(id_, peer="b", **kw):
+    h = {"id": id_, "label": id_, "url": "http://b:4448", "token": "",
+         "via": "server", "peerId": peer, "peerOrigin": "http://b:4448"}
+    h.update(kw)
+    return h
+
+
+def _direct(id_, url="http://b:4448", **kw):
+    h = {"id": id_, "label": id_, "url": url, "token": ""}
+    h.update(kw)
+    return h
+
+
+def test_a_direct_and_a_proxied_record_of_one_broker_are_not_twins(tmp_path):
+    """P3-4 (A2): the duplicate check is per mode, keyed on the peer id for a
+    proxied record."""
+    local = {"id": "local"}
+    # same url, same learned broker_id, two modes -> nothing flagged
+    assert _dups(tmp_path, [local, _direct("d1", brokerId="B-ID"),
+                            _via("p1", brokerId="B-ID")]) == {}
+    # ...and without broker ids, the url alone does not join them either
+    assert _dups(tmp_path, [local, _direct("d1"), _via("p1")]) == {}
+    # two proxied records naming one peer ARE twins
+    assert _dups(tmp_path, [local, _via("p1"), _via("p2")]) == {"p2": "p1"}
+    # ...two naming different peers are not, whatever url they display
+    assert _dups(tmp_path, [local, _via("p1"), _via("p2", peer="c")]) == {}
+    # two proxied records of one broker under two peer ids, ids learned
+    assert _dups(tmp_path, [local, _via("p1", brokerId="B-ID"),
+                            _via("p2", peer="c", brokerId="B-ID")]) \
+        == {"p2": "p1"}
+    # unchanged: two direct records at one url, and one pointing back here
+    assert _dups(tmp_path, [local, _direct("d1"), _direct("d2")]) \
+        == {"d2": "d1"}
+    assert _dups(tmp_path, [local, _direct("d1", url="http://a:4445")]) \
+        == {"d1": "local"}

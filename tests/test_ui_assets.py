@@ -13596,6 +13596,37 @@ CASES.reset_local_view_is_not_a_lease_flip = async function () {
              geomGone: prefs['h1:7'] === undefined };
 };
 
+// #252 phase 3 (A2): a record reached THROUGH this broker only displays its
+// url, so adding a direct record of the same machine is not refused -- by the
+// pre-probe check or by the re-check after the probe's await. A DIRECT record
+// that lands during the await still refuses (the re-check is alive).
+CASES.a_direct_add_beside_a_proxied_record = async function () {
+    const via = { id: 'p1', url: 'http://box:4445', token: '', via: 'server',
+                  peerId: 'b', peerOrigin: 'http://box:4445' };
+    const out = {};
+    const add = async function (landing) {
+        _hostRecords = [{ id: 'local', url: '', token: '' }, via];
+        hostErrors.length = 0;
+        log.length = 0;
+        const real = probeBrokerId;
+        probeBrokerId = async function (url, token, o) {
+            if (landing) _hostRecords.push(landing);
+            return real(url, token, o);
+        };
+        hostLabelEl.value = 'box';
+        hostUrlEl.value = 'http://box:4445';
+        hostPassEl.value = 'p';
+        try { await commitHostForm(); } finally { probeBrokerId = real; }
+        return { n: getHosts().length, errors: hostErrors.slice(),
+                 probed: log.indexOf('probeBrokerId') !== -1 };
+    };
+    out.beside = await add(null);
+    out.proxiedLands = await add({ id: 'p2', url: 'http://box:4445',
+                                   via: 'server', peerId: 'c' });
+    out.directLands = await add({ id: 'd9', url: 'http://box:4445' });
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 Promise.resolve().then(CASES[want]).then(function (out) {
@@ -13673,6 +13704,20 @@ def test_a_host_add_and_a_host_edit_both_reach_the_bus(emit_harness):
     # duplicate. Neither mutated a host, so neither announced one.
     assert r["afterRefusals"] == 1
     assert r["hosts"] == ["local", r["addedId"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_direct_host_can_be_added_beside_a_proxied_record(emit_harness):
+    # #252 phase 3 (A2): both duplicate checks of the host form skip a record
+    # reached through this broker; the post-await re-check still refuses a
+    # direct twin that landed while the probe was out.
+    r = _run_emit(emit_harness, "a_direct_add_beside_a_proxied_record")
+    assert r["beside"] == {"n": 3, "errors": [""], "probed": True}
+    assert r["proxiedLands"]["n"] == 4
+    assert r["proxiedLands"]["errors"] == [""]
+    assert r["directLands"]["n"] == 3
+    assert r["directLands"]["errors"] == ["", "host already configured"]
+    assert r["directLands"]["probed"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
