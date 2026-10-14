@@ -1871,3 +1871,32 @@ return [editingVia, afterReset, hostUrlEl.disabled];
 """, extra_src=FORM_STUBS + _func(s82, "resetHostForm")
         + _func(s83, "startEditHost"))
     assert out == [True, False, False]
+
+
+
+def _mod_sync_fn(name):
+    src = (BROKER / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    a = src.index("                async function " + name + "(")
+    b = src.index("\n                }\n", a) + len("\n                }\n")
+    return src[a:b]
+
+
+def test_mod_sync_never_asks_a_proxied_host_for_its_state(tmp_path):
+    """Round 1b N6: mod-sync reads and writes a target's /state; for a host
+    reached through this broker it asks nothing (the prefix never relays
+    /state) and reports the push as skipped, while a direct host is read."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+peerAnswer = { status: 200, body: { rev: 1, settings: {}, layout: {} } };
+const viaRead = await readState(hostById('rb'));
+const viaWrite = await writeSettings(hostById('rb'), [{ key: 'k', value: 1 }]);
+const viaCalls = calls.length;
+const direct = await readState(hostById('rd'));
+return { viaRead: viaRead, viaWrite: viaWrite, viaCalls: viaCalls,
+         direct: !!direct, urls: calls.map(c => c.url) };
+""".replace("INFO", json.dumps(INFO)),
+        extra_src="const CLIENT_ID = 'cid';\n" + _mod_sync_fn("readState")
+        + _mod_sync_fn("writeSettings"))
+    assert out == {"viaRead": None, "viaWrite": "no_state", "viaCalls": 0,
+                   "direct": True, "urls": ["http://d:4445/state"]}

@@ -539,6 +539,10 @@
                 // such peer would silently wedge the whole fan-out. Same guard, and
                 // the same reason, as fetchHostState (53_js_remote_host_cache.js).
                 async function readState(host) {
+                    // #252: a host reached through this broker has no /state
+                    // here (the prefix never relays it): nothing to read, and
+                    // nothing is asked.
+                    if (host && host.via === 'server') return null;
                     let r, srv;
                     const ctrl = new AbortController();
                     const timer = setTimeout(function () { ctrl.abort(); },
@@ -564,8 +568,10 @@
                 // PUT. Re-reads the live blob on every attempt (including the 409
                 // retry) and re-applies only our keys, so this is a per-key merge,
                 // never a whole-blob overwrite. Resolves 'ok' | 'not_active' |
-                // 'error' | 'no_layout'.
+                // 'error' | 'no_layout' | 'no_state' (#252: a host reached
+                // through this broker, whose /state is never relayed).
                 async function writeSettings(host, writes) {
+                    if (host && host.via === 'server') return 'no_state';
                     for (let attempt = 0; attempt < 2; attempt++) {
                         const live = await readState(host);
                         if (!live) return 'error';
@@ -786,6 +792,8 @@
                                     + 'the active view there',
                                 no_layout: 'settings skipped — its layout could not '
                                     + 'be read, and a save would have wiped it',
+                                no_state: 'settings skipped — a host reached '
+                                    + 'through this broker has none here',
                                 error: 'settings could not be saved',
                             }[res] || 'settings could not be saved');
                         }
