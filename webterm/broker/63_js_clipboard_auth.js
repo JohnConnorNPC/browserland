@@ -749,6 +749,10 @@
             live.peerOrigin = '';
             savePrefs();
             try { invalidateHost(live.id); } catch (_) {}
+            // The grant keyed on the refused pairing goes now, not at the
+            // next clipboard check (the re-pair below may land on the same
+            // origin again).
+            try { _osc52PruneStale(loadOsc52Hosts()); } catch (_) {}
             try { await localPeers(); } catch (_) {}
             return new Response(JSON.stringify({
                 ok: false, error: 'auth_required' }), {

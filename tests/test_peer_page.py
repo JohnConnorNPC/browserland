@@ -1668,3 +1668,32 @@ def test_a_mint_that_settles_after_a_switch_touches_nothing(tmp_path, answer,
     out = _dial(tmp_path, MOVED_BODY.replace("ANSWER", json.dumps(answer))
                 .replace("MOVE", move))
     assert out == {"out": None, "refusal": None, "overlays": []}
+
+
+def test_a_re_pairing_round_trip_does_not_revive_an_osc52_grant(tmp_path):
+    """codex 4 (D10): this broker publishes the peer elsewhere, then at the
+    old origin again, with no clipboard check in between: the grant made for
+    the first pairing is gone, not re-armed."""
+    out = _run(tmp_path, _prefs(), """
+setOsc52Allowed('rb', true);
+const before = isOsc52Allowed('rb');
+rePairPeers({ proxy: true, peers: { b: 'http://b2:4448' } });
+const mid = stored().length;
+rePairPeers({ proxy: true, peers: { b: 'http://b:4448' } });
+return [before, mid, isOsc52Allowed('rb')];
+""", extra_src=_osc_src())
+    assert out == [True, 0, False]
+
+
+def test_a_pairing_409_prunes_the_grant_at_once(tmp_path):
+    """The 409 path empties peerOrigin; if the re-read lands on the same
+    origin again, the old grant must not match again."""
+    out = _run(tmp_path, _prefs(), """
+setOsc52Allowed('rb', true);
+infoAnswers = [INFO, INFO];
+peerAnswer = { status: 409, body: {},
+               headers: { 'X-Browserland-Peer-Refusal': 'peer_origin_changed' } };
+const r = await hostFetch(hostById('rb'), '/sessions');
+return [r.status, hostById('rb').peerOrigin, isOsc52Allowed('rb')];
+""".replace("INFO", json.dumps(INFO)), extra_src=_osc_src())
+    assert out == [401, "http://b:4448", False]

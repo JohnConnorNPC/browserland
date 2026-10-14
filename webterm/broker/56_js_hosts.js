@@ -139,7 +139,11 @@
         // token (it was entered for another machine), and its display url
         // follows the published origin. A peer that is not published at all
         // is left alone: hostFetch fails it closed without dialing.
+        // The OSC 52 grant keyed on the old pairing is pruned NOW (63): left
+        // for the next clipboard check, a peer re-pointed and pointed back
+        // in between would find its old grant matching again (D10).
         function rePairPeers(info) {
+            let changed = false;
             for (const h of getHosts()) {
                 if (!hostIsProxied(h)) continue;
                 const origin = info.peers[h.peerId];
@@ -151,6 +155,10 @@
                 h.url = origin;
                 savePrefs();
                 try { invalidateHost(h.id); } catch (_) {}
+                changed = true;
+            }
+            if (changed) {
+                try { _osc52PruneStale(loadOsc52Hosts()); } catch (_) {}
             }
         }
         // ---- switching a host's mode (#252 phase 3) ---------------------------
