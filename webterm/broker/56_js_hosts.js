@@ -82,6 +82,10 @@
         // reload. A broker without `peer_proxy` predates the feature: proxy
         // false, which fails every proxied host CLOSED.
         let _localPeersP = null;
+        // The last answer that resolved, for a SYNC reader that paints (the
+        // Hosts row's mode control); null until one has.
+        let _localPeersLast = null;
+        function localPeersKnown() { return _localPeersLast; }
         function localPeers() {
             if (!_localPeersP) {
                 const p = (async function () {
@@ -111,6 +115,7 @@
             }
             return _localPeersP.then(function (info) {
                 rePairPeers(info);
+                _localPeersLast = info;
                 return info;
             });
         }
@@ -209,6 +214,70 @@
                 _emitModEvent('host:changed', { hostId: h.id });
             }
             return true;
+        }
+
+        // The Hosts row's mode control: what a remote host can be switched
+        // to, from localPeers()'s answer. Empty (no control) for the local
+        // host, and for a direct host while this broker cannot proxy or
+        // publishes no peer. A proxied host always gets `direct` -- its way
+        // back -- plus its own peer, marked unavailable when this broker no
+        // longer publishes it. A peer published at the host's own address
+        // comes first.
+        function hostModeOptions(h, info) {
+            if (!h || h.id === 'local') return [];
+            const via = hostIsProxied(h);
+            const peers = (info && info.proxy && info.peers) || {};
+            const here = normalizeHostUrl(h.url);
+            const same = (id) => peers[id] === here;
+            const ids = Object.keys(peers).sort((a, b) =>
+                (same(b) - same(a)) || (a < b ? -1 : a > b ? 1 : 0));
+            if (!ids.length && !via) return [];
+            const out = [{ value: '', label: 'direct', selected: !via }];
+            for (const id of ids) {
+                out.push({ value: id,
+                           label: 'from server · ' + id
+                               + (same(id) ? ' (same address)' : ''),
+                           selected: via && h.peerId === id });
+            }
+            if (via && ids.indexOf(h.peerId) === -1) {
+                out.push({ value: h.peerId, disabled: true, selected: true,
+                           label: 'from server · ' + h.peerId
+                               + ' (unavailable)' });
+            }
+            return out;
+        }
+        // Ask for localPeers() and call `onChange` once if its answer differs
+        // from the one already painted. A failed read, or the same answer,
+        // calls nothing: a render that asks again cannot loop.
+        function refreshHostModeInfo(onChange) {
+            const before = JSON.stringify(localPeersKnown());
+            return localPeers().then(function (info) {
+                if (JSON.stringify(info) !== before) onChange();
+            }, function () {});
+        }
+        // After a switch, the host's sockets go through the new way in: its
+        // windows re-dial now (the relay re-snapshots on attach), and so
+        // does its control channel (invalidateHost closed it).
+        function rehomeHostSockets(id) {
+            const h = hostById(id);
+            if (!h) return;
+            for (const win of windows.values()) {
+                if (win.disposed || win.hostId !== id) continue;
+                win.reattachAttempts = 0;
+                win.reattachAt = 0;
+                reattachWindow(win);
+            }
+            try { openControlWs(h); } catch (_) {}
+        }
+        // The control's change handler. A failed /info still allows the
+        // switch to direct (setHostMode refuses only "from server" then).
+        async function switchHostMode(id, peerId) {
+            let info = null;
+            try { info = await localPeers(); } catch (_) {}
+            const changed = setHostMode(id, peerId || null, info);
+            if (changed) rehomeHostSockets(id);
+            renderHostsList();
+            return changed;
         }
 
         // #190: a host added after this page's boot can't be reached until
@@ -324,6 +393,21 @@
             } catch (e) { console.warn('csp hosts cookie write failed:', e); }
         }
         syncHostOriginsCookie();            // once at load, before any edit
+        // #252: the same CSP fact for a host that was here at load but
+        // reached THROUGH this broker then (so its own origin was never
+        // reported) and is direct now. Display-only, like HOST_ADDED_NOTE.
+        const _hostOriginsAtLoad = new Set(hostOriginsForCsp());
+        const HOST_SWITCHED_NOTE = 'direct now — open terminals reconnect '
+            + 'directly on their next attach (or on reload)';
+        function hostSwitchedAfterLoad(h) {
+            if (!h || h.id === 'local' || hostIsProxied(h)) return false;
+            if (!_hostIdsAtLoad.has(h.id)) return false;   // "added" says it
+            let u;
+            try { u = new URL(String(h.url || '').trim()); } catch (_) {
+                return false;
+            }
+            return !_hostOriginsAtLoad.has(u.protocol + '//' + u.host);
+        }
         // #253: does this host's broker host NO terminals (/info `terminals`
         // false)? Three answers, like hostMcpScopes (78):
         //   true  - its /info said terminals: false; it refuses every launch

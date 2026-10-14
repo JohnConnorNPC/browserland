@@ -13631,6 +13631,26 @@ CASES.a_direct_add_beside_a_proxied_record = async function () {
     return out;
 };
 
+// #252 phase 3 (A8/S7): editing a record reached through this broker is label
+// + password only -- its url is display (the peers config owns the address),
+// so a typed url never moves it, never clears its identity or its pairing,
+// and a direct record at that url is not a twin.
+CASES.editing_a_proxied_record_keeps_its_url = async function () {
+    _hostRecords = [{ id: 'local', url: '', token: '' },
+                    { id: 'd1', url: 'http://box:4445', token: 'x' },
+                    { id: 'p1', label: 'B', url: 'http://box:4445', token: 't',
+                      via: 'server', peerId: 'b', brokerId: 'B-ID',
+                      peerOrigin: 'http://box:4445' }];
+    editingHostId = 'p1';
+    hostLabelEl.value = 'renamed';
+    hostUrlEl.value = 'http://elsewhere:4445';
+    hostPassEl.value = '';
+    await commitHostForm();
+    const p = hostById('p1');
+    return { url: p.url, brokerId: p.brokerId, peerOrigin: p.peerOrigin,
+             label: p.label, token: p.token, errors: hostErrors.slice() };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 Promise.resolve().then(CASES[want]).then(function (out) {
@@ -13722,6 +13742,16 @@ def test_a_direct_host_can_be_added_beside_a_proxied_record(emit_harness):
     assert r["directLands"]["n"] == 3
     assert r["directLands"]["errors"] == ["", "host already configured"]
     assert r["directLands"]["probed"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_editing_a_proxied_record_never_moves_its_url(emit_harness):
+    r = _run_emit(emit_harness, "editing_a_proxied_record_keeps_its_url")
+    assert r["errors"] == [""]
+    assert r["url"] == "http://box:4445"
+    assert r["brokerId"] == "B-ID"
+    assert r["peerOrigin"] == "http://box:4445"
+    assert r["label"] == "renamed" and r["token"] == "t"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

@@ -79,6 +79,7 @@
             hostAddBtn.textContent = 'add';
             hostLabelEl.value = '';
             hostUrlEl.value = '';
+            hostUrlEl.disabled = false;   // #252: startEditHost on a via row
             hostPassEl.value = '';
             setHostError('');
         }

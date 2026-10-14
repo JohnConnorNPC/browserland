@@ -115,9 +115,10 @@ async function fetch(url, o) {
 """
 
 
-def _run(tmp_path, prefs, body, extra_src=""):
+def _run(tmp_path, prefs, body, extra_src="", hosts_src=None):
     script = (PRELUDE + "let prefs = " + json.dumps(prefs) + ";\n"
-              + _hosts_source() + _doors_source() + extra_src
+              + (_hosts_source() if hosts_src is None else hosts_src)
+              + _doors_source() + extra_src
               + "(async () => {\n" + body + "\n})().then(out => {\n"
               "  process.stdout.write(JSON.stringify(out) + '\\n');\n"
               "}).catch(e => { process.stdout.write(JSON.stringify("
@@ -1414,3 +1415,154 @@ setHostMode('d', null, info);
 return [before, mid, isOsc52Allowed('d')];
 """)
     assert out == [True, 0, False]
+
+
+def _opts(tmp_path, hosts, info):
+    return _run(tmp_path, {"_hosts": [{"id": "local"}] + hosts}, """
+const info = INFO;
+const out = {};
+for (const h of getHosts()) out[h.id] = hostModeOptions(h, info);
+return out;
+""".replace("INFO", json.dumps(info)), extra_src=DUP_STUBS)
+
+
+def test_the_mode_control_offers_what_this_broker_publishes(tmp_path):
+    """P3-1 (A8): direct + one row per published peer, the one at the host's
+    own address first; nothing while this broker cannot proxy (a direct
+    host); a proxied host always keeps its way back to direct."""
+    info = {"proxy": True, "peers": {"a": "http://x:1", "b": "http://b:4448"}}
+    out = _opts(tmp_path, [_direct("d"), _via("p"), _via("gone", peer="z")],
+                info)
+    assert out["local"] == []
+    assert [(o["value"], o["label"], o["selected"]) for o in out["d"]] == [
+        ("", "direct", True),
+        ("b", "from server · b (same address)", False),
+        ("a", "from server · a", False)]
+    assert [(o["value"], o["selected"]) for o in out["p"]] == [
+        ("", False), ("b", True), ("a", False)]
+    assert out["gone"][-1] == {"value": "z", "disabled": True,
+                               "selected": True,
+                               "label": "from server · z (unavailable)"}
+    off = _opts(tmp_path, [_direct("d"), _via("p")],
+                {"proxy": False, "peers": {"b": "http://b:4448"}})
+    assert off["d"] == []
+    assert [(o["value"], o.get("disabled", False)) for o in off["p"]] == [
+        ("", False), ("b", True)]
+    none = _opts(tmp_path, [_direct("d")], {"proxy": True, "peers": {}})
+    assert none["d"] == []
+
+
+def test_the_mode_refresh_re_renders_only_when_the_answer_moved(tmp_path):
+    """S6(a): first answer -> one render; the same answer -> none; a failed
+    /info -> none (and no second ask: nothing loops)."""
+    out = _run(tmp_path, _prefs(), """
+let renders = 0;
+const onChange = () => { renders++; };
+infoAnswers = [INFO];
+await refreshHostModeInfo(onChange);
+const first = renders;
+await refreshHostModeInfo(onChange);
+const same = renders;
+forgetLocalPeers();
+infoAnswers = ['reject'];
+await refreshHostModeInfo(onChange);
+await new Promise(r => setTimeout(r, 20));
+return { first: first, same: same, failed: renders,
+         infos: calls.filter(c => c.url === '/info').length };
+""".replace("INFO", json.dumps(INFO)))
+    assert out == {"first": 1, "same": 1, "failed": 1, "infos": 2}
+
+
+REHOME_STUBS = DUP_STUBS + r"""
+const windows = new Map();
+const redialed = [];
+const controlOpened = [];
+let hostListRenders = 0;
+function reattachWindow(w) { redialed.push(w.key); }
+function openControlWs(h) { controlOpened.push(h.id); }
+function renderHostsList() { hostListRenders++; }
+function _emitModEvent() {}
+"""
+
+
+def test_a_switch_re_dials_that_hosts_sockets_and_no_others(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO];
+windows.set('w1', { key: 'w1', hostId: 'rd', reattachAttempts: 3 });
+windows.set('w2', { key: 'w2', hostId: 'rd' });
+windows.set('w3', { key: 'w3', hostId: 'rb' });
+windows.set('w4', { key: 'w4', hostId: 'rd', disposed: true });
+const changed = await switchHostMode('rd', 'b');
+return { changed: changed, redialed: redialed, control: controlOpened,
+         attempts: windows.get('w1').reattachAttempts,
+         renders: hostListRenders, via: hostById('rd').via };
+""".replace("INFO", json.dumps(INFO)), extra_src=REHOME_STUBS + _osc_src())
+    assert out == {"changed": True, "redialed": ["w1", "w2"],
+                   "control": ["rd"], "attempts": 0, "renders": 1,
+                   "via": "server"}
+
+
+def test_a_switch_to_direct_works_when_info_cannot_be_read(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = ['reject'];
+windows.set('w3', { key: 'w3', hostId: 'rb' });
+const changed = await switchHostMode('rb', null);
+const toServer = await switchHostMode('rd', 'b');
+return { changed: changed, toServer: toServer, redialed: redialed,
+         via: hostById('rb').via || null, renders: hostListRenders };
+""", extra_src=REHOME_STUBS + _osc_src())
+    assert out == {"changed": True, "toServer": False, "redialed": ["w3"],
+                   "via": None, "renders": 2}
+
+
+def _load_src():
+    s56 = _src("56_js_hosts.js")
+    a = s56.index("        function getHosts() {")
+    b = s56.index("        // #253: does this host's broker host NO terminals")
+    return ("const document = { cookie: '' };\n" + DUP_STUBS + s56[a:b])
+
+
+def _run_load(tmp_path, prefs, body):
+    """Like _run, but with the load-time block of 56 too (the CSP cookie, the
+    two load snapshots and their predicates) in place of the hosts slice."""
+    return _run(tmp_path, prefs, body, hosts_src=_load_src())
+
+
+def test_a_host_switched_to_direct_after_load_says_so(tmp_path):
+    """S6(c) / Q2: a host proxied at load and direct now was never in this
+    page's CSP origins -- its own note (not "added"); a host direct at load,
+    or one added after load, does not get it."""
+    prefs = _prefs()
+    prefs["_hosts"].append(_direct("bounce", url="http://e:4445"))
+    out = _run_load(tmp_path, prefs, """
+const rb = hostById('rb');
+const rbVia = hostSwitchedAfterLoad(rb);
+delete rb.via; delete rb.peerId; delete rb.peerOrigin;
+const bounce = hostById('bounce');
+Object.assign(bounce, { via: 'server', peerId: 'e' });
+const bounceVia = hostSwitchedAfterLoad(bounce);
+delete bounce.via; delete bounce.peerId;
+prefs._hosts.push({ id: 'fresh', label: 'f', url: 'http://f:1', token: '' });
+return { rbVia: rbVia, rb: hostSwitchedAfterLoad(rb),
+         rd: hostSwitchedAfterLoad(hostById('rd')),
+         bounceVia: bounceVia, bounce: hostSwitchedAfterLoad(bounce),
+         fresh: hostSwitchedAfterLoad(hostById('fresh')),
+         freshAdded: hostAddedAfterLoad('fresh'),
+         local: hostSwitchedAfterLoad(localHost()), note: HOST_SWITCHED_NOTE };
+""")
+    assert out == {"rbVia": False, "rb": True, "rd": False,
+                   "bounceVia": False,
+                   "bounce": False, "fresh": False, "freshAdded": True,
+                   "local": False,
+                   "note": "direct now — open terminals reconnect directly "
+                           "on their next attach (or on reload)"}
+
+
+def test_the_hosts_row_wires_the_mode_control_and_the_note():
+    """The DOM wiring (non-behavioural pins; the Playwright pass drives it)."""
+    rows = _func(_src("83_js_broker_identity.js"), "renderHostsList")
+    assert "const modes = hostModeOptions(host, localPeersKnown());" in rows
+    assert "() => switchHostMode(host.id, sel.value || null));" in rows
+    assert "} else if (hostSwitchedAfterLoad(host)) {" in rows
+    assert "moved.textContent = HOST_SWITCHED_NOTE;" in rows
+    assert "refreshHostModeInfo(renderHostsList);" in rows

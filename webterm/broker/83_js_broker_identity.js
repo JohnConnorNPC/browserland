@@ -143,7 +143,13 @@
             if (hostFormBusy) return;
             setHostError('');
             const label = hostLabelEl.value.trim();
-            const url = normalizeHostUrl(hostUrlEl.value);
+            // #252: editing a record reached through this broker never moves
+            // its url (display only; the peers config owns the address), so
+            // its identity and pairing stay, and it is no one's twin.
+            const viaEdit = editingHostId ? hostById(editingHostId) : null;
+            const keepUrl = !!(viaEdit && viaEdit.via === 'server');
+            const url = keepUrl ? viaEdit.url
+                : normalizeHostUrl(hostUrlEl.value);
             const pass = hostPassEl.value;
             if (!url) {
                 setHostError('invalid URL — expected http://hostname:4445');
@@ -160,7 +166,7 @@
             // checks below). Spelled out, not hostIsProxied from 56, so this
             // form still runs when a harness slices it alone.
             const directAt = (h) => h.via !== 'server' && h.url === url;
-            if (hosts.some(h => h !== editing && directAt(h))) {
+            if (!keepUrl && hosts.some(h => h !== editing && directAt(h))) {
                 setHostError('host already configured');
                 return;
             }
@@ -412,6 +418,9 @@
             hostAddBtn.textContent = 'save';
             hostLabelEl.value = host.label;
             hostUrlEl.value = host.url;
+            // #252: a host reached through this broker only DISPLAYS its url
+            // (this broker's peers config owns it): label and password only.
+            hostUrlEl.disabled = hostIsProxied(host);
             hostPassEl.value = '';
             setHostError('');
             try { hostLabelEl.focus(); } catch (_) {}
@@ -493,6 +502,32 @@
                     added.className = 'host-added-note';
                     added.textContent = HOST_ADDED_NOTE;
                     row.appendChild(added);
+                } else if (hostSwitchedAfterLoad(host)) {
+                    const moved = document.createElement('span');
+                    moved.className = 'host-added-note';
+                    moved.textContent = HOST_SWITCHED_NOTE;
+                    row.appendChild(moved);
+                }
+                // #252: direct, or "from server" (reached through this
+                // broker's /peer/<id>/). Painted from the last /info answer;
+                // the refresh after the loop re-renders once if it moved.
+                const modes = hostModeOptions(host, localPeersKnown());
+                if (modes.length) {
+                    const sel = document.createElement('select');
+                    sel.className = 'host-mode';
+                    sel.title = 'how this page reaches the host: directly, '
+                        + 'or through this broker';
+                    for (const m of modes) {
+                        const opt = document.createElement('option');
+                        opt.value = m.value;
+                        opt.textContent = m.label;
+                        opt.selected = !!m.selected;
+                        opt.disabled = !!m.disabled;
+                        sel.appendChild(opt);
+                    }
+                    sel.addEventListener('change',
+                        () => switchHostMode(host.id, sel.value || null));
+                    row.appendChild(sel);
                 }
                 // #107: badge the START (+) default host (mirrors the profiles
                 // editor's `set-profile-badge`). Shown for the local row too.
@@ -605,6 +640,7 @@
             }
             renderTroubleshooting();   // keep the dup recovery list in sync
             refreshHostIdentities();   // background: learns missing ids, re-renders
+            refreshHostModeInfo(renderHostsList);   // #252: once, if it moved
         }
 
         // Troubleshooting (#64): echo the detected duplicate brokers with a
