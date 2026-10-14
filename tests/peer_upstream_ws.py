@@ -100,6 +100,14 @@ async def _close_empty(conn, ws):
     await _raw_close(ws, EMPTY_CLOSE)
 
 
+async def _deaf(conn, ws):
+    # B stops reading for 1.5 s: a close sent to it waits that long for
+    # its echo (a slow peer at the moment this broker stops).
+    ws.transport.pause_reading()
+    await asyncio.sleep(1.5)
+    ws.transport.resume_reading()
+
+
 async def _never(conn, ws):
     return None
 
@@ -118,7 +126,7 @@ async def _tick(conn, ws):
 #: path -> what the socket does once open. Every socket also records the
 #: frames it receives and, on the echo paths, sends each one back.
 SCRIPTS = {"/ws": _ws, "/control": _control, "/close-4409": _close_4409,
-           "/close-4401": _close_4401,
+           "/close-4401": _close_4401, "/deaf": _deaf,
            "/close-2000": _close_2000, "/close-empty": _close_empty,
            "/never": _never, "/burst": _burst, "/tick": _tick}
 ECHO = {"/ws", "/control"}

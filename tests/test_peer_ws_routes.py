@@ -602,6 +602,31 @@ async def test_a_stopping_broker_closes_the_peer_1001(tmp_path, fake):
     ws.transport.abort()
 
 
+async def test_the_stop_waits_for_a_slow_peer_to_hear_1001(tmp_path, fake,
+                                                           caplog):
+    # Review round 1b SHOULD 6: when the server stops, a pair's closes run
+    # in a detached task; after_server_stop drains them, so nothing is left
+    # pending when the loop ends even when the peer is slow to answer.
+    caplog.set_level(logging.DEBUG)
+    app = _make_app(tmp_path, {"b": {"origin": fake.origin}})
+    srv = LiveApp(app).start()
+    t = await ticket(srv, "b", fake.origin)
+    ws, conn = await opened(fake, srv, "b", "ws", "clientId=c1&fake=deaf", t)
+    await asyncio.sleep(0.2)
+    loop = srv._loop
+    await asyncio.get_running_loop().run_in_executor(None, srv.stop)
+    pending = [tk for tk in list(ps._DETACHED)
+               if tk.get_loop() is loop and not tk.done()]
+    assert pending == []
+    assert await wait_for(
+        lambda: conn.ws.protocol.close_rcvd is not None, 3.0)
+    assert conn.ws.protocol.close_rcvd.code == 1001
+    assert not [r for r in caplog.records
+                if "Task was destroyed" in r.getMessage()]
+    ws.transport.abort()
+    await asyncio.sleep(0.1)    # the page client's own keepalive task ends
+
+
 async def test_a_dead_peer_is_1011_and_frees_its_slot(tmp_path, fake,
                                                      caplog):
     caplog.set_level(logging.DEBUG)
