@@ -51,6 +51,7 @@ library and the MCP server (``webterm.mcptool``) must not import
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import unicodedata
@@ -133,6 +134,14 @@ def normalize_origin(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
         return None, "origin must name a host"
+    if ":" in host:
+        # One spelling per IPv6 address (round 1b N8): `[0:0::1]` and
+        # `[::1]` are the same peer, so both sides compare the compressed
+        # form, and a config and an mcptool entry spelled differently agree.
+        try:
+            host = ipaddress.IPv6Address(host).compressed
+        except ValueError:
+            return None, "origin has an invalid host"
     if port is not None and not 1 <= port <= 65535:
         return None, "origin has an invalid port"
     netloc = f"[{host}]" if ":" in host else host

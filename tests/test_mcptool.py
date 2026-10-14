@@ -2951,6 +2951,9 @@ def test_without_a_peer_origin_the_requests_are_as_before(kw):
     ("http://b./", "http://b"),
     ("http://[::1]:4445", "http://[::1]:4445"),
     ("HTTPS://Hub.Example:443", "https://hub.example"),
+    # round 1b N8: one spelling per IPv6 address on both sides
+    ("http://[0:0::1]:4445", "http://[::1]:4445"),
+    ("http://[0000:0000:0000:0000:0000:0000:0000:0001]", "http://[::1]"),
 ])
 def test_the_peer_origin_is_sent_in_the_hubs_own_form(raw, canon):
     """M2: the client sends the very form the hub compares against (the

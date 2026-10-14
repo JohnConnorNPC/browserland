@@ -423,7 +423,8 @@ operator names each peer in `broker_config.json`:
   `http` or `https` with a host and an optional port: **no path, no query, no
   fragment, no userinfo**, and never this broker itself (loopback or the bind
   host on this broker's port). It is stored rebuilt (`HTTP://B:80/` →
-  `http://b`). Unknown keys are refused. `mcp` defaults to `false`.
+  `http://b`; an IPv6 literal compressed, `[0:0::1]` → `[::1]`). Unknown
+  keys are refused. `mcp` defaults to `false`.
 * **The client names a peer id, never a URL.** The origin is read from the
   config at dial time. `GET /info` publishes `peers` as `{id: origin}` (never
   the `mcp` flag, never a token) and `peer_proxy` (true when this broker has
