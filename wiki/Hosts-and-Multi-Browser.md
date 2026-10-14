@@ -28,20 +28,46 @@ its `broker_config.json` and restart it.
 ```
 
 A host reached that way is fetched through `/peer/b/` on the broker that
-served the page, so the phone dials only that broker. (The host list does
-not have a control to mark a host this way yet; it comes with a later
-release.) You still need the other
+served the page, so the phone dials only that broker. You choose it per
+host: in **Control Panel → Hosts**, a remote host's row has a menu,
+**direct** or **from server · b** (one entry per peer this broker
+publishes; the one at the host's own address comes first, marked
+"(same address)"). The menu appears once this broker can relay, and a host
+already reached this way always keeps **direct** as its way back. Switching
+keeps the host's id, label and colour, and its open terminals reconnect the
+new way at once. You still need the other
 broker's password: it is sent along with this broker's own, and this broker
 never saves it (opening a terminal holds it in memory for at most 30
 seconds, until that terminal connects). It is tied to the address the operator configured — if the
 operator points `b` somewhere else, the password is forgotten and you are
-asked again. If this broker cannot relay (no peers, no `proxy` extra, or an
+asked again. A switch keeps the password only when it was entered for the
+very address the host is reached at afterwards (a direct
+`http://box:4445` and a peer published as `http://box:4445`); any other
+switch asks again, and so does every switch involving `localhost`, `127.x`,
+`[::1]`, `0.0.0.0` or `[::]`, which name a different machine depending on
+who dials them. A switch also drops that host's clipboard (OSC 52)
+permission: grant it again on the host's tab.
+
+A host reached this way says **(via this broker)** on its row, in the status
+chip's tooltip and on its password prompt. Its per-host settings (default
+profile, tiling, start folder) are the defaults, because this broker never
+relays `/state`. Editing its row changes only the label and the password —
+the address belongs to this broker's `peers`. A host switched back to direct
+after the page loaded says so on its row: its terminals reconnect directly,
+and a reload may be needed before the browser lets the page reach that
+address. If it is **this** broker's password that is wrong, this broker's
+own login opens, never the other host's. If this broker cannot relay (no peers, no `proxy` extra, or an
 older build) the host says **this broker cannot proxy** and nothing is
 dialed — it never quietly falls back to connecting directly.
 
 To let agents use the other broker's MCP interface through this one as well,
 the operator adds `"mcp": true` to that peer; the agent then uses
-`http://<this broker>/peer/b` with the **other** broker's MCP token.
+`http://<this broker>/peer/b` with the **other** broker's MCP token. Add
+`"peer_origin": "http://100.64.0.2:4445"` (the address this broker's
+`peers` names) to that host's entry in `BROWSERLAND_MCP_HOSTS`, and this
+broker refuses the call (409 `peer_origin_changed`) instead of passing the
+token on if the operator later points `b` elsewhere; without it, re-pointing
+`b` re-points that token too.
 
 Its terminals open through the same prefix: each window's connection first
 takes a one-time ticket from this broker, so no password ever appears in a

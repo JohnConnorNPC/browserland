@@ -1036,8 +1036,8 @@ Adding an emit later is additive.
 
 - `host:auth` — a completed host authentication, and a poll that finds a host's
   auth has recovered.
-- `host:changed` — a committed host add/edit, the host colour swatch, and the
-  hidden toggle. Only paths that actually mutated emit it. The edge carries an
+- `host:changed` — a committed host add/edit, the host colour swatch, the
+  hidden toggle, and a host switched between direct and "from server". Only paths that actually mutated emit it. The edge carries an
   id, not a snapshot: re-read what you care about and decide.
 - `host:removed` — *after* the whole removal has finished, so it means "that
   host is gone", not "it is going".

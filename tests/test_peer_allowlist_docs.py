@@ -63,6 +63,13 @@ def test_the_section_states_what_the_code_does():
             f"{peers.PEER_MCP_MAX_DIALS}**") in s
     assert f"**{peers.PEER_DIAL_MAX_S:g} s**" in s
     assert f"**{peers.PEER_RECORDING_DIAL_MAX_S:g} s**" in s
+    # #252 phase 3: the MCP gate's row names its pairing refusal, in place.
+    mcp_row = next(line for line in s.splitlines()
+                   if line.startswith("| `/peer/<id>/mcp/*` |"))
+    assert ("503 `proxy_unavailable` → **409 `peer_origin_changed`**"
+            in mcp_row)
+    assert mcp_row.index("409 `peer_origin_changed`") < mcp_row.index(
+        "404 `not_relayed`")
     assert f"at most {peers.PEER_MCP_MAX_BODY // 2**20} MiB, within " \
         f"{peers.PEER_MCP_BODY_DEADLINE_S:g} s" in s
     assert f"Connect timeout {peers.PEER_CONNECT_TIMEOUT_S:g} s" in s

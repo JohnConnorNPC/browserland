@@ -442,7 +442,7 @@ operator names each peer in `broker_config.json`:
 | Gate | Credential | Refusals, in order |
 |---|---|---|
 | browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 503 `proxy_unavailable` → 404 `unknown_peer` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
-| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
+| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's; `X-Browserland-Peer-Origin` optional | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → **409 `peer_origin_changed`** (only when the pairing header is sent and names another origin) → 404 `not_relayed` → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
 
 Every refusal happens before anything is dialed. Browser-gate bodies are
 `{"ok": false, "error": …}`; MCP-gate bodies are `{"error": …}`, the MCP
@@ -456,7 +456,40 @@ with one, a peer that opted in answers with the peer's own refusal, which
 this broker cannot hide (it cannot check the peer's MCP token). Turning `mcp: true` on publishes the peer's MCP surface at this
 broker's address; an agent then adds `http://<this broker>/peer/<id>` as a
 second mcptool host with the **peer's** MCP token. This broker's MCP token,
-scopes and admin credential do not apply to it.
+scopes and admin credential do not apply to it. That host entry may carry
+`"peer_origin"`: the mcptool server then sends it, in this broker's own
+canonical form (`http://B:4445/` → `http://b:4445`), as
+`X-Browserland-Peer-Origin` on every call, so a re-pointed peer is refused
+here instead of receiving the token. Without it, nothing is sent and
+nothing changes.
+
+**The page.** A host record reaches a peer when it carries `via: "server"`,
+`peerId` and `peerOrigin` (the origin its token was paired with); only the
+Hosts row's mode control writes them (a registry import never does).
+
+* **Switching** keeps the token only where it was paired with the address
+  dialed afterwards: direct → peer when the host's url is the peer's
+  published origin, peer → direct when `peerOrigin` is the url. A loopback
+  or unspecified host (`localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0`,
+  `[::]`) never keeps it. A switch drops the learned broker id and the OSC 52
+  grant, and re-dials that host's sockets.
+* **OSC 52** grants are keyed `[id, url]` for a direct host (unchanged) and
+  `[id, url, peerId, peerOrigin]` for a proxied one, so a re-pointed,
+  re-paired or switched peer loses its grant.
+* **Whose 401.** This broker checks its own bearer first, so a 401 carrying
+  `X-Browserland-Peer-Refusal` on a request that sent a peer token is this
+  broker refusing its own password: the page opens **this** broker's login
+  and answers the caller with its own `hub_auth_required` (status 503, made
+  in the page, never sent by a broker). An unmarked 401 is the
+  peer's own; a marked one with no peer token sent is left to the peer's
+  login (it needs a password either way). A wrong token before `/info` was
+  ever read fails that read, and the host reads as down.
+* **`/info` is read again** when this broker's `/control` status shows a new
+  `bootId` (it restarted, and its `peers` may have changed).
+* **No `/state`.** A proxied host's per-host settings are never fetched or
+  written (the prefix never relays `/state`); they are the defaults.
+* **Duplicates** are per mode: a proxied record is keyed on its peer id, so
+  a direct and a proxied record of one broker are two ways in, not twins.
 
 #### Relayed on the browser gate
 
@@ -558,6 +591,10 @@ A page cannot set headers on a WebSocket handshake, so a proxied host's
    the peer) after the upgrade, before anything is dialed. The page
    answers a 4403 by minting a new ticket once, at once, and a second
    4403 in a row backs off like any failed dial.
+   A ticket is not bound to the browser's `Origin`: it is minted only with
+   this broker's token in a header (never a cookie), so another site cannot
+   mint one, it lives 30 s and works once, and anything outside a browser
+   can send any `Origin` it likes.
 4. **The upstream handshake.** This broker dials the peer's own `/ws` or
    `/control` with the page's query minus `ticket`, `token` and `auth`, and
    with the peer's token **only in the handshake's `Authorization`
@@ -1357,6 +1394,7 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 409 | `lost_lease` | the browser lost the control lease mid-op. `dispatched: false`: the op was never sent, so nothing was applied; `dispatched: true`: it may have applied, so check before retrying (#250) |
 | 409 | `needs_confirm` | `workspaces:remove` of a non-empty workspace without `force: true` — the body carries the live window `count` |
 | 409 | `last_workspace` | the last workspace cannot be removed |
+| 409 | `peer_origin_changed` | through a broker's `/peer/<id>/mcp` prefix: the mcptool host's `peer_origin` is not the address that broker now dials for the peer (#252) |
 | 502 | `desktop_op_failed` | the browser's desktop op raised |
 | 400 | `bad_op` / `bad_args` | `/mcp/desktop` op outside the allowlist / op arguments invalid |
 
