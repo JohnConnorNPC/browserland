@@ -621,8 +621,11 @@ async def test_the_stop_waits_for_a_slow_peer_to_hear_1001(tmp_path, fake,
     assert await wait_for(
         lambda: conn.ws.protocol.close_rcvd is not None, 3.0)
     assert conn.ws.protocol.close_rcvd.code == 1001
+    # None of THIS broker's relay tasks was destroyed pending (other tests'
+    # client tasks may be collected while this one runs).
     assert not [r for r in caplog.records
-                if "Task was destroyed" in r.getMessage()]
+                if "Task was destroyed" in r.getMessage()
+                and "peer_sockets" in r.getMessage()]
     ws.transport.abort()
     await asyncio.sleep(0.1)    # the page client's own keepalive task ends
 
