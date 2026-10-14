@@ -1741,3 +1741,32 @@ await new Promise(r => setTimeout(r, 10));
 return [before, localPeersKnown()];
 """.replace("INFO", json.dumps(INFO)))
     assert out == [True, None]
+
+
+def _css_rule(css, selector):
+    """The declarations of the one rule whose selector is exactly
+    ``selector``, as {property: value}."""
+    hits = [m for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css)
+            if m.group(1).strip().split("\n")[-1].strip() == selector]
+    assert len(hits) == 1, (selector, len(hits))
+    out = {}
+    for decl in hits[0].group(2).split(";"):
+        if ":" in decl:
+            k, v = decl.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def test_the_host_notes_take_their_own_line_under_the_row():
+    """Round 1 SHOULD 1: the notes under a Hosts row ("added — reload to
+    connect", the 77-character "direct now — …") wrap as text on a full-width
+    last line; without these rules the note shrank to a one-word column and
+    the row widened the pane (measured live: 1181 px in a 589 px pane)."""
+    css = _src("15_css_dialogs.css")
+    row = _css_rule(css, ".host-row")
+    assert row.get("flex-wrap") == "wrap"
+    assert _css_rule(css, ".host-row .host-name").get("flex") == "1 1 0"
+    note = _css_rule(css, ".host-row .host-added-note")
+    assert note.get("flex") == "1 0 100%"
+    assert note.get("order") == "1"
+    assert note.get("white-space") == "normal"

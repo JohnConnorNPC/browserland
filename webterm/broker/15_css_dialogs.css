@@ -119,9 +119,13 @@
             cursor: pointer; user-select: none; }
         /* position:relative anchors the per-host color popover (#103, the reused
            swatch picker) to the row instead of the whole settings pane. */
-        .host-row { font-family: monospace; font-size: 12px; position: relative; }
+        .host-row { font-family: monospace; font-size: 12px; position: relative;
+            flex-wrap: wrap; }
+        /* basis 0: the name fills what the controls leave and is never what
+           pushes them onto another line (they wrap only when they alone do
+           not fit the pane, instead of widening it). */
         .host-row .host-name {
-            flex: 1 1 auto;
+            flex: 1 1 0;
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -133,6 +137,20 @@
             font-size: 11px;
             white-space: nowrap;
             cursor: help;
+        }
+        /* #190 / #252: the "added — reload to connect" and "direct now — …"
+           notes. A full-width last line under the row's controls: a long note
+           wraps as text there instead of shrinking to a one-word column, and
+           never makes the pane wider. */
+        .host-row .host-added-note {
+            flex: 1 0 100%;
+            order: 1;
+            min-width: 0;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            color: var(--fg-dim);
+            font-size: 11px;
+            font-style: italic;
         }
         /* #149: the per-host hidden (focus mode) checkbox. */
         .host-row .host-hide {
