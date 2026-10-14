@@ -108,6 +108,10 @@ async def test_the_peer_client_follows_no_redirects_and_no_env_proxies():
         assert client.trust_env is False
         assert client.timeout.connect == peers.PEER_CONNECT_TIMEOUT_S
         assert client.timeout.read == peers.PEER_READ_TIMEOUT_S
+        # Round 1: one client serves every user, so it keeps no cookies...
+        assert type(client.cookies.jar) is peers.NoCookieJar
+        # ...and adds none of httpx's own headers (User-Agent, Accept, ...).
+        assert dict(client.headers) == {}
     finally:
         await client.aclose()
 
@@ -117,3 +121,33 @@ def test_core_dependencies_stay_websockets_and_sanic():
     deps = re.search(r"^dependencies = \[(.*?)\]", text, re.M | re.S).group(1)
     assert re.findall(r'"([a-z0-9_-]+)', deps) == ["websockets", "sanic"]
     assert re.search(r'^proxy = \["httpx>=[0-9.]+"\]$', text, re.M)
+
+
+def test_the_no_cookie_jar_stores_nothing():
+    import httpx
+    jar = httpx.Cookies(peers.NoCookieJar())
+    resp = httpx.Response(200, headers={"Set-Cookie": "sid=x; Path=/"},
+                          request=httpx.Request("GET", "http://b:1/info"))
+    jar.extract_cookies(resp)
+    assert len(jar.jar) == 0
+
+
+def test_the_no_cookie_jar_sends_nothing_it_somehow_holds():
+    import http.cookiejar
+    import httpx
+    def planted(jar):
+        # Past the storing chokepoint, so only the sending one is tested.
+        http.cookiejar.CookieJar.set_cookie(jar, http.cookiejar.Cookie(
+            0, "sid", "x", None, False, "b.example", False, False, "/", True,
+            False, None, False, None, None, {}))
+        return jar
+
+    # The same cookie in a PLAIN jar is sent, so the check below is live.
+    req = httpx.Request("GET", "http://b.example/info")
+    httpx.Cookies(planted(http.cookiejar.CookieJar())).set_cookie_header(req)
+    assert req.headers.get("cookie") == "sid=x"
+    raw = planted(peers.NoCookieJar())
+    assert len(raw) == 1
+    req = httpx.Request("GET", "http://b.example/info")
+    httpx.Cookies(raw).set_cookie_header(req)
+    assert "cookie" not in req.headers

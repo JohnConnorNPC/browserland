@@ -476,3 +476,23 @@ async def test_a_client_that_leaves_mid_body_frees_its_slot(live, upstream):
         hold.set()
     r = await _get(live, "/peer/b/info", browser(upstream.origin))
     assert r.status_code == 200
+
+
+
+async def test_a_cookie_from_b_never_reaches_another_users_request(live,
+                                                                   upstream):
+    """Round 1 MUST: one upstream client serves every user. B's Set-Cookie
+    on user X's answer must not ride user Y's next request."""
+    upstream.routes["/sessions"] = lambda s: Answer(
+        200, [("Content-Type", "application/json"),
+              ("Set-Cookie", "sid=user-x-session; Path=/")], b"[]")
+    r = await _get(live, "/peer/b/sessions",
+                   browser(upstream.origin, b="user-x-token"))
+    assert r.status_code == 200
+    r = await _get(live, "/peer/b/info",
+                   browser(upstream.origin, b="user-y-token"))
+    assert r.status_code == 200
+    seen = upstream.seen[-1]
+    assert seen.path == "/info"
+    assert seen.all("Cookie") == []
+    assert seen.all("User-Agent") == []

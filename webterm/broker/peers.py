@@ -20,6 +20,7 @@ starts and answers ``/peer/*`` with ``503 proxy_unavailable``.
 
 from __future__ import annotations
 
+import http.cookiejar
 import logging
 import re
 import urllib.parse
@@ -182,10 +183,36 @@ def proxy_available() -> bool:
     return True
 
 
+class NoCookieJar(http.cookiejar.CookieJar):
+    """The upstream client's cookie jar, which never holds anything. One
+    client serves every user of this broker: a jar that kept a peer's
+    ``Set-Cookie`` would replay it as ``Cookie`` on the NEXT user's request.
+    A ``CookieJar`` subclass rather than an ``httpx.Cookies`` one, because
+    httpx copies a ``Cookies`` it is given into a plain jar but keeps a
+    ``CookieJar`` as it is. Two chokepoints, each closed on its own: every
+    stored cookie goes through ``set_cookie``, and every sent one through
+    ``add_cookie_header``."""
+
+    def set_cookie(self, cookie):
+        return None
+
+    def add_cookie_header(self, request):
+        return None
+
+
+#: The headers httpx adds to every request on its own (Accept, Accept-Encoding,
+#: Connection, User-Agent). make_client removes them all, so what reaches the
+#: peer is exactly what upstream_headers built (plus the transport's Host and
+#: body framing).
+_HTTPX_DEFAULT_HEADERS = ("Accept", "Accept-Encoding", "Connection",
+                          "User-Agent")
+
+
 def make_client():
-    """The one upstream HTTP client. No redirects (a redirect would chain a
-    hop A never checked), no environment proxies, explicit timeouts, and a
-    pool no bigger than the dial cap."""
+    """The one upstream HTTP client, and its only constructor. No redirects (a
+    redirect would chain a hop A never checked), no environment proxies, no
+    cookies (:class:`NoCookieJar`), none of httpx's default headers, explicit
+    timeouts, and a pool no bigger than the dial cap."""
     import httpx
     # httpx logs every request at INFO as "HTTP Request: GET <full URL>", and
     # httpcore logs connection detail at DEBUG: the upstream URL, its query,
@@ -193,15 +220,22 @@ def make_client():
     # peer id instead, so both loggers stay at WARNING in this process.
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    return httpx.AsyncClient(
+    client = httpx.AsyncClient(
         follow_redirects=False,
         trust_env=False,
+        cookies=NoCookieJar(),
+        headers={},
         timeout=httpx.Timeout(connect=PEER_CONNECT_TIMEOUT_S,
                               read=PEER_READ_TIMEOUT_S,
                               write=PEER_READ_TIMEOUT_S,
                               pool=PEER_CONNECT_TIMEOUT_S),
         limits=httpx.Limits(max_connections=PEER_MAX_DIALS,
                             max_keepalive_connections=PEER_MAX_DIALS))
+    # headers={} does not do it: httpx merges its defaults in underneath.
+    for name in _HTTPX_DEFAULT_HEADERS:
+        if name in client.headers:
+            del client.headers[name]
+    return client
 
 
 # ---- what may be relayed ----------------------------------------------------
@@ -430,7 +464,7 @@ async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
     url = origin + path + ("?" + query if query else "")
     try:
         req = client.build_request(method, url, headers=headers,
-                                   content=body)
+                                   content=body, cookies=None)
         up = await client.send(req, stream=True)
     except httpx.TimeoutException as exc:
         log("peer %s: %s %s timed out (%s)", peer_id, method, path,

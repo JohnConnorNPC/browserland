@@ -408,3 +408,54 @@ def test_a_trailing_dot_names_the_same_host():
                                  4445)
     assert why == ("error: peer 'b': origin http://localhost:4445 is this "
                    "broker")
+
+
+
+# ---- round 1: the upstream header set is EXACTLY the allowlist -------------------
+
+#: What the transport itself must add: the request target's host.
+TRANSPORT = {"host"}
+
+
+async def test_browser_gate_sends_exactly_the_allowlist(upstream):
+    body = b'{"path": "C:/x"}'
+    incoming = _incoming(
+        (SCOPE_HEADER, "s1"), (ADMIN, "adm"), (MCP_ADMIN_HEADER, "madm"),
+        ("Content-Encoding", "identity"), ("Content-Length", str(len(body))),
+        ("User-Agent", "Mozilla/5.0"), ("Accept-Encoding", "gzip, br"),
+        ("X-Anything", "1"))
+    hdrs = peers.upstream_headers(incoming, gate=peers.GATE_BROWSER,
+                                  bearer=B_TOKEN, admin_header=ADMIN)
+
+    async def gen():
+        yield body
+
+    err, _ = await _relay(upstream, "/file/list", method="POST",
+                          headers=hdrs, body=gen())
+    assert err is None
+    seen = upstream.seen[-1]
+    expected = ({n.lower() for n in peers._UP_PLAIN}
+                | {SCOPE_HEADER.lower(), ADMIN.lower(), "accept-encoding",
+                   "authorization"} | TRANSPORT)
+    assert {k.lower() for k, _ in seen.headers} == expected
+    assert seen.all("Accept-Encoding") == ["identity"]
+    for never in ("user-agent", "cookie", "connection", "x-anything",
+                  MCP_ADMIN_HEADER.lower()):
+        assert never not in expected
+
+
+async def test_mcp_gate_sends_exactly_the_allowlist(upstream):
+    incoming = _incoming((SCOPE_HEADER, "s1"), (ADMIN, "adm"),
+                         (MCP_ADMIN_HEADER, "madm"),
+                         ("User-Agent", "agent/1"))
+    hdrs = peers.upstream_headers(incoming, gate=peers.GATE_MCP,
+                                  bearer=B_TOKEN, admin_header=ADMIN)
+    err, _ = await _relay(upstream, "/mcp/terminals", headers=hdrs)
+    assert err is None
+    seen = upstream.seen[-1]
+    # GET with no body: Content-Type/Accept are the client's, no length.
+    expected = ({"content-type", "accept", SCOPE_HEADER.lower(),
+                 MCP_ADMIN_HEADER.lower(), "accept-encoding",
+                 "authorization"} | TRANSPORT)
+    assert {k.lower() for k, _ in seen.headers} == expected
+    assert seen.all("Accept-Encoding") == ["identity"]
