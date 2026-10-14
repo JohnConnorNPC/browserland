@@ -967,6 +967,7 @@
             const gen = authGeneration;   // see authGeneration above
             let resp;
             let probe = null;
+            let viaAt = null;           // the way in this probe was about
             authSubmitting = true;
             const prevLabel = authSubmitBtn ? authSubmitBtn.textContent : '';
             if (authSubmitBtn) {
@@ -984,6 +985,7 @@
                 // candidate is paired with the origin this broker publishes
                 // for it right now -- the pairing stored below with it.
                 probe = { url: host.url, token: candidate };
+                viaAt = host.via === 'server' ? host.peerId : null;
                 if (host.via === 'server') {
                     const info = await localPeers();
                     const origin = info.peers[host.peerId];
@@ -1018,6 +1020,18 @@
             // The user cancelled (or the overlay moved to another host) while
             // the probe was out: do NOT reopen/re-authorise what they dismissed.
             if (gen !== authGeneration) return;
+            // #252: the host was switched (direct <-> from server, or to
+            // another peer) while the probe was out -- setHostMode edits the
+            // record in place, so its answer is about the OLD way in and must
+            // not store this password for the new one (the mint's moved()).
+            const nowRec = hostById(host.id);
+            if (!nowRec || (nowRec.via === 'server' ? nowRec.peerId : null)
+                    !== viaAt) {
+                authErrorEl.textContent = 'this host was switched meanwhile '
+                    + '— enter its password again';
+                authErrorEl.classList.add('show');
+                return;
+            }
             if (resp.status === 401) {
                 authErrorEl.textContent = 'invalid password';
                 authErrorEl.classList.add('show');

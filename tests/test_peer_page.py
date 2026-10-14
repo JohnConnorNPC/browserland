@@ -1900,3 +1900,40 @@ return { viaRead: viaRead, viaWrite: viaWrite, viaCalls: viaCalls,
         + _mod_sync_fn("writeSettings"))
     assert out == {"viaRead": None, "viaWrite": "no_state", "viaCalls": 0,
                    "direct": True, "urls": ["http://d:4445/state"]}
+
+
+
+@pytest.mark.parametrize("move", [TO_DIRECT, TO_C])
+def test_a_login_probe_answered_after_a_switch_stores_nothing(tmp_path, move):
+    """Round 1b N7: the record was switched while the password probe was
+    out; the answer is about the old way in, so the password is not stored
+    (on a now-direct record it would go straight to the host's url)."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+peerAnswer = { status: 200, body: [], delay: 60 };
+authOverlayHostId = 'rb';
+authTokenEl.value = 'NEW-B';
+const p = _submit({ preventDefault() {} });
+await new Promise(r => setTimeout(r, 15));
+MOVE
+await p;
+return { msg: authErrorEl.textContent, token: hostById('rb').token,
+         hidden: overlays.indexOf('hide') !== -1 };
+""".replace("INFO", json.dumps(INFO)).replace("MOVE", move),
+        extra_src=_dial_src() + _login_src())
+    assert out == {"msg": "this host was switched meanwhile — enter its "
+                          "password again",
+                   "token": B_TOKEN, "hidden": False}
+
+
+def test_a_login_probe_without_a_switch_still_stores(tmp_path):
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+peerAnswer = { status: 200, body: [], delay: 30 };
+authOverlayHostId = 'rb';
+authTokenEl.value = 'NEW-B';
+await _submit({ preventDefault() {} });
+return hostById('rb').token;
+""".replace("INFO", json.dumps(INFO)),
+        extra_src=_dial_src() + _login_src() + "function refreshTaskbar() {}")
+    assert out == "NEW-B"
