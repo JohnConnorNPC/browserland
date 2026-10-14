@@ -753,7 +753,37 @@
         //     a 5xx, a failed fetch) -- the host chip says why
         //     (pollStateFor().wsRefusal, 75) and the site backs off on its
         //     own clock, as for a failed dial.
+        // At most PEER_MINTS_PER_HOST mints run at once per host; the rest
+        // wait their turn in order, each still getting its own ticket. A
+        // restore or a healing tick re-dials every window at once, and the
+        // broker holds at most 16 unredeemed tickets per peer.
+        const PEER_MINTS_PER_HOST = 4;
+        const _peerMintQueues = new Map();   // hostId -> { busy, waiting }
         function _peerWsUrl(host, path) {
+            const hid = host.id;
+            let q = _peerMintQueues.get(hid);
+            if (!q) {
+                q = { busy: 0, waiting: [] };
+                _peerMintQueues.set(hid, q);
+            }
+            return new Promise((resolve, reject) => {
+                const run = () => {
+                    q.busy += 1;
+                    let mint;
+                    try { mint = _peerMint(host, path); }
+                    catch (e) { mint = Promise.reject(e); }
+                    mint.then(resolve, reject).then(() => {
+                        q.busy -= 1;
+                        const next = q.waiting.shift();
+                        if (next) next();
+                        else if (!q.busy) _peerMintQueues.delete(hid);
+                    });
+                };
+                if (q.busy < PEER_MINTS_PER_HOST) run();
+                else q.waiting.push(run);
+            });
+        }
+        function _peerMint(host, path) {
             const route = path.indexOf('/control') === 0 ? 'control' : 'ws';
             const refused = (code) => {
                 pollStateFor(host.id).wsRefusal = code;

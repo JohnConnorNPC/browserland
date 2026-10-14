@@ -74,6 +74,7 @@ const saves = [];
 const invalidated = [];
 let infoAnswers = [];
 let peerAnswer = null;
+let peerInflight = 0, peerInflightMax = 0;
 const window = { location: { protocol: 'http:', host: 'a:4445' } };
 function savePrefs() { saves.push(1); }
 function invalidateHost(id) { invalidated.push(id); }
@@ -91,6 +92,12 @@ async function fetch(url, o) {
     if (peerAnswer) {
         const a = peerAnswer;
         if (a.hook) a.hook();
+        if (a.delay) {
+            peerInflight += 1;
+            peerInflightMax = Math.max(peerInflightMax, peerInflight);
+            await new Promise(r => setTimeout(r, a.delay));
+            peerInflight -= 1;
+        }
         if (a.stall) {
             // The headers arrive; the body never does.
             return { status: a.status, ok: a.status >= 200 && a.status < 300,
@@ -647,6 +654,32 @@ return { afterOne: afterOne, afterReset: afterReset, made: wsMade,
     assert (out["made"], out["mints"]) == (3, 3)
     assert out["reattached"] == ["ctl:rb"]
     assert out["overlays"] == []
+
+
+def test_a_burst_of_windows_mints_at_most_4_at_a_time(tmp_path):
+    # Review round 1b: 20 windows re-dial in one tick (a restore, or the
+    # healing loop after the peer restarted): never more than 4 mints in
+    # flight for the host, every window still gets its own and dials.
+    answer = dict(OK_TICKET, delay=30)
+    out = _dial(tmp_path, """
+const wins = [];
+for (let i = 0; i < 20; i++) {
+    const w = mkWin('rb');
+    w.id = i; w.sid = 's' + i;
+    wins.push(w);
+    attachWebSocket(w);
+}
+await new Promise(r => setTimeout(r, 1500));
+return { made: wsMade, max: peerInflightMax,
+         mints: calls.filter(c => c.url === '/peer/b/ws-ticket').length,
+         dialed: wins.filter(w => w.ws && /ticket=T$/.test(w.ws.url)).length,
+         sids: wins.map(w => (w.ws.url.match(/session=(s\\d+)/) || [])[1]),
+         minting: wins.filter(w => w.minting).length };
+""", answer)
+    assert out["max"] == 4
+    assert out["mints"] == 20 and out["made"] == 20 and out["dialed"] == 20
+    assert out["sids"] == ["s%d" % i for i in range(20)]
+    assert out["minting"] == 0
 
 
 def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):

@@ -545,7 +545,9 @@ A page cannot set headers on a WebSocket handshake, so a proxied host's
    route or clientId is gone. It is bound to the peer, the route, the
    clientId, the peer's origin and this broker's token as they were at the
    mint. At most **16 per peer within 64 tickets** wait unredeemed; over
-   either, 503 `peer_busy`.
+   either, 503 `peer_busy`. The page mints at most 4 tickets per host at a
+   time, so a burst of re-dials (a restore, or every window after the peer
+   restarted) waits its turn instead of hitting that cap.
 3. **The socket.** `WS /peer/<id>/ws?session=…&clientId=…&ticket=…` (or
    `/control?clientId=…&ticket=…`) carries the ticket and nothing else. A
    bad, expired, reused, mis-bound or voided ticket closes it **4403**

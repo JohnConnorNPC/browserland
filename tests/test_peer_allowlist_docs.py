@@ -101,6 +101,11 @@ def test_the_sockets_part_states_what_the_code_does():
     assert "The server-side handshake never follows a redirect" in flat
     assert f"`websockets` {peers.PEER_WS_MIN_MAJOR} or later" in flat
     assert "until phase 2" not in s and "Phase 1 limits" not in s
+    # Review round 1b: the page's mint bound, from the page's own constant.
+    js = (REPO / "webterm" / "broker" / "63_js_clipboard_auth.js").read_text(
+        encoding="utf-8")
+    bound = int(re.search(r"const PEER_MINTS_PER_HOST = (\d+);", js).group(1))
+    assert f"The page mints at most {bound} tickets per host at a time" in flat
     # Review round 1b: A's own refusals are 4403; a 4401 is the peer's.
     assert "| %d `ticket` |" % ps.PEER_TICKET_REFUSED in s
     assert "| %d `revoked` |" % ps.PEER_TICKET_REFUSED in s
