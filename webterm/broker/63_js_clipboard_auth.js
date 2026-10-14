@@ -821,11 +821,22 @@
                 else q.waiting.push(run);
             });
         }
+        // The chip shows the NEWEST mint's outcome per host: mints run
+        // concurrently (four at a time) and settle in any order, so an older
+        // one that settles late must neither paint its reason over a newer
+        // one's nor clear a newer refusal. Each mint takes a number as it
+        // starts; only the newest writes wsRefusal.
+        const _peerMintGen = new Map();      // hostId -> newest mint's number
         function _peerMint(host, path) {
             const route = path.indexOf('/control') === 0 ? 'control' : 'ws';
+            const gen = (_peerMintGen.get(host.id) || 0) + 1;
+            _peerMintGen.set(host.id, gen);
+            const newest = () => _peerMintGen.get(host.id) === gen;
             const refused = (code) => {
-                pollStateFor(host.id).wsRefusal = code;
-                renderHostStatus();
+                if (newest()) {
+                    pollStateFor(host.id).wsRefusal = code;
+                    renderHostStatus();
+                }
                 throw new Error('ticket refused: ' + code);
             };
             return _peerFetch(host, '/ws-ticket', {
@@ -863,7 +874,10 @@
                             ? body.error : 'error'));
                 }
                 const st = pollStateFor(host.id);
-                if (st.wsRefusal) { st.wsRefusal = null; renderHostStatus(); }
+                if (st.wsRefusal && newest()) {
+                    st.wsRefusal = null;
+                    renderHostStatus();
+                }
                 const proto = window.location.protocol === 'https:'
                     ? 'wss:' : 'ws:';
                 return proto + '//' + window.location.host + '/peer/'

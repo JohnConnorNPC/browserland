@@ -93,7 +93,7 @@ async function fetch(url, o) {
         return new Response(JSON.stringify(next || {}), { status: 200 });
     }
     if (peerAnswer) {
-        const a = peerAnswer;
+        const a = typeof peerAnswer === 'function' ? peerAnswer(url) : peerAnswer;
         if (a.hook) a.hook();
         if (a.delay) {
             peerInflight += 1;
@@ -1566,3 +1566,35 @@ def test_the_hosts_row_wires_the_mode_control_and_the_note():
     assert "} else if (hostSwitchedAfterLoad(host)) {" in rows
     assert "moved.textContent = HOST_SWITCHED_NOTE;" in rows
     assert "refreshHostModeInfo(renderHostsList);" in rows
+
+
+GEN_BODY = """
+let n = 0;
+const answers = ANSWERS;
+peerAnswer = (url) => answers[n++];
+const p1 = hostWsUrl(hostById('rb'), '/ws?session=1').catch(e => String(e));
+await new Promise(r => setTimeout(r, 5));
+const p2 = hostWsUrl(hostById('rb'), '/ws?session=2').catch(e => String(e));
+const r = await Promise.all([p1, p2]);
+await settle();
+return { results: r, refusal: pollStateFor('rb').wsRefusal || null };
+"""
+SLOW_BUSY = dict(BUSY, delay=60)
+SLOW_OK = dict(OK_TICKET, delay=60)
+
+
+def test_an_older_mints_late_refusal_does_not_cover_a_newer_success(tmp_path):
+    """Phase-3 atom 13: the chip shows the NEWEST mint's outcome per host."""
+    out = _dial(tmp_path, GEN_BODY.replace(
+        "ANSWERS", json.dumps([SLOW_BUSY, OK_TICKET])))
+    assert "peer_busy" in out["results"][0]
+    assert out["results"][1].endswith("ticket=T")
+    assert out["refusal"] is None
+
+
+def test_an_older_mints_late_success_does_not_clear_a_newer_refusal(tmp_path):
+    out = _dial(tmp_path, GEN_BODY.replace(
+        "ANSWERS", json.dumps([SLOW_OK, BUSY])))
+    assert out["results"][0].endswith("ticket=T")
+    assert "peer_busy" in out["results"][1]
+    assert out["refusal"] == "peer_busy"
