@@ -513,7 +513,8 @@ async def test_the_dial_ceiling_before_headers_is_504(upstream, monkeypatch):
 
 async def test_the_dial_ceiling_mid_body_drops_the_downstream(upstream,
                                                               monkeypatch):
-    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    # GET /recording has its own ceiling (#252 phase 3), lowered here.
+    monkeypatch.setattr(peers, "PEER_RECORDING_DIAL_MAX_S", 0.6)
     upstream.routes["/recording"] = lambda s: Answer(drip_every=0.2,
                                                      drip_body=15)
     logs = []
@@ -521,3 +522,36 @@ async def test_the_dial_ceiling_mid_body_drops_the_downstream(upstream,
     assert err is None
     assert sink.status == 200 and sink.aborted is True and sink.ended is False
     assert logs and "hit the dial ceiling" in logs[0]
+
+
+
+# ---- the recording download's own ceiling (#252 phase 3, A11) ------------------
+
+def test_only_get_recording_gets_the_longer_ceiling():
+    assert peers.PEER_RECORDING_DIAL_MAX_S == 3600.0
+    assert peers.dial_ceiling("GET", "/recording") == 3600.0
+    for method, path in (("GET", "/recordings"), ("GET", "/info"),
+                         ("POST", "/recording/chunk"),
+                         ("HEAD", "/recording")):
+        assert peers.dial_ceiling(method, path) == peers.PEER_DIAL_MAX_S
+
+
+async def test_a_slow_recording_download_outlives_the_general_ceiling(
+        upstream, monkeypatch):
+    """The general ceiling no longer cuts a recording download short: with it
+    at 0.6 s, a 3 s steady download still arrives whole."""
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    upstream.routes["/recording"] = lambda s: Answer(drip_every=0.2,
+                                                     drip_body=15)
+    err, sink = await _relay(upstream, "/recording")
+    assert err is None
+    assert sink.status == 200 and sink.aborted is False and sink.ended is True
+
+
+async def test_the_recording_list_keeps_the_general_ceiling(upstream,
+                                                            monkeypatch):
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    upstream.routes["/recordings"] = lambda s: Answer(drip_every=0.2,
+                                                      drip_head=15)
+    err, _sink = await _relay(upstream, "/recordings")
+    assert err == (504, "peer_timeout")

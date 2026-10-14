@@ -88,6 +88,23 @@ PEER_MCP_BODY_DEADLINE_S = 5.0
 #: was sent yet, a dropped connection if something was).
 PEER_DIAL_MAX_S = 600.0
 
+#: The ceiling for ``GET /recording`` alone: a recording download, up to
+#: ``MAX_RECORDING_BYTES`` (256 MiB) on the wire. 3600 s keeps that pull
+#: alive down to about 0.6 Mbit/s, where :data:`PEER_DIAL_MAX_S` would need
+#: 3.6 Mbit/s. Stalls are still bounded by the read gap; this only lets a
+#: slow, steady download finish. Every other route -- ``GET /recordings``,
+#: the list, included -- keeps :data:`PEER_DIAL_MAX_S`.
+PEER_RECORDING_DIAL_MAX_S = 3600.0
+
+
+def dial_ceiling(method: str, path: str) -> float:
+    """The whole-dial ceiling for one table route (both read at call time,
+    so a test can lower them)."""
+    if (method, path) == ("GET", "/recording"):
+        return PEER_RECORDING_DIAL_MAX_S
+    return PEER_DIAL_MAX_S
+
+
 #: A peer id: what the client names, and the path segment after ``/peer/``.
 PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -469,10 +486,11 @@ def apply_change(app) -> None:
 
 async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
                 query: str, headers: list, body, respond, abort, log):
-    """:func:`_relay` under the :data:`PEER_DIAL_MAX_S` ceiling (read at call
-    time). Past it the dial is cancelled -- which closes the upstream -- and
-    the downstream gets a 504 if nothing was sent yet, or a dropped
-    connection if B's answer had started (it is never ended as if whole)."""
+    """:func:`_relay` under the route's dial ceiling (:func:`dial_ceiling`,
+    read at call time). Past it the dial is cancelled -- which closes the
+    upstream -- and the downstream gets a 504 if nothing was sent yet, or a
+    dropped connection if B's answer had started (it is never ended as if
+    whole)."""
     started = []
 
     async def _respond(**kwargs):
@@ -484,7 +502,7 @@ async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
             _relay(client, peer_id=peer_id, origin=origin, method=method,
                    path=path, query=query, headers=headers, body=body,
                    respond=_respond, abort=abort, log=log),
-            PEER_DIAL_MAX_S)
+            dial_ceiling(method, path))
     except asyncio.TimeoutError as exc:
         log("peer %s: %s %s hit the dial ceiling (%s)", peer_id, method,
             path, type(exc).__name__)

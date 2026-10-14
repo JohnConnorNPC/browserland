@@ -62,6 +62,7 @@ def test_the_section_states_what_the_code_does():
     assert (f"**{peers.PEER_MCP_MAX_DIALS_PER_PEER} per peer within "
             f"{peers.PEER_MCP_MAX_DIALS}**") in s
     assert f"**{peers.PEER_DIAL_MAX_S:g} s**" in s
+    assert f"**{peers.PEER_RECORDING_DIAL_MAX_S:g} s**" in s
     assert f"at most {peers.PEER_MCP_MAX_BODY // 2**20} MiB, within " \
         f"{peers.PEER_MCP_BODY_DEADLINE_S:g} s" in s
     assert f"Connect timeout {peers.PEER_CONNECT_TIMEOUT_S:g} s" in s

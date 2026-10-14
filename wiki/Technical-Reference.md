@@ -521,7 +521,10 @@ gate (whose callers this broker cannot authenticate) has its own pool of
 reads each request body whole (at most 1 MiB, within 5 s) before it takes a
 slot. Over either cap: 503 `peer_busy`, never a queue. A whole dial ends
 after **600 s** however steadily the peer drips (504 `peer_timeout`, or a
-dropped connection once the answer has started). Connect timeout 2.5 s (under the page's 3 s fetch deadline),
+dropped connection once the answer has started); a recording download
+(`GET /recording`, up to 256 MiB) gets **3600 s**, enough at about
+0.6 Mbit/s. `Range` and `If-None-Match` are not forwarded: the peer answers
+a recording whole, with no partial answer and no ETag. Connect timeout 2.5 s (under the page's 3 s fetch deadline),
 read timeout 30 s (past the 15 s `/mcp/read` wait and the 10 s desktop relay).
 Bodies stream both ways, one chunk at a time — a 256 MiB recording is never
 held whole; a body that dies half-way drops the connection rather than
