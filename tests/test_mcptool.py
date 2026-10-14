@@ -3014,3 +3014,14 @@ def test_get_client_carries_the_hosts_peer_origin():
         assert server._get_client("b").peer_origin is None
     finally:
         server.configure([])
+
+
+
+@pytest.mark.parametrize("padded", [" http://b:4448 ", "http://b:4448\t",
+                                    "\nhttp://b:4448"])
+def test_the_client_refuses_a_padded_peer_origin(padded):
+    """Round 2 SHOULD 2: the client itself refuses a padded peer_origin --
+    never trims it into a pairing the operator did not write."""
+    with pytest.raises(ValueError):
+        BrowserlandClient(base="http://hub:4445/peer/m", token="t",
+                          peer_origin=padded)
