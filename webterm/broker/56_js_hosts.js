@@ -50,6 +50,13 @@
         function hostIsProxied(h) {
             return !!(h && h.via === 'server');
         }
+        // The words every identity surface appends for such a host (the
+        // login overlay, the chip tips, the Hosts row): it is still the same
+        // host id, reached another way. '' for every other host, so their
+        // text is unchanged.
+        function hostViaNote(h) {
+            return hostIsProxied(h) ? ' (via this broker)' : '';
+        }
         function allHosts() { return getHosts(); }
         function localHost() { return getHosts()[0]; }
         function hostById(id) {

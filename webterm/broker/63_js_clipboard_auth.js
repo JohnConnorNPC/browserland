@@ -910,7 +910,7 @@
             // localStorage; never innerHTML a user-controlled string.
             authHostLine.textContent = host.id === 'local'
                 ? 'this broker (' + window.location.host + ')'
-                : host.label + ' (' + host.url + ')';
+                : host.label + ' (' + host.url + ')' + hostViaNote(host);
             authErrorEl.classList.remove('show');
             authTokenEl.value = '';
             authOverlay.classList.add('open');

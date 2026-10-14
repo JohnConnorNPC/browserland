@@ -436,7 +436,7 @@
         // same click the same way.
         function hostChipTip(host, state) {
             let tip = host.id === 'local'
-                ? 'this broker' : host.url;
+                ? 'this broker' : host.url + hostViaNote(host);
             if (state === 'auth') {
                 tip += ' — password required (click to log in)';
             } else if (state === 'lease') {
@@ -597,7 +597,8 @@
                 live.length ? '' : 'off'].filter(Boolean).join(' ');
             chip.textContent = text;
             const lines = hosts.map((h, i) =>
-                h.label + ' — ' + (hostStateSuffix(states[i]) || 'ok')
+                h.label + hostViaNote(h) + ' — '
+                + (hostStateSuffix(states[i]) || 'ok')
                 + (h.hidden ? ' — hidden' : ''));
             chip.title = lines.join('\n') + '\n— click for the broker menu';
             // Keyboard/AT parity is cheap here, and multi-line titles don't

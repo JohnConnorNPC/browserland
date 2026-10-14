@@ -1181,3 +1181,66 @@ return { msg: authErrorEl.textContent, token: hostById('rb').token };
         extra_src=_dial_src() + _login_src())
     assert out["msg"] == "this broker needs its own password"
     assert out["token"] == B_TOKEN
+
+
+DOM_STUBS = r"""
+function el() {
+    const e = { children: [], textContent: '', title: '', className: '',
+                attrs: {}, classList: { _s: new Set(),
+                    add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+                    contains(c) { return this._s.has(c); } },
+                appendChild(c) { this.children.push(c); return c; },
+                setAttribute(k, v) { this.attrs[k] = v; },
+                addEventListener() {}, focus() {} };
+    return e;
+}
+const document = { createElement: () => el() };
+const authOverlay = el(), authErrorEl = el(), authTokenEl = el();
+const authHostLine = el();
+let authOverlayHostId = null, authGeneration = 0;
+const authPrompted = new Set();
+function openLaunchMenu() {}
+"""
+
+
+def _identity_src():
+    s63 = _src("63_js_clipboard_auth.js")
+    s75 = _src("75_js_taskbar_hosts.js")
+    return (_dial_src() + DOM_STUBS + _func(s63, "showAuthOverlay")
+            + _func(s75, "hostStateSuffix")
+            + _func(s75, "renderAggregateChip"))
+
+
+def test_a_proxied_host_says_via_this_broker(tmp_path):
+    """P3-2 (A5): same host id, same label; the overlay line, the chip tip and
+    the aggregate chip's per-host line add "(via this broker)". A direct
+    host's text is byte-identical to before."""
+    prefs = _prefs()
+    prefs["_hosts"][2]["url"] = "http://d:4445"
+    out = _run(tmp_path, prefs, """
+const lines = {};
+for (const id of ['rb', 'rd']) {
+    authOverlay.classList.remove('open');
+    showAuthOverlay(hostById(id), true);
+    lines[id] = authHostLine.textContent;
+}
+const box = el();
+const hosts = getHosts();
+renderAggregateChip(box, hosts, hosts.map(() => 'ok'));
+return { overlay: lines, tipB: hostChipTip(hostById('rb'), 'ok'),
+         tipD: hostChipTip(hostById('rd'), 'ok'),
+         agg: box.children[0].title };
+""", extra_src=_identity_src())
+    assert out["overlay"] == {"rb": "B (http://b:4448) (via this broker)",
+                              "rd": "D (http://d:4445)"}
+    assert out["tipB"] == "http://b:4448 (via this broker) — click to hide"
+    assert out["tipD"] == "http://d:4445 — click to hide"
+    assert out["agg"].split("\n")[1:3] == ["B (via this broker) — ok",
+                                          "D — ok"]
+
+
+def test_the_hosts_row_names_the_mode():
+    """The Hosts row's name (non-behavioural call-site pin; the Playwright
+    pass shows it)."""
+    rows = _func(_src("83_js_broker_identity.js"), "renderHostsList")
+    assert ": host.label + ' — ' + host.url + hostViaNote(host);" in rows

@@ -481,7 +481,7 @@
                 // textContent only — labels/URLs are user input.
                 name.textContent = host.id === 'local'
                     ? 'this broker (' + window.location.host + ')'
-                    : host.label + ' — ' + host.url;
+                    : host.label + ' — ' + host.url + hostViaNote(host);
                 name.title = name.textContent;
                 row.appendChild(name);
                 // #190: a host added after page load sits outside the CSP this
