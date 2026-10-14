@@ -1,8 +1,8 @@
 """Outbound AI-provider status proxy: GET /status/fetch (#112).
 
-One of the broker's three egresses (the full inventory is executable in
-tests/test_egress_pin.py: this route, /update/check, and the configured
-#252 peers). SSRF defense is STRUCTURAL, not a
+One of the broker's three HTTP-library egresses (this route, /update/check,
+the configured #252 peers) plus the update apply's git fetch subprocess; the
+full inventory is executable in tests/test_egress_pin.py. SSRF defense is STRUCTURAL, not a
 filter: the client passes allowlist IDs, never URLs; an unknown ID is dropped, a
 request that names providers but validates NONE is a 400, a stray ?url= is
 ignored, and the upstream fetch itself is https-only + no-redirect + size-capped.

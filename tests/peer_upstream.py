@@ -62,6 +62,12 @@ class Answer:
     #: never opened, the writer stops after the first piece WITHOUT the
     #: terminating chunk: a body cut short that no length can reveal.
     chunked: bool = False
+    #: Drip mode: every ``drip_every`` seconds write ONE more piece -- first
+    #: ``drip_head`` extra header lines, then ``drip_body`` chunked body
+    #: pieces -- so no read gap is ever long, while the whole answer is slow.
+    drip_every: float = 0.0
+    drip_head: int = 0
+    drip_body: int = 0
 
 
 def json_answer(obj, status=200, extra=()) -> Answer:
@@ -169,8 +175,29 @@ class FakeUpstream:
             except Exception:  # noqa: BLE001 -- already gone
                 pass
 
+    async def _drip(self, writer, answer: Answer) -> None:
+        writer.write(f"HTTP/1.1 {answer.status} X\r\n".encode("latin-1"))
+        await writer.drain()
+        for i in range(answer.drip_head):
+            await asyncio.sleep(answer.drip_every)
+            writer.write(f"X-Drip-{i}: x\r\n".encode("latin-1"))
+            await writer.drain()
+        writer.write(b"Content-Type: application/octet-stream\r\n"
+                     b"Transfer-Encoding: chunked\r\n"
+                     b"Connection: close\r\n\r\n")
+        await writer.drain()
+        for _ in range(answer.drip_body):
+            await asyncio.sleep(answer.drip_every)
+            writer.write(b"1\r\nx\r\n")
+            await writer.drain()
+        writer.write(b"0\r\n\r\n")
+        await writer.drain()
+
     async def _write(self, writer, answer: Answer) -> None:
         loop = asyncio.get_running_loop()
+        if answer.drip_every:
+            await self._drip(writer, answer)
+            return
         if answer.hold is not None:
             await loop.run_in_executor(None, answer.hold.wait, 30)
         head = [f"HTTP/1.1 {answer.status} X"]

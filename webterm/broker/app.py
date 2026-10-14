@@ -4750,6 +4750,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # overwrite it; A's own refusals on the prefix get it too.
             response.headers["Content-Security-Policy"] = peers.SANDBOX_CSP
             response.headers["X-Content-Type-Options"] = "nosniff"
+            # ...and never a cached one: a peer must not pin its answers in
+            # the browser under this origin (B's cache headers are dropped).
+            response.headers["Cache-Control"] = "no-store"
         else:
             response.headers["Content-Security-Policy"] = app.ctx.csp
         # #190 staged rollout: the FULL policy (default-src, dynamic
@@ -8748,6 +8751,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # sandbox CSP + nosniff) is applied by _cors_headers to every /peer/*
     # response, A's own refusals included.
     app.ctx.peer_cap = peers.DialCap()
+    # The MCP gate's own, smaller pool: A cannot authenticate those callers,
+    # so they must never be able to take a browser-gate slot.
+    app.ctx.peer_mcp_cap = peers.DialCap(peers.PEER_MCP_MAX_DIALS,
+                                         peers.PEER_MCP_MAX_DIALS_PER_PEER)
     app.ctx.peer_client = None
 
     def _peer_refusal(gate_mcp: bool, status: int, error: str):
@@ -8761,6 +8768,40 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if header.lower().startswith("bearer "):
             return header[7:].strip() or None
         return None
+
+    async def _read_capped_body(request: Request):
+        """``(body, None)`` or ``(None, (status, error))``: a whole request
+        body, read BEFORE a slot is taken, within peers.PEER_MCP_MAX_BODY and
+        peers.PEER_MCP_BODY_DEADLINE_S. A declared length over the cap is
+        refused unread. Used for every MCP-gate body, and to drop the body a
+        bodiless method declared (it is never forwarded, and an unread body
+        under a 2xx is an ERROR line in Sanic's log)."""
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > peers.PEER_MCP_MAX_BODY:
+                    return None, (413, "body_too_large")
+            except ValueError:
+                return None, (400, "bad_length")
+        buf = bytearray()
+
+        async def _read():
+            while True:
+                chunk = await request.stream.read()
+                if chunk is None:
+                    return True
+                buf.extend(chunk)
+                if len(buf) > peers.PEER_MCP_MAX_BODY:
+                    return False
+
+        try:
+            fits = await asyncio.wait_for(_read(),
+                                          peers.PEER_MCP_BODY_DEADLINE_S)
+        except asyncio.TimeoutError:
+            return None, (408, "body_timeout")
+        if not fits:
+            return None, (413, "body_too_large")
+        return bytes(buf), None
 
     async def _peer_relay(request: Request, peer_id: str, rest: str = ""):
         gate_mcp = peers.is_mcp_path(rest)
@@ -8777,20 +8818,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return _peer_refusal(True, 401, "auth_required")
             if peer is None or not peer["mcp"]:
                 return _peer_refusal(True, 404, "unknown_peer")
+            if not app.ctx.peer_proxy:
+                return _peer_refusal(True, 503, "proxy_unavailable")
         else:
+            # Browser gate order: 401, then 503, then 404 -- a caller
+            # without this broker's token learns nothing, not even whether
+            # the proxy extra is installed.
             if not auth.token_matches(_peer_bearer(request),
                                       app.ctx.auth_token):
                 LOGGER.warning("rejected unauthenticated /peer from %s",
                                request.ip)
                 return _peer_refusal(False, 401, "auth_required")
+            if not app.ctx.peer_proxy:
+                return _peer_refusal(False, 503, "proxy_unavailable")
             if peer is None:
                 return _peer_refusal(False, 404, "unknown_peer")
-        if not app.ctx.peer_proxy:
-            return _peer_refusal(gate_mcp, 503, "proxy_unavailable")
+        # is_mcp_path and classify decode `rest` the same way, so the table
+        # that matched always belongs to the gate already chosen.
         gate, path = peers.classify(request.method, rest)
-        if gate is None or (gate == peers.GATE_MCP) != gate_mcp:
-            return _peer_refusal(gate_mcp, 404,
-                                 path if gate is None else "not_relayed")
+        if gate is None:
+            return _peer_refusal(gate_mcp, 404, path)
         if not gate_mcp:
             bearer = request.headers.get(peers.PEER_TOKEN_HEADER) or ""
             if not bearer:
@@ -8804,13 +8851,27 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 admin_header=ADMIN_HEADER)
         except peers.PolicyError as exc:
             return _peer_refusal(gate_mcp, exc.status, exc.error)
-        if not app.ctx.peer_cap.acquire(peer_id):
-            return _peer_refusal(gate_mcp, 503, "peer_busy")
-        try:
-            if app.ctx.peer_client is None:
-                app.ctx.peer_client = peers.make_client()
-            body = None
-            if request.method in ("POST", "PUT"):
+        body = None
+        if request.method not in ("POST", "PUT"):
+            if (request.headers.get("content-length") not in (None, "0")
+                    or request.headers.get("transfer-encoding")):
+                _, err = await _read_capped_body(request)
+                if err is not None:
+                    return _peer_refusal(gate_mcp, err[0], err[1])
+        else:
+            if gate_mcp:
+                # Whole and bounded BEFORE the slot (see _read_capped_body).
+                body, err = await _read_capped_body(request)
+                if err is not None:
+                    return _peer_refusal(True, err[0], err[1])
+                headers.append(("Content-Length", str(len(body))))
+            else:
+                # The browser gate streams (uploads, recordings): its caller
+                # holds this broker's token and the peer's, both checked.
+                declared = request.headers.get("content-length")
+                if declared is not None:
+                    headers.append(("Content-Length", declared))
+
                 async def _stream_body():
                     # The route is stream=True: B's body crosses chunk by
                     # chunk, as its answer does, and is never held whole.
@@ -8820,6 +8881,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                             return
                         yield chunk
                 body = _stream_body()
+        cap = app.ctx.peer_mcp_cap if gate_mcp else app.ctx.peer_cap
+        if not cap.acquire(peer_id):
+            return _peer_refusal(gate_mcp, 503, "peer_busy")
+        try:
+            if app.ctx.peer_client is None:
+                app.ctx.peer_client = peers.make_client()
             err = await peers.relay(
                 app.ctx.peer_client, peer_id=peer_id,
                 # Re-read at dial time: the entry, not a captured origin.
@@ -8830,7 +8897,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 abort=lambda: request.transport.abort(),
                 log=LOGGER.warning)
         finally:
-            app.ctx.peer_cap.release(peer_id)
+            cap.release(peer_id)
         if err is not None:
             return _peer_refusal(gate_mcp, err[0], err[1])
         return None

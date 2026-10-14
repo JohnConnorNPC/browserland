@@ -57,6 +57,8 @@ def live(upstream, tmp_path_factory):
     peer_map = {pid: {"origin": upstream.origin}
                 for pid in ("b", "c", "d", "e", "f")}
     peer_map["m"] = {"origin": upstream.origin, "mcp": True}
+    for pid in ("m2", "m3", "m4"):
+        peer_map[pid] = {"origin": upstream.origin, "mcp": True}
     peer_map["dead"] = {"origin": _dead_origin()}
     app = _make_app(tmp, peer_map)
     srv = LiveApp(app).start()
@@ -380,6 +382,12 @@ async def test_missing_extra_is_503(tmp_path, upstream, monkeypatch):
         r = await _get(srv, "/peer/b/info", browser(upstream.origin))
         assert r.status_code == 503
         assert r.json() == {"ok": False, "error": "proxy_unavailable"}
+        # Round 1b: 401 before 503 before 404 on the browser gate.
+        r = await _get(srv, "/peer/b/info", browser(upstream.origin, a=None))
+        assert r.status_code == 401
+        r = await _get(srv, "/peer/zz/info", browser(upstream.origin))
+        assert (r.status_code, r.json()["error"]) == (503,
+                                                      "proxy_unavailable")
         r = await _get(srv, "/peer/m/mcp/info",
                        {"Authorization": "Bearer " + B_MCP})
         assert r.status_code == 503
@@ -496,3 +504,166 @@ async def test_a_cookie_from_b_never_reaches_another_users_request(live,
     assert seen.path == "/info"
     assert seen.all("Cookie") == []
     assert seen.all("User-Agent") == []
+
+
+
+# ---- round 1b ----------------------------------------------------------------------
+
+def _stalled_mcp_post(port, pid="m"):
+    """An unauthenticated-to-A caller: a junk bearer, a declared body, one
+    byte of it, then nothing."""
+    s = socket.create_connection(("127.0.0.1", port))
+    s.sendall(f"POST /peer/{pid}/mcp/read HTTP/1.1\r\nHost: a\r\n"
+              f"Authorization: Bearer junk\r\n"
+              f"Content-Type: application/json\r\n"
+              f"Content-Length: 100\r\n\r\n{{".encode())
+    return s
+
+
+async def test_stalled_mcp_bodies_hold_no_slot(live, upstream, monkeypatch):
+    """MUST 1: the MCP gate reads the body BEFORE a slot. Eight callers who
+    stall mid-body hold nothing: the browser gate and a real MCP caller still
+    get through, and every stalled one is answered 408 without a dial."""
+    import asyncio
+    monkeypatch.setattr(peers, "PEER_MCP_BODY_DEADLINE_S", 2.0)
+    socks = [_stalled_mcp_post(live.port) for _ in range(8)]
+    try:
+        await asyncio.sleep(0.3)
+        assert live.app.ctx.peer_mcp_cap._busy == {}
+        assert live.app.ctx.peer_cap._busy == {}
+        r = await _get(live, "/peer/b/info", browser(upstream.origin))
+        assert r.status_code == 200
+        r = await _get(live, "/peer/m/mcp/info",
+                       {"Authorization": "Bearer " + B_MCP})
+        assert r.status_code == 200
+        for s in socks:
+            s.settimeout(10)
+            head = s.recv(4096)
+            assert head.startswith(b"HTTP/1.1 408"), head[:60]
+            assert b'"body_timeout"' in head or b"body_timeout" in (
+                head + s.recv(4096))
+    finally:
+        for s in socks:
+            s.close()
+    assert upstream.hits("/mcp/read") == 0
+
+
+async def test_mcp_dials_cannot_take_a_browser_slot(live, upstream):
+    """MUST 1: 32 junk-bearer dials to 4 opted-in peers that never answer
+    fill only the MCP gate's own pool (2 per peer, 8 overall); a live
+    peer's browser gate still answers."""
+    import asyncio
+    hold = threading.Event()
+    upstream.routes["/mcp/terminals"] = lambda s: Answer(
+        200, [("Content-Type", "application/json")], b"[]", hold=hold)
+    client = _client()
+    tasks = [asyncio.ensure_future(client.get(
+        live.url + f"/peer/{pid}/mcp/terminals",
+        headers={"Authorization": "Bearer junk"}))
+        for pid in ("m", "m2", "m3", "m4") for _ in range(8)]
+    try:
+        for _ in range(200):
+            if upstream.hits("/mcp/terminals") >= 8:
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        assert upstream.hits("/mcp/terminals") == peers.PEER_MCP_MAX_DIALS
+        assert sum(live.app.ctx.peer_mcp_cap._busy.values()) == 8
+        assert live.app.ctx.peer_cap._busy == {}
+        r = await client.get(live.url + "/peer/b/info",
+                             headers=browser(upstream.origin))
+        assert r.status_code == 200
+    finally:
+        hold.set()
+        done = [await t for t in tasks]
+        await client.aclose()
+    assert sorted({d.status_code for d in done}) == [200, 503]
+    assert live.app.ctx.peer_mcp_cap._busy == {}
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+async def test_an_oversized_mcp_body_is_413_without_a_dial(live, upstream,
+                                                           chunked):
+    big = b"x" * (peers.PEER_MCP_MAX_BODY + 1)
+
+    async def gen():
+        for i in range(0, len(big), 65536):
+            yield big[i:i + 65536]
+
+    r = await _get(live, "/peer/m/mcp/read",
+                   {"Authorization": "Bearer " + B_MCP,
+                    "Content-Type": "application/json"},
+                   method="POST", content=gen() if chunked else big)
+    assert r.status_code == 413
+    assert r.json() == {"error": "body_too_large"}
+    assert upstream.hits("/mcp/read") == 0
+
+
+async def test_a_bodiless_get_never_forwards_a_content_length(live, upstream,
+                                                              caplog):
+    """SHOULD 2: a GET that declares a body is relayed without the length
+    (it would break the upstream framing); no traceback either way."""
+    import asyncio
+    import logging
+    with caplog.at_level(logging.INFO):
+        r = await _get(live, "/peer/b/info", browser(upstream.origin),
+                       content=b"12345")
+        # Sanic logs an unread body AFTER the response has gone out; give
+        # that line time to land before looking for it.
+        await asyncio.sleep(0.5)
+    assert r.status_code == 200
+    _hardened(r)
+    assert upstream.seen[-1].all("Content-Length") == []
+    errors = [x.getMessage() for x in caplog.records
+              if x.levelno >= logging.ERROR]
+    assert not [m for m in errors if "body not consumed" in m], errors
+    assert not [x for x in caplog.records if x.exc_info], errors
+
+
+async def test_every_peer_answer_is_no_store(live, upstream):
+    """SHOULD 3: a peer cannot pin its answers in the browser."""
+    upstream.routes["/sessions"] = lambda s: Answer(
+        200, [("Content-Type", "application/json"),
+              ("Cache-Control", "public, max-age=3600"), ("ETag", '"pin"'),
+              ("Last-Modified", "Tue, 13 Oct 2026 00:00:00 GMT"),
+              ("Expires", "Thu, 01 Jan 2099 00:00:00 GMT"), ("Age", "1")],
+        b"[]")
+    r = await _get(live, "/peer/b/sessions", browser(upstream.origin))
+    assert r.status_code == 200
+    assert r.headers["Cache-Control"] == "no-store"
+    for gone in ("etag", "last-modified", "expires", "age"):
+        assert gone not in r.headers
+    r = await _get(live, "/peer/b/info", browser(upstream.origin, a=None))
+    assert r.status_code == 401
+    assert r.headers["Cache-Control"] == "no-store"
+
+
+async def test_a_dripping_peer_hits_the_dial_ceiling(live, upstream,
+                                                     monkeypatch):
+    """SHOULD 4: a peer that sends a header line every 0.2 s never trips
+    the read gap; the whole-dial ceiling ends it and frees the slot."""
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 1.0)
+    upstream.routes["/info"] = lambda s: Answer(drip_every=0.2, drip_head=20)
+    r = await _get(live, "/peer/b/info", browser(upstream.origin))
+    assert r.status_code == 504
+    assert r.json() == {"ok": False, "error": "peer_timeout"}
+    assert live.app.ctx.peer_cap._busy == {}
+
+
+async def test_a_declared_oversize_mcp_body_is_refused_unread(live, upstream):
+    """The declared length alone decides: A answers 413 at once, without
+    waiting for (or reading) a body it would refuse anyway."""
+    import asyncio
+    s = socket.create_connection(("127.0.0.1", live.port))
+    try:
+        s.sendall(("POST /peer/m/mcp/read HTTP/1.1\r\nHost: a\r\n"
+                   "Authorization: Bearer junk\r\n"
+                   "Content-Length: %d\r\n\r\n{" % (peers.PEER_MCP_MAX_BODY
+                                                     * 2)).encode())
+        s.settimeout(1.5)
+        head = await asyncio.get_running_loop().run_in_executor(
+            None, s.recv, 4096)
+    finally:
+        s.close()
+    assert head.startswith(b"HTTP/1.1 413"), head[:60]
+    assert upstream.hits("/mcp/read") == 0

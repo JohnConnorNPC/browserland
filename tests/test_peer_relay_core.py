@@ -186,10 +186,16 @@ def test_downstream_headers_drop_everything_unlisted():
                  ("Transfer-Encoding", "chunked"),
                  ("Content-Security-Policy", "script-src *"),
                  ("Content-Type", "text/html"), ("ETag", '"e1"'),
-                 ("Cache-Control", "no-store"), ("Content-Length", "3")])
+                 ("Last-Modified", "Tue, 13 Oct 2026 00:00:00 GMT"),
+                 ("Expires", "Wed, 14 Oct 2026 00:00:00 GMT"), ("Age", "5"),
+                 ("Cache-Control", "public, max-age=3600"),
+                 ("Content-Length", "3"), ("Content-Encoding", "gzip"),
+                 ("Content-Disposition", "attachment; filename=r.jsonl")])
     out = peers.downstream_headers(up)
-    assert out == {"ETag": '"e1"', "Cache-Control": "no-store",
-                   "Content-Length": "3",
+    # Round 1b: no cache header of B's crosses; every answer is no-store.
+    assert out == {"Content-Length": "3", "Content-Encoding": "gzip",
+                   "Content-Disposition": "attachment; filename=r.jsonl",
+                   "Cache-Control": "no-store",
                    "X-Content-Type-Options": "nosniff",
                    "Content-Security-Policy": peers.SANDBOX_CSP}
 
@@ -282,6 +288,10 @@ async def test_relay_forwards_a_body_with_its_length(upstream):
         Header([("Content-Type", "application/json"),
                 ("Content-Length", str(len(payload)))]),
         gate=peers.GATE_BROWSER, bearer=B_TOKEN, admin_header=ADMIN)
+    # Content-Length describes a body, so the policy never forwards it;
+    # the route adds it only when it sends one (as here).
+    assert "content-length" not in _names(hdrs)
+    hdrs.append(("Content-Length", str(len(payload))))
     err, sink = await _relay(upstream, "/file/list", method="POST",
                              headers=hdrs, body=body())
     assert err is None and sink.status == 200
@@ -426,6 +436,7 @@ async def test_browser_gate_sends_exactly_the_allowlist(upstream):
         ("X-Anything", "1"))
     hdrs = peers.upstream_headers(incoming, gate=peers.GATE_BROWSER,
                                   bearer=B_TOKEN, admin_header=ADMIN)
+    hdrs.append(("Content-Length", str(len(body))))     # as the route does
 
     async def gen():
         yield body
@@ -436,7 +447,7 @@ async def test_browser_gate_sends_exactly_the_allowlist(upstream):
     seen = upstream.seen[-1]
     expected = ({n.lower() for n in peers._UP_PLAIN}
                 | {SCOPE_HEADER.lower(), ADMIN.lower(), "accept-encoding",
-                   "authorization"} | TRANSPORT)
+                   "authorization", "content-length"} | TRANSPORT)
     assert {k.lower() for k, _ in seen.headers} == expected
     assert seen.all("Accept-Encoding") == ["identity"]
     for never in ("user-agent", "cookie", "connection", "x-anything",
@@ -459,3 +470,51 @@ async def test_mcp_gate_sends_exactly_the_allowlist(upstream):
                  "authorization"} | TRANSPORT)
     assert {k.lower() for k, _ in seen.headers} == expected
     assert seen.all("Accept-Encoding") == ["identity"]
+
+
+
+# ---- round 1b ----------------------------------------------------------------------
+
+class _ExplodingClient:
+    """A client whose dial raises something that is NOT an httpx error (as
+    h11 does for a Content-Length the body does not match)."""
+
+    def build_request(self, *a, **k):
+        return None
+
+    async def send(self, *a, **k):
+        raise RuntimeError("h11 said no: http://secret-origin/?token=x")
+
+
+async def test_any_dial_failure_is_a_502_with_the_class_only():
+    logs = []
+    sink = Sink()
+    err = await peers.relay(
+        _ExplodingClient(), peer_id="b", origin="http://secret-origin",
+        method="GET", path="/info", query="token=x", headers=[], body=None,
+        respond=sink.respond, abort=sink.abort,
+        log=lambda *a: logs.append(a[0] % a[1:]))
+    assert err == (502, "peer_unreachable")
+    assert logs == ["peer b: GET /info failed (RuntimeError)"]
+
+
+async def test_the_dial_ceiling_before_headers_is_504(upstream, monkeypatch):
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    upstream.routes["/info"] = lambda s: Answer(drip_every=0.2, drip_head=15)
+    logs = []
+    err, sink = await _relay(upstream, "/info", logs=logs)
+    assert err == (504, "peer_timeout")
+    assert sink.status is None
+    assert logs == ["peer b: GET /info hit the dial ceiling (TimeoutError)"]
+
+
+async def test_the_dial_ceiling_mid_body_drops_the_downstream(upstream,
+                                                              monkeypatch):
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    upstream.routes["/recording"] = lambda s: Answer(drip_every=0.2,
+                                                     drip_body=15)
+    logs = []
+    err, sink = await _relay(upstream, "/recording", logs=logs)
+    assert err is None
+    assert sink.status == 200 and sink.aborted is True and sink.ended is False
+    assert logs and "hit the dial ceiling" in logs[0]

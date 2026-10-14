@@ -14,7 +14,12 @@ see a library it does not name, so a new egress library belongs in its sets.
 * the configured peers (#252): ``httpx``, imported ONLY inside peers.py
   functions (core never imports it; it is the optional ``proxy`` extra), and
   one ``AsyncClient`` built in ``make_client`` with no redirects and no env
-  proxies.
+  proxies;
+* not an HTTP library but still egress: the update apply's ``git fetch``
+  child process (``_git_mutation(["fetch", url, branch])`` in
+  ``perform_apply``), found by its argument list.
+
+So: three HTTP-library egresses plus the update apply's git fetch.
 
 ``vendor_codemirror.py`` is a dev-only vendoring script that nothing in the
 broker imports; it is excluded and that exclusion is itself asserted.
@@ -38,6 +43,10 @@ NET_CALLS = {"urlopen", "build_opener", "urlretrieve", "open_connection",
 #: Modules whose import is itself an outbound-capable surface.
 NET_MODULES = {"httpx", "requests", "aiohttp", "urllib3", "http.client",
                "websockets"}
+#: git verbs that reach the network; a call passing a list that starts with
+#: one (``_git_mutation(["fetch", url, branch])``) is egress through a child
+#: process the Python-API scan cannot see.
+NET_GIT_VERBS = {"fetch", "pull", "clone", "ls-remote", "push"}
 #: The two stdlib openers; their `.open(` call sites are egress too.
 OPENER_NAMES = {"_STATUS_OPENER", "_OPENER"}
 
@@ -48,7 +57,9 @@ EXPECTED = {
     ("update.py", "call _OPENER.open", "fetch_json"),
     ("peers.py", "import httpx", "proxy_available"),
     ("peers.py", "import httpx", "make_client"),
-    ("peers.py", "import httpx", "relay"),
+    ("peers.py", "import httpx", "_relay"),
+    # Not an HTTP library, still an egress: the update apply's git fetch.
+    ("update.py", "git fetch", "perform_apply"),
     ("peers.py", "call httpx.AsyncClient", "make_client"),
 }
 
@@ -75,6 +86,12 @@ def _inventory():
                             and getattr(func.value, "id", None)
                             in OPENER_NAMES):
                         found.add((rel, "call " + ast.unparse(func), scope))
+                    for arg in child.args:
+                        if (isinstance(arg, ast.List) and arg.elts
+                                and isinstance(arg.elts[0], ast.Constant)
+                                and arg.elts[0].value in NET_GIT_VERBS):
+                            found.add((rel, "git " + arg.elts[0].value,
+                                       scope))
                 elif isinstance(child, ast.Import):
                     for alias in child.names:
                         if alias.name in NET_MODULES:

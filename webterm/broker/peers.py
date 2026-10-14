@@ -20,6 +20,7 @@ starts and answers ``/peer/*`` with ``503 proxy_unavailable``.
 
 from __future__ import annotations
 
+import asyncio
 import http.cookiejar
 import logging
 import re
@@ -63,6 +64,24 @@ PEER_MAX_DIALS = 32
 #: peer that is down (every dial waits out the connect timeout) cannot take
 #: every slot from the peers that are up.
 PEER_MAX_DIALS_PER_PEER = 8
+
+#: The MCP gate's OWN dial pool. A cannot check B's MCP token, so anyone who
+#: can reach A can dial through this gate: it gets a small pool of its own and
+#: can never take a slot from the browser gate (whose callers hold A's token).
+PEER_MCP_MAX_DIALS = 8
+PEER_MCP_MAX_DIALS_PER_PEER = 2
+
+#: Every MCP route takes a small JSON body, so the MCP gate reads it WHOLE
+#: before it takes a slot: at most this many bytes (413 over it) within this
+#: deadline (408 past it). A caller who stalls mid-body holds nothing.
+PEER_MCP_MAX_BODY = 1 * 2**20
+PEER_MCP_BODY_DEADLINE_S = 5.0
+
+#: The ceiling on one whole dial, headers and body together. A peer that
+#: drips a byte at a time keeps refreshing the read gap; this does not move.
+#: Past it the upstream is closed and the downstream ended (504 if nothing
+#: was sent yet, a dropped connection if something was).
+PEER_DIAL_MAX_S = 600.0
 
 #: A peer id: what the client names, and the path segment after ``/peer/``.
 PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -320,14 +339,18 @@ def is_mcp_path(rest: str) -> bool:
 # (Connection, Keep-Alive, Proxy-Authenticate, Proxy-Authorization, TE,
 # Trailer, Transfer-Encoding, Upgrade) in both directions.
 
-#: Request headers forwarded as the client sent them.
-_UP_PLAIN = ("Content-Type", "Content-Length", "Content-Encoding",
-             "Accept")
+#: Request headers forwarded as the client sent them. Content-Length is NOT
+#: here: it describes a body, so the route sets it only when a body is sent
+#: (a bodiless GET that declared one would otherwise break the dial).
+_UP_PLAIN = ("Content-Type", "Content-Encoding", "Accept")
 
 #: Response headers forwarded as B sent them. Content-Type is never in this
-#: list: it is forced (see :func:`forced_content_type`).
-_DOWN_PLAIN = ("Content-Length", "Content-Encoding", "Cache-Control", "ETag",
-               "Last-Modified", "Content-Disposition")
+#: list: it is forced (see :func:`forced_content_type`). Neither is any cache
+#: header: a peer must not pin its answers in the browser under this origin,
+#: so every /peer/* response is ``Cache-Control: no-store`` and B's
+#: ``Cache-Control``, ``ETag``, ``Last-Modified``, ``Expires`` and ``Age``
+#: stay behind.
+_DOWN_PLAIN = ("Content-Length", "Content-Encoding", "Content-Disposition")
 
 #: The enforced CSP of every /peer/* response: a relayed body is never a
 #: document that can run script on A's origin.
@@ -409,17 +432,20 @@ def downstream_headers(up_headers) -> dict:
             out[name] = val
     out["X-Content-Type-Options"] = "nosniff"
     out["Content-Security-Policy"] = SANDBOX_CSP
+    out["Cache-Control"] = "no-store"
     return out
 
 
 # ---- the dial cap -----------------------------------------------------------------
 
 class DialCap:
-    """Concurrent upstream dials: at most :data:`PEER_MAX_DIALS_PER_PEER` to
-    one peer, inside :data:`PEER_MAX_DIALS` overall. Non-blocking: a dial over
-    either limit is refused (503 ``peer_busy``), never queued -- a queue
-    would be a second retry layer under the page's own. One event loop, so
-    plain counters are enough."""
+    """Concurrent upstream dials: at most ``per_peer`` to one peer, inside
+    ``total`` overall. Non-blocking: a dial over either limit is refused (503
+    ``peer_busy``), never queued -- a queue would be a second retry layer
+    under the page's own. One event loop, so plain counters are enough. The
+    route keeps two: the browser gate's (:data:`PEER_MAX_DIALS_PER_PEER` /
+    :data:`PEER_MAX_DIALS`) and the MCP gate's
+    (:data:`PEER_MCP_MAX_DIALS_PER_PEER` / :data:`PEER_MCP_MAX_DIALS`)."""
 
     def __init__(self, total: int = PEER_MAX_DIALS,
                  per_peer: int = PEER_MAX_DIALS_PER_PEER) -> None:
@@ -446,6 +472,33 @@ class DialCap:
 
 async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
                 query: str, headers: list, body, respond, abort, log):
+    """:func:`_relay` under the :data:`PEER_DIAL_MAX_S` ceiling (read at call
+    time). Past it the dial is cancelled -- which closes the upstream -- and
+    the downstream gets a 504 if nothing was sent yet, or a dropped
+    connection if B's answer had started (it is never ended as if whole)."""
+    started = []
+
+    async def _respond(**kwargs):
+        started.append(True)
+        return await respond(**kwargs)
+
+    try:
+        return await asyncio.wait_for(
+            _relay(client, peer_id=peer_id, origin=origin, method=method,
+                   path=path, query=query, headers=headers, body=body,
+                   respond=_respond, abort=abort, log=log),
+            PEER_DIAL_MAX_S)
+    except asyncio.TimeoutError as exc:
+        log("peer %s: %s %s hit the dial ceiling (%s)", peer_id, method,
+            path, type(exc).__name__)
+        if started:
+            abort()
+            return None
+        return 504, "peer_timeout"
+
+
+async def _relay(client, *, peer_id: str, origin: str, method: str, path: str,
+                 query: str, headers: list, body, respond, abort, log):
     """Dial ``origin + path`` and stream B's answer to ``respond``.
 
     Returns ``None`` once B's answer has been streamed (or the downstream was
@@ -470,7 +523,9 @@ async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
         log("peer %s: %s %s timed out (%s)", peer_id, method, path,
             type(exc).__name__)
         return 504, "peer_timeout"
-    except httpx.HTTPError as exc:
+    except Exception as exc:  # noqa: BLE001 -- any failure is the peer's
+        # Not only httpx's own errors: h11 or a transport can raise others,
+        # and an uncaught one is a 500 with a traceback in this broker's log.
         log("peer %s: %s %s failed (%s)", peer_id, method, path,
             type(exc).__name__)
         return 502, "peer_unreachable"
@@ -484,7 +539,7 @@ async def relay(client, *, peer_id: str, origin: str, method: str, path: str,
             # (not even a 256 MiB recording) is held whole in memory.
             async for chunk in up.aiter_raw():
                 await response.send(chunk)
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # noqa: BLE001 -- see the dial above
             log("peer %s: %s %s broke mid-body (%s)", peer_id, method, path,
                 type(exc).__name__)
             abort()
