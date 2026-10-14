@@ -8845,13 +8845,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return _peer_refusal(True, 404, "unknown_peer")
             if not app.ctx.peer_proxy:
                 return _peer_refusal(True, 503, "proxy_unavailable")
-            # The pairing (#252 phase 3), checked only when the client sends
-            # it (an mcptool host configured with a peer_origin): a re-pointed
-            # peer must not receive the MCP token that was meant for the old
-            # address. After the rungs above, before the table, no dial.
-            sent = request.headers.get(peers.PEER_ORIGIN_HEADER)
-            if sent is not None and sent != peer["origin"]:
-                return _peer_refusal(True, 409, "peer_origin_changed")
         else:
             refusal = _peer_browser_entry(request, peer)
             if refusal is not None:
@@ -8865,6 +8858,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             bearer, refusal = _peer_browser_pairing(request, peer)
             if refusal is not None:
                 return refusal
+        else:
+            # The pairing (#252 phase 3), checked only when the client sends
+            # it (an mcptool host configured with a peer_origin): a re-pointed
+            # peer must not receive the MCP token that was meant for the old
+            # address. AFTER the table, so a path off the table answers 404
+            # whatever the header says and cannot be used to test a guessed
+            # origin. On a relayed path a wrong guess still reads 409 while
+            # the right one reaches the peer: accepted -- the origin is
+            # operator configuration, /info publishes it to this broker's
+            # token holders, and this relay is opt-in per peer. No dial.
+            sent = request.headers.get(peers.PEER_ORIGIN_HEADER)
+            if sent is not None and sent != peer["origin"]:
+                return _peer_refusal(True, 409, "peer_origin_changed")
         try:
             headers = peers.upstream_headers(
                 request.headers, gate=gate, bearer=bearer,

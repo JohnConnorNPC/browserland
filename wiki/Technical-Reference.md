@@ -442,7 +442,7 @@ operator names each peer in `broker_config.json`:
 | Gate | Credential | Refusals, in order |
 |---|---|---|
 | browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 503 `proxy_unavailable` → 404 `unknown_peer` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
-| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's; `X-Browserland-Peer-Origin` optional | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → **409 `peer_origin_changed`** (only when the pairing header is sent and names another origin) → 404 `not_relayed` → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
+| `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's; `X-Browserland-Peer-Origin` optional | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → **409 `peer_origin_changed`** (only when the pairing header is sent and names another origin) → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
 
 Every refusal happens before anything is dialed. Browser-gate bodies are
 `{"ok": false, "error": …}`; MCP-gate bodies are `{"error": …}`, the MCP
@@ -460,7 +460,12 @@ scopes and admin credential do not apply to it. That host entry may carry
 `"peer_origin"`: the mcptool server then sends it, in this broker's own
 canonical form (`http://B:4445/` → `http://b:4445`), as
 `X-Browserland-Peer-Origin` on every call, so a re-pointed peer is refused
-here instead of receiving the token. A value that is not an origin (a path,
+here instead of receiving the token. The check runs after the route table,
+so a path off the table answers 404 whatever the header says; on a relayed
+path a caller with any bearer can still tell a wrong origin (409) from the
+right one (the peer's own answer). That is accepted: the origin is operator
+configuration, `GET /info` publishes it to this broker's token holders, and
+the MCP relay is opt-in per peer. A value that is not an origin (a path,
 a query, userinfo, surrounding spaces) is refused when the server starts,
 naming the host; it is never trimmed. Without it, nothing is sent and
 nothing changes.

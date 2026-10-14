@@ -739,22 +739,26 @@ async def test_a_stale_mcp_pairing_is_409_without_a_dial(live, upstream,
     assert upstream.seen == []
 
 
-async def test_the_mcp_pairing_rung_sits_after_the_gate_and_before_the_table(
+async def test_the_mcp_pairing_rung_sits_after_the_gate_and_the_table(
         live, upstream):
-    """S8: no bearer is still 401 first, a peer that did not opt in is still
-    404 unknown_peer; a path off the table with a stale pairing is the 409
-    (the check runs before the table), with a good one the table's 404."""
+    """S8, as amended by round 1b S1: no bearer is still 401 first, a peer
+    that did not opt in is still 404 unknown_peer, and a path off the table
+    is the table's 404 `not_relayed` WHATEVER the pairing header says -- a
+    junk bearer cannot use it to test a guessed origin. Only a relayed path
+    reaches the pairing (409 for a wrong one). Nothing is dialed."""
     r = await _get(live, "/peer/m/mcp/terminals",
                    _mcp("http://elsewhere:4445", bearer=None))
     assert r.status_code == 401
     r = await _get(live, "/peer/b/mcp/terminals",
                    _mcp("http://elsewhere:4445"))
     assert (r.status_code, r.json()) == (404, {"error": "unknown_peer"})
-    r = await _get(live, "/peer/m/mcp/nowhere", _mcp("http://elsewhere:4445"))
+    for guess in ("http://elsewhere:4445", upstream.origin):
+        r = await _get(live, "/peer/m/mcp/nowhere", _mcp(guess, bearer="junk"))
+        assert (r.status_code, r.json()) == (404, {"error": "not_relayed"})
+        assert peers.PEER_REFUSAL_HEADER in r.headers
+    r = await _get(live, "/peer/m/mcp/terminals",
+                   _mcp("http://elsewhere:4445", bearer="junk"))
     assert (r.status_code, r.json()) == (409, {"error": "peer_origin_changed"})
-    r = await _get(live, "/peer/m/mcp/nowhere", _mcp(upstream.origin))
-    assert r.status_code == 404
-    assert r.json()["error"] != "peer_origin_changed"
     assert upstream.seen == []
 
 
