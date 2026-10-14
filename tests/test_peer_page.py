@@ -1793,7 +1793,14 @@ def test_the_host_notes_take_their_own_line_under_the_row():
     css = _src("15_css_dialogs.css")
     row = _css_rule(css, ".host-row")
     assert row.get("flex-wrap") == "wrap"
-    assert _css_rule(css, ".host-row .host-name").get("flex") == "1 1 0"
+    # Round 2 SHOULD 1: the name keeps a real basis, so it reads whole at
+    # the default pane width (measured live: "this broker (127.0.0.1:4447)"
+    # + its default badge and "B — http://127.0.0.1:4448" not ellipsised,
+    # note 589 = row 589, no overflow); with a zero basis B's name was a
+    # 3 px stub. min-width 0 still lets a name wider than the pane ellipsise.
+    name = _css_rule(css, ".host-row .host-name")
+    assert name.get("flex") == "1 1 auto"
+    assert name.get("min-width") == "0"
     note = _css_rule(css, ".host-row .host-added-note")
     assert note.get("flex") == "1 0 100%"
     assert note.get("order") == "1"

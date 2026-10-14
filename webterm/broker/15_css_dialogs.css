@@ -121,11 +121,13 @@
            swatch picker) to the row instead of the whole settings pane. */
         .host-row { font-family: monospace; font-size: 12px; position: relative;
             flex-wrap: wrap; }
-        /* basis 0: the name fills what the controls leave and is never what
-           pushes them onto another line (they wrap only when they alone do
-           not fit the pane, instead of widening it). */
+        /* The name keeps its own width (basis auto) so it reads whole when it
+           fits; when name and controls together do not fit, the controls wrap
+           to the next line instead of the name being cut to a stub, and a name
+           wider than the pane itself still ends in an ellipsis (min-width 0),
+           never a wider pane. */
         .host-row .host-name {
-            flex: 1 1 0;
+            flex: 1 1 auto;
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
