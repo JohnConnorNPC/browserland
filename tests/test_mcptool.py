@@ -2991,7 +2991,9 @@ def test_hosts_entries_carry_a_canonical_peer_origin():
 
 
 @pytest.mark.parametrize("bad", ["http://b:4448/p", "http://b:4448/?q=1",
-                                 "http://u:p@b:4448", "ftp://b:4448", 5])
+                                 "http://u:p@b:4448", "ftp://b:4448", 5,
+                                 # round 1 NIT 3: refused, never trimmed
+                                 " http://b:4448 "])
 def test_a_bad_hosts_peer_origin_names_the_host(bad):
     from webterm.mcptool import __main__ as m
     with pytest.raises(ValueError) as ei:

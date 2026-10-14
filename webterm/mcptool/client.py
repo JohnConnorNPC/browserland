@@ -175,7 +175,9 @@ class BrowserlandClient:
         #: prefix, the origin this client expects the hub to dial for that
         #: peer, in the hub's own canonical form -- or None. When set, it is
         #: sent on every request and the hub refuses a re-pointed peer (409
-        #: peer_origin_changed) instead of handing it this MCP token.
+        #: peer_origin_changed) instead of handing it this MCP token. A value
+        #: that is not an origin (surrounding whitespace included) is
+        #: refused, never trimmed.
         self.peer_origin = None
         if peer_origin:
             origin, why = normalize_origin(peer_origin)

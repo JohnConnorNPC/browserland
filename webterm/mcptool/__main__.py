@@ -114,8 +114,9 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     optional ``"peer_origin"`` (#252) is, for a host reached through a hub's
     ``/peer/<id>`` prefix, the origin the hub is expected to dial for that
     peer; it is canonicalised exactly as the hub compares it, and the hub
-    then refuses a re-pointed peer instead of receiving this token. Empty or
-    absent means none.
+    then refuses a re-pointed peer instead of receiving this token. A value
+    that is not an origin -- surrounding whitespace included -- is refused
+    here, never trimmed. Empty or absent means none.
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
     a JSON array, an empty array, a non-object entry, a missing/empty field, a

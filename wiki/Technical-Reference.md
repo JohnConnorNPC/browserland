@@ -460,7 +460,9 @@ scopes and admin credential do not apply to it. That host entry may carry
 `"peer_origin"`: the mcptool server then sends it, in this broker's own
 canonical form (`http://B:4445/` → `http://b:4445`), as
 `X-Browserland-Peer-Origin` on every call, so a re-pointed peer is refused
-here instead of receiving the token. Without it, nothing is sent and
+here instead of receiving the token. A value that is not an origin (a path,
+a query, userinfo, surrounding spaces) is refused when the server starts,
+naming the host; it is never trimmed. Without it, nothing is sent and
 nothing changes.
 
 **The page.** A host record reaches a peer when it carries `via: "server"`,

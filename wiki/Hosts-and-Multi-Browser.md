@@ -51,11 +51,12 @@ permission: grant it again on the host's tab.
 A host reached this way says **(via this broker)** on its row, in the status
 chip's tooltip and on its password prompt. Its per-host settings (default
 profile, tiling, start folder) are the defaults, because this broker never
-relays `/state`. Editing its row changes only the label and the password —
-the address belongs to this broker's `peers`. A host switched back to direct
-after the page loaded says so on its row: its terminals reconnect directly,
-and a reload may be needed before the browser lets the page reach that
-address. If it is **this** broker's password that is wrong, this broker's
+relays `/state`; they stay on the other broker and come back when the host
+is switched back to direct. Editing its row changes only the label and the
+password — the address belongs to this broker's `peers`. A host that was
+reached through this broker when the page loaded, and is then switched back
+to direct, says so on its row: its terminals reconnect directly, and a
+reload may be needed before the browser lets the page reach that address. If it is **this** broker's password that is wrong, this broker's
 own login opens, never the other host's. If this broker cannot relay (no peers, no `proxy` extra, or an
 older build) the host says **this broker cannot proxy** and nothing is
 dialed — it never quietly falls back to connecting directly.
@@ -64,8 +65,10 @@ To let agents use the other broker's MCP interface through this one as well,
 the operator adds `"mcp": true` to that peer; the agent then uses
 `http://<this broker>/peer/b` with the **other** broker's MCP token. Add
 `"peer_origin": "http://100.64.0.2:4445"` (the address this broker's
-`peers` names) to that host's entry in `BROWSERLAND_MCP_HOSTS`, and this
-broker refuses the call (409 `peer_origin_changed`) instead of passing the
+`peers` names; a value that is not a plain origin, surrounding spaces
+included, is refused when the MCP server starts, never trimmed) to that
+host's entry in `BROWSERLAND_MCP_HOSTS`, and this broker refuses the call
+(409 `peer_origin_changed`) instead of passing the
 token on if the operator later points `b` elsewhere; without it, re-pointing
 `b` re-points that token too.
 

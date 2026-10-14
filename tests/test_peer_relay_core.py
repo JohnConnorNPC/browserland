@@ -555,3 +555,19 @@ async def test_the_recording_list_keeps_the_general_ceiling(upstream,
                                                       drip_head=15)
     err, _sink = await _relay(upstream, "/recordings")
     assert err == (504, "peer_timeout")
+
+
+
+async def test_the_general_ceiling_mid_body_drops_the_downstream(upstream,
+                                                                 monkeypatch):
+    """Round 1 NIT 1: the mid-body drop is pinned under BOTH ceilings -- the
+    recording one above, the general one here, on a route that is not the
+    recording download."""
+    monkeypatch.setattr(peers, "PEER_DIAL_MAX_S", 0.6)
+    upstream.routes["/profiles"] = lambda s: Answer(drip_every=0.2,
+                                                    drip_body=15)
+    logs = []
+    err, sink = await _relay(upstream, "/profiles", logs=logs)
+    assert err is None
+    assert sink.status == 200 and sink.aborted is True and sink.ended is False
+    assert logs and "GET /profiles hit the dial ceiling" in logs[0]
