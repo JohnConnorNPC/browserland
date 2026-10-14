@@ -782,3 +782,21 @@ async def test_the_mcptool_client_and_the_gate_agree_on_the_pairing(
     stale = await loop.run_in_executor(None, call, "http://elsewhere:4445")
     assert stale == "peer_origin_changed"
     assert upstream.hits("/mcp/terminals") == 1
+
+
+
+@pytest.mark.parametrize("name", [peers.PEER_REFUSAL_HEADER,
+                                  peers.PEER_REFUSAL_HEADER.lower(),
+                                  peers.PEER_REFUSAL_HEADER.upper()])
+async def test_a_peer_cannot_send_this_brokers_401_marker(live, upstream,
+                                                          name):
+    """#252 phase 3 (codex 8): the page reads a 401 WITH this broker's marker
+    as this broker refusing its own password (A4). B's own 401 carrying the
+    marker, in any letter case, must arrive without it -- or B could open
+    this broker's login and hide its own refusal."""
+    upstream.routes["/sessions"] = lambda s: Answer(
+        401, [("Content-Type", "application/json"), (name, "auth_required")],
+        b'{"ok": false, "error": "auth_required"}')
+    r = await _get(live, "/peer/b/sessions", browser(upstream.origin))
+    assert r.status_code == 401
+    assert peers.PEER_REFUSAL_HEADER not in r.headers
