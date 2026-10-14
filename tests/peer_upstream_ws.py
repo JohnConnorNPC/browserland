@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import urllib.parse
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import List, Optional, Tuple
@@ -199,8 +200,13 @@ class FakeUpstreamWs:
         return None
 
     async def _handle(self, ws) -> None:
-        path = ws.request.path.partition("?")[0]
+        path, _, query = ws.request.path.partition("?")
         conn = Conn(path, ws=ws)
+        # Through A the path is always /ws or /control: ?fake=<name> picks
+        # another script (it crosses like any other query parameter).
+        pick = urllib.parse.parse_qs(query).get("fake")
+        if pick:
+            path = "/" + pick[0]
         self.conns.append(conn)
 
         async def reader():

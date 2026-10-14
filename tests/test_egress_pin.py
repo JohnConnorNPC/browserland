@@ -67,9 +67,9 @@ EXPECTED = {
     ("app.py", "call _STATUS_OPENER.open", "_fetch_status_blocking"),
     ("update.py", "call urllib.request.build_opener", "<module>"),
     ("update.py", "call _OPENER.open", "fetch_json"),
-    ("peers.py", "import httpx", "proxy_available"),
-    ("peers.py", "import websockets", "proxy_available"),
-    ("peers.py", "import websockets.asyncio.client", "proxy_available"),
+    ("peers.py", "import httpx", "proxy_missing"),
+    ("peers.py", "import websockets", "proxy_missing"),
+    ("peers.py", "import websockets.asyncio.client", "proxy_missing"),
     ("peers.py", "import httpx", "make_client"),
     ("peers.py", "import httpx", "_relay"),
     # Not an HTTP library, still an egress: the update apply's git fetch.

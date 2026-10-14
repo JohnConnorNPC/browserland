@@ -156,8 +156,9 @@ async def test_unknown_peer_is_a_json_404(live, upstream):
 
 @pytest.mark.parametrize("path,error", [
     ("/peer/b/", "not_relayed"), ("/peer/b", "not_relayed"),
-    ("/peer/b/state", "not_relayed"), ("/peer/b/ws", "not_relayed"),
-    ("/peer/b/control", "not_relayed"), ("/peer/b/browserland", "not_relayed"),
+    # Phase 2: /peer/b/ws and /peer/b/control are socket routes now (a
+    # non-upgrade GET there is pinned in test_peer_ws_routes).
+    ("/peer/b/state", "not_relayed"), ("/peer/b/browserland", "not_relayed"),
     ("/peer/b/status/fetch", "not_relayed"),
     ("/peer/b/peer/c/info", "peer_hop_refused"),
     ("/peer/b/mod-store/a%2Fpeer%2Fb", "peer_hop_refused"),

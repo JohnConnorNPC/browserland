@@ -118,6 +118,8 @@ def test_the_handshake_keywords_are_pinned():
     assert kw["max_queue"] == 2
     assert kw["open_timeout"] == peers.PEER_CONNECT_TIMEOUT_S
     assert kw["ping_interval"] == 20
+    assert kw["ping_timeout"] == 20
+    assert kw["close_timeout"] == peers.PEER_CONNECT_TIMEOUT_S
 
 
 async def test_no_environment_proxy_is_used(fake, monkeypatch):
@@ -252,6 +254,21 @@ async def test_a_cancelled_handler_closes_the_peer_1001(fake):
     assert await asyncio.get_running_loop().run_in_executor(
         None, conn.done.wait, 1.0)
     assert conn.closed[0] == 1001
+    assert down.close_code == 1001
+
+
+async def test_a_cancelled_handler_after_a_page_close_is_1000(fake):
+    # Sanic also cancels the handler once the page's connection is gone.
+    up, conn, down, task, _, _ = await _start(fake, "/never")
+    await asyncio.sleep(0.1)
+    down.ws_proto.close_rcvd = down.ws_proto.close_sent = None
+    down.ws_proto.state = __import__("websockets").State.CLOSED
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, conn.done.wait, 1.0)
+    assert conn.closed[0] == 1000
 
 
 async def test_the_idle_ceiling_closes_both(fake):

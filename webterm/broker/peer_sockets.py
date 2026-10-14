@@ -223,8 +223,8 @@ def peer_ws_connect():
 #: ``max_queue=2``: at most two frames buffered from the peer (the default
 #: is 16); its low-water mark is ``2 // 4 = 0``, so reading resumes only once
 #: the buffer is empty -- a slow page slows the peer instead of filling this
-#: broker's memory. The peer is pinged every 20 s; a ping is not a frame for
-#: the idle ceiling.
+#: broker's memory. The peer is pinged every 20 s and dropped after 20 s
+#: without a pong; a ping is not a frame for the idle ceiling.
 UPSTREAM_WS_KWARGS = {
     "proxy": None,
     "user_agent_header": None,
@@ -234,6 +234,7 @@ UPSTREAM_WS_KWARGS = {
     "open_timeout": peers.PEER_CONNECT_TIMEOUT_S,
     "close_timeout": peers.PEER_CONNECT_TIMEOUT_S,
     "ping_interval": 20,
+    "ping_timeout": 20,
 }
 
 
@@ -266,29 +267,63 @@ def _sendable(code: Optional[int], reason: str):
 
 
 async def _quiet_close(ws, code: int, reason: str = "") -> None:
+    """Close ``ws``, bounded; a failure is not news (the socket is going
+    either way). A cancellation of the caller is NOT swallowed."""
     try:
         await asyncio.wait_for(ws.close(code, reason),
                                peers.PEER_CONNECT_TIMEOUT_S)
-    except BaseException:  # noqa: BLE001 -- a close never raises out
+    except Exception:  # noqa: BLE001 -- includes the timeout
         pass
 
 
+_DETACHED: set = set()
+
+
+def _detached(coro):
+    """A task the loop keeps a strong reference to until it is done."""
+    task = asyncio.ensure_future(coro)
+    _DETACHED.add(task)
+    task.add_done_callback(_DETACHED.discard)
+    return task
+
+
+async def drain_closes(timeout: float = 2 * peers.PEER_CONNECT_TIMEOUT_S):
+    """Wait (bounded) for the closes a stopping server's cancelled
+    handlers left running, so the peer hears 1001 before the loop goes."""
+    loop = asyncio.get_running_loop()
+    mine = [t for t in _DETACHED if t.get_loop() is loop]
+    if mine:
+        await asyncio.wait(mine, timeout=timeout)
+
+
 async def _cancel(tasks) -> None:
+    """Cancel ``tasks`` and wait for them. ``gather`` collects their
+    outcomes (their own CancelledError included) as results, while a
+    cancellation of the caller still raises."""
     for t in tasks:
         t.cancel()
-    for t in tasks:
-        try:
-            await t
-        except BaseException:  # noqa: BLE001 -- already decided
-            pass
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _page_gone_code(proto, State) -> int:
+    """What the peer is told when the page's leg is gone: 1000 when the page
+    went (it sent the first close frame, or its connection dropped), 1001
+    when this broker is going away (Sanic sent the page a close first, or
+    cancelled the handler with the page's socket still open)."""
+    if proto.state is State.OPEN:
+        return 1001
+    if proto.close_sent is not None and proto.close_rcvd_then_sent is not True:
+        return 1001
+    return 1000
 
 
 async def relay_sockets(down, up, *, peer_id: str, route: str,
-                        idle_s: Optional[float] = None, log) -> str:
+                        idle_s: Optional[float] = None, stop=None,
+                        log) -> str:
     """Relay frames between the page's socket ``down`` (Sanic's) and the
     peer's ``up`` until either ends, verbatim both ways: a text frame stays
     text, a binary one binary, nothing is parsed. Returns why it ended:
-    ``page``, ``shutdown``, ``peer``, ``idle`` or ``error``.
+    ``page``, ``shutdown``, ``peer``, ``idle``, ``revoked`` or ``error``.
 
     * The page closed: the peer gets 1000. This broker going away (Sanic
       sent the page a close first, or cancelled this handler): 1001.
@@ -297,6 +332,9 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
       code like 1006 or 2000).
     * No frame either way for ``idle_s`` (:data:`PEER_WS_IDLE_S`): both get
       1000 ``idle``.
+    * ``stop`` (a future, :class:`Pair`) resolved with ``(why, page code,
+      page reason, peer code)``: the peer's leg is closed first, then the
+      page's, each with its own code (revoked: 1000, then 4401).
     * Anything else: both 1011, one log line naming the exception class.
 
     Each direction awaits its send before reading again, so a slow reader
@@ -331,19 +369,38 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
 
     tasks = [loop.create_task(down_to_up()), loop.create_task(up_to_down()),
              loop.create_task(watchdog())]
+    waits = tasks + ([stop] if stop is not None else [])
     try:
-        done, _ = await asyncio.wait(tasks,
+        done, _ = await asyncio.wait(waits,
                                      return_when=asyncio.FIRST_COMPLETED)
     except asyncio.CancelledError:
-        # Sanic cancels a socket's handler when the server stops.
-        await _cancel(tasks)
-        await _quiet_close(up, 1001)
+        # Sanic cancels a socket's handler when its connection is lost (the
+        # page closed) and, first thing, when the server stops (its own
+        # before_server_stop listener) -- then it would close the page 1000.
+        # A page socket still open here is the stop: both legs get 1001.
+        # Sanic may cancel again while this runs; the closes are shielded
+        # so a second cancel still propagates but cannot abandon them.
+        code = _page_gone_code(down.ws_proto, State)
+
+        async def _closes():
+            await _cancel(tasks)
+            await _quiet_close(up, code)
+            if code == 1001:
+                await _quiet_close(down, 1001)
+
+        await asyncio.shield(_detached(_closes()))
         raise
     await _cancel(tasks)
     if tasks[2] in done:
         await _quiet_close(down, 1000, "idle")
         await _quiet_close(up, 1000)
         return "idle"
+    if stop is not None and stop in done and not stop.cancelled():
+        # Explicit codes, B's leg first: never the close-order rule below.
+        why, down_code, reason, up_code = stop.result()
+        await _quiet_close(up, up_code)
+        await _quiet_close(down, down_code, reason)
+        return why
     if up.state in (State.CLOSING, State.CLOSED):
         # The peer's own close frame, read as soon as it arrived
         # (``close_code`` stays None until the TCP connection is gone).
@@ -352,14 +409,10 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
                                  rcvd.reason if rcvd else "")
         await _quiet_close(down, code, reason)
         return "peer"
-    proto = down.ws_proto
-    if proto.state in (State.CLOSING, State.CLOSED):
-        # Who spoke first: a close this broker sent before the page's is
-        # the server going away (Sanic's shutdown sends the page 1001).
-        ours = (proto.close_sent is not None
-                and proto.close_rcvd_then_sent is not True)
-        await _quiet_close(up, 1001 if ours else 1000)
-        return "shutdown" if ours else "page"
+    if down.ws_proto.state in (State.CLOSING, State.CLOSED):
+        code = _page_gone_code(down.ws_proto, State)
+        await _quiet_close(up, code)
+        return "shutdown" if code == 1001 else "page"
     exc = next((t.exception() for t in tasks
                 if t.done() and not t.cancelled() and t.exception()), None)
     log("peer %s: %s socket ended (%s)", peer_id, route,
@@ -367,3 +420,84 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
     await _quiet_close(down, 1011)
     await _quiet_close(up, 1011)
     return "error"
+
+
+# ---- the registry -------------------------------------------------------------
+
+class Pair:
+    """One relayed socket pair as the registry sees it: its binding, and the
+    future that stops its relay (:func:`relay_sockets` ``stop``)."""
+
+    __slots__ = ("peer_id", "client_id", "route", "origin", "token_id",
+                 "stop")
+
+    def __init__(self, peer_id: str, client_id: Optional[str], route: str,
+                 origin: str, token_id: str) -> None:
+        self.peer_id = peer_id
+        self.client_id = client_id
+        self.route = route
+        self.origin = origin
+        self.token_id = token_id
+        #: Resolved with (why, page code, page reason, peer code).
+        self.stop = asyncio.get_running_loop().create_future()
+
+    def revoke(self, reason: str = "revoked") -> None:
+        """Close the peer's leg 1000, then the page's 4401 ``reason``."""
+        if not self.stop.done():
+            self.stop.set_result(("revoked", 4401, reason, 1000))
+
+    def __repr__(self) -> str:
+        return "<Pair peer=%s route=%s cid=%s>" % (
+            self.peer_id, self.route, cid8(self.client_id))
+
+
+class SocketRegistry:
+    """The live relayed pairs, by peer and by (peer, clientId) -- the
+    ``control_clients`` shape -- and the tickets that would become pairs.
+    Revocation covers both: a revoked peer's pairs close and its unredeemed
+    tickets are voided."""
+
+    def __init__(self, store: TicketStore) -> None:
+        self.store = store
+        self.by_peer: Dict[str, set] = {}
+        self.by_client: Dict[tuple, set] = {}
+
+    def __len__(self) -> int:
+        return sum(len(v) for v in self.by_peer.values())
+
+    def add(self, pair: Pair) -> None:
+        self.by_peer.setdefault(pair.peer_id, set()).add(pair)
+        self.by_client.setdefault((pair.peer_id, pair.client_id),
+                                  set()).add(pair)
+
+    def remove(self, pair: Pair) -> None:
+        for table, key in ((self.by_peer, pair.peer_id),
+                           (self.by_client, (pair.peer_id, pair.client_id))):
+            group = table.get(key)
+            if group is not None:
+                group.discard(pair)
+                if not group:
+                    del table[key]
+
+    def pairs(self, peer_id: Optional[str] = None) -> list:
+        if peer_id is not None:
+            return list(self.by_peer.get(peer_id, ()))
+        return [p for group in self.by_peer.values() for p in group]
+
+    def revoke(self, peer_id: Optional[str] = None,
+               reason: str = "revoked") -> None:
+        """Close one peer's pairs (or every pair) and void its tickets."""
+        for pair in self.pairs(peer_id):
+            pair.revoke(reason)
+        self.store.void(peer_id)
+
+    def sweep(self, peer_map, live_token_id: str) -> None:
+        """Close every pair, and void every ticket, whose peer is gone, whose
+        origin is no longer the configured one, or that was opened under
+        another token of this broker's. Run on every mint and redemption,
+        and by :func:`peers.apply_change`."""
+        for pair in self.pairs():
+            if ((peer_map.get(pair.peer_id) or {}).get("origin")
+                    != pair.origin or pair.token_id != live_token_id):
+                pair.revoke()
+        self.store.sweep_bindings(peer_map, live_token_id)

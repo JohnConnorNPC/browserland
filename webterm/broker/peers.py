@@ -198,22 +198,34 @@ def parse_peers(raw: Any, self_port: int,
 PEER_WS_MIN_MAJOR = 15
 
 
-def proxy_available() -> bool:
-    """Is the ``proxy`` extra importable: httpx, and websockets at least
-    :data:`PEER_WS_MIN_MAJOR` with its asyncio client? Lazy on purpose: core
-    never imports either client, and a test simulates their absence through
-    ``sys.modules``."""
+def proxy_missing() -> Optional[str]:
+    """What the ``proxy`` extra lacks here, in words for the boot line, or
+    ``None``: httpx, and websockets at least :data:`PEER_WS_MIN_MAJOR` with
+    its asyncio client. ONE gate for the whole proxy, HTTP and sockets.
+    Lazy on purpose: core never imports either client, and a test simulates
+    their absence through ``sys.modules``."""
     try:
         import httpx  # noqa: F401 -- the probe IS the import
-        import websockets
+    except ImportError:
+        return "httpx is not installed"
+    import websockets
+    version = str(getattr(websockets, "__version__", "0"))
+    try:
+        major = int(version.split(".")[0])
+    except ValueError:
+        major = 0
+    if major < PEER_WS_MIN_MAJOR:
+        return "websockets %s < %d" % (version, PEER_WS_MIN_MAJOR)
+    try:
         import websockets.asyncio.client  # noqa: F401
     except ImportError:
-        return False
-    try:
-        major = int(str(getattr(websockets, "__version__", "0")).split(".")[0])
-    except ValueError:
-        return False
-    return major >= PEER_WS_MIN_MAJOR
+        return "websockets.asyncio.client is missing"
+    return None
+
+
+def proxy_available() -> bool:
+    """Is the ``proxy`` extra complete (:func:`proxy_missing`)?"""
+    return proxy_missing() is None
 
 
 class NoCookieJar(http.cookiejar.CookieJar):
@@ -480,6 +492,16 @@ class DialCap:
             self._busy[peer_id] = left
         else:
             self._busy.pop(peer_id, None)
+
+
+def apply_change(app) -> None:
+    """The event for a changed ``app.ctx.peers`` or ``app.ctx.auth_token``.
+    Nothing changes either at runtime today (a changed config takes effect
+    on restart); a future editor calls this after it writes. It closes the
+    relayed sockets and voids the tickets the change unbinds -- the same
+    sweep every ticket mint and redemption runs first."""
+    from .peer_sockets import token_id
+    app.ctx.peer_sockets.sweep(app.ctx.peers, token_id(app.ctx.auth_token))
 
 
 # ---- the relay ------------------------------------------------------------------

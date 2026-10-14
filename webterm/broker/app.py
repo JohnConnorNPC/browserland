@@ -4017,7 +4017,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     if peer_error:
         raise ValueError(peer_error)
     app.ctx.peers = peer_cfg
-    app.ctx.peer_proxy = bool(peer_cfg) and peers.proxy_available()
+    app.ctx.peer_proxy_missing = peers.proxy_missing() if peer_cfg else None
+    app.ctx.peer_proxy = bool(peer_cfg) and app.ctx.peer_proxy_missing is None
     app.ctx.registry = BrokerRegistry()
     # The Launcher (profiles-only /launch source of truth) is constructed AFTER
     # the state path is resolved, so its sidecar (webterm_profiles.json, #70) can
@@ -4332,9 +4333,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     if app.ctx.peers:
         LOGGER.info("peer proxy: %s", ", ".join(sorted(app.ctx.peers)))
         if not app.ctx.peer_proxy:
-            LOGGER.warning("peer proxy unavailable: install webterm[proxy] "
-                           "(httpx, websockets>=15); /peer/* answers 503 "
-                           "proxy_unavailable")
+            LOGGER.warning("peer proxy unavailable: install webterm[proxy]: "
+                           "%s; /peer/* answers 503 proxy_unavailable",
+                           app.ctx.peer_proxy_missing)
     # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
     # a set so they aren't GC'd mid-flight; each self-removes on completion.
     app.ctx.bg_tasks = set()
@@ -8796,6 +8797,32 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return None, (413, "body_too_large")
         return bytes(buf), None
 
+    def _peer_browser_entry(request: Request, peer):
+        """The browser gate's first rungs, shared by the relay and the
+        ticket mint. Order: 401, then 503, then 404 -- a caller without this
+        broker's token learns nothing, not even whether the proxy extra is
+        installed. None when all three pass."""
+        if not auth.token_matches(_peer_bearer(request), app.ctx.auth_token):
+            LOGGER.warning("rejected unauthenticated /peer from %s",
+                           request.ip)
+            return _peer_refusal(False, 401, "auth_required")
+        if not app.ctx.peer_proxy:
+            return _peer_refusal(False, 503, "proxy_unavailable")
+        if peer is None:
+            return _peer_refusal(False, 404, "unknown_peer")
+        return None
+
+    def _peer_browser_pairing(request: Request, peer):
+        """``(B's token, None)`` or ``(None, refusal)``: 401 without B's
+        token, 409 ``peer_origin_changed`` when the pairing header does not
+        name the configured origin (a missing header is a mismatch)."""
+        bearer = request.headers.get(peers.PEER_TOKEN_HEADER) or ""
+        if not bearer:
+            return None, _peer_refusal(False, 401, "auth_required")
+        if request.headers.get(peers.PEER_ORIGIN_HEADER) != peer["origin"]:
+            return None, _peer_refusal(False, 409, "peer_origin_changed")
+        return bearer, None
+
     async def _peer_relay(request: Request, peer_id: str, rest: str = ""):
         gate_mcp = peers.is_mcp_path(rest)
         peer = app.ctx.peers.get(peer_id)
@@ -8814,30 +8841,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             if not app.ctx.peer_proxy:
                 return _peer_refusal(True, 503, "proxy_unavailable")
         else:
-            # Browser gate order: 401, then 503, then 404 -- a caller
-            # without this broker's token learns nothing, not even whether
-            # the proxy extra is installed.
-            if not auth.token_matches(_peer_bearer(request),
-                                      app.ctx.auth_token):
-                LOGGER.warning("rejected unauthenticated /peer from %s",
-                               request.ip)
-                return _peer_refusal(False, 401, "auth_required")
-            if not app.ctx.peer_proxy:
-                return _peer_refusal(False, 503, "proxy_unavailable")
-            if peer is None:
-                return _peer_refusal(False, 404, "unknown_peer")
+            refusal = _peer_browser_entry(request, peer)
+            if refusal is not None:
+                return refusal
         # is_mcp_path and classify decode `rest` the same way, so the table
         # that matched always belongs to the gate already chosen.
         gate, path = peers.classify(request.method, rest)
         if gate is None:
             return _peer_refusal(gate_mcp, 404, path)
         if not gate_mcp:
-            bearer = request.headers.get(peers.PEER_TOKEN_HEADER) or ""
-            if not bearer:
-                return _peer_refusal(False, 401, "auth_required")
-            if (request.headers.get(peers.PEER_ORIGIN_HEADER)
-                    != peer["origin"]):
-                return _peer_refusal(False, 409, "peer_origin_changed")
+            bearer, refusal = _peer_browser_pairing(request, peer)
+            if refusal is not None:
+                return refusal
         try:
             headers = peers.upstream_headers(
                 request.headers, gate=gate, bearer=bearer,
@@ -8903,6 +8918,109 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         client, app_.ctx.peer_client = app_.ctx.peer_client, None
         if client is not None:
             await client.aclose()
+
+    # ---- the peers' sockets (#252 phase 2) --------------------------------
+    # A page cannot set headers on a WebSocket handshake, so a proxied host's
+    # /ws and /control take a one-time ticket instead: POST
+    # /peer/<id>/ws-ticket through the browser gate (both tokens and the
+    # pairing header), then WS /peer/<id>/ws|control?ticket=... with nothing
+    # else. The ticket is the socket's only credential. A dials B with B's
+    # token in the handshake's Authorization header and relays frames
+    # verbatim (peer_sockets). Sockets have a pool of their own, a ticket
+    # holds its slot, and every mint and redemption first sweeps the pairs
+    # and tickets a changed peer origin or token unbinds (peers.apply_change).
+    app.ctx.peer_sock_cap = peers.DialCap(
+        peer_sockets.PEER_MAX_SOCKETS, peer_sockets.PEER_MAX_SOCKETS_PER_PEER)
+    app.ctx.peer_tickets = peer_sockets.TicketStore(app.ctx.peer_sock_cap)
+    app.ctx.peer_sockets = peer_sockets.SocketRegistry(app.ctx.peer_tickets)
+
+    async def _peer_ws_ticket(request: Request, peer_id: str):
+        peer = app.ctx.peers.get(peer_id)
+        refusal = _peer_browser_entry(request, peer)
+        if refusal is not None:
+            return refusal
+        bearer, refusal = _peer_browser_pairing(request, peer)
+        if refusal is not None:
+            return refusal
+        body = request.body or b""
+        data = None
+        if len(body) <= 4096:
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = None
+        if not isinstance(data, dict):
+            data = {}
+        route, client_id = data.get("route"), data.get("clientId")
+        if (route not in peer_sockets.ROUTES
+                or not isinstance(client_id, str) or not client_id.strip()):
+            return _peer_refusal(False, 400, "bad_ticket")
+        peers.apply_change(app)
+        try:
+            ticket = app.ctx.peer_tickets.mint(
+                peer_id, route, client_id.strip(), peer["origin"], bearer,
+                peer_sockets.token_id(app.ctx.auth_token))
+        except peers.PolicyError as exc:
+            return _peer_refusal(False, exc.status, exc.error)
+        return sanic_json({"ok": True, "ticket": ticket,
+                           "ttl": peer_sockets.PEER_TICKET_TTL_S})
+
+    def _peer_socket(route: str):
+        async def _handler(request: Request, ws: Websocket, peer_id: str):
+            ctx = app.ctx
+            live = peer_sockets.token_id(ctx.auth_token)
+            peers.apply_change(app)
+            client_id = (request.args.get("clientId") or "").strip()
+            ticket = ctx.peer_tickets.redeem(
+                request.args.get("ticket"), peer_id=peer_id, route=route,
+                client_id=client_id,
+                origin=(ctx.peers.get(peer_id) or {}).get("origin"),
+                token_id=live)
+            if ticket is None:
+                # Bad, expired, reused, mis-bound or revoked: one answer.
+                await ws.close(code=4401, reason="ticket")
+                return
+            # From here this handler owns the ticket's socket slot.
+            pair = None
+            cid = peer_sockets.cid8(client_id)
+            try:
+                origin = ctx.peers[peer_id]["origin"]
+                try:
+                    up = await peer_sockets.dial_upstream(
+                        peer_sockets.upstream_ws_url(
+                            origin, route, request.query_string),
+                        ticket.peer_token)
+                except Exception as exc:  # noqa: BLE001 -- the peer's
+                    LOGGER.warning("peer %s: %s socket for %s failed (%s)",
+                                   peer_id, route, cid, type(exc).__name__)
+                    await ws.close(code=1011, reason="peer_unreachable")
+                    return
+                finally:
+                    ticket = None     # B's token is the dial's, not ours
+                pair = peer_sockets.Pair(peer_id, client_id, route, origin,
+                                         live)
+                ctx.peer_sockets.add(pair)
+                LOGGER.info("peer %s: %s socket for %s opened", peer_id,
+                            route, cid)
+                why = "shutdown"
+                try:
+                    why = await peer_sockets.relay_sockets(
+                        ws, up, peer_id=peer_id, route=route,
+                        stop=pair.stop, log=LOGGER.warning)
+                finally:
+                    LOGGER.info("peer %s: %s socket for %s closed (%s)",
+                                peer_id, route, cid, why)
+            finally:
+                if pair is not None:
+                    ctx.peer_sockets.remove(pair)
+                ctx.peer_sock_cap.release(peer_id)
+        return _handler
+
+    @app.after_server_stop
+    async def _drain_peer_closes(app_, loop):
+        # Sanic cancels every socket handler at stop; a relayed pair's
+        # closes (1001 both ways) finish here, before the loop goes.
+        await peer_sockets.drain_closes()
 
     # ---- mod policy write (/mods/policy, #157) ----------------------------
     # The ONLY writer of the pins GET /info reports. Token-gated like every
@@ -11149,6 +11267,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_peer_relay, "/peer/<peer_id:str>",
                   methods=["GET", "POST", "PUT"], stream=True, unquote=False,
                   name="peer_relay_bare")
+    # #252 phase 2: static last segments, so they win over <rest:path>.
+    app.add_route(_peer_ws_ticket, "/peer/<peer_id:str>/ws-ticket",
+                  methods=["POST"], name="peer_ws_ticket")
+    app.add_websocket_route(_peer_socket("ws"), "/peer/<peer_id:str>/ws",
+                            name="peer_ws")
+    app.add_websocket_route(_peer_socket("control"),
+                            "/peer/<peer_id:str>/control", name="peer_control")
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])

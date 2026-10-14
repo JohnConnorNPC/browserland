@@ -218,25 +218,34 @@ def test_boot_line_names_the_peer_ids(tmp_path, caplog):
     assert not [ln for ln in lines if "unavailable" in ln]
 
 
-@pytest.mark.parametrize("missing", ["httpx", "websockets-12"])
+@pytest.mark.parametrize("missing, why", [
+    ("httpx", "httpx is not installed"),
+    ("websockets-12", "websockets 12.1 < 15"),
+    ("websockets-14", "websockets 14.2 < 15"),
+    ("no-asyncio-client", "websockets.asyncio.client is missing"),
+])
 def test_missing_extra_is_one_line_and_no_capability(tmp_path, caplog,
-                                                     monkeypatch, missing):
+                                                     monkeypatch, missing,
+                                                     why):
     # httpx is installed in the test interpreter (via mcp and sanic-testing),
     # so its absence is simulated -- which only works because peers.py
     # imports it lazily, inside a function. Q11: so is a websockets below
     # 15 (core's floor is 12; the socket half needs 15).
+    # Q12: the line names WHICH dependency is missing.
     if missing == "httpx":
         monkeypatch.setitem(sys.modules, "httpx", None)
+    elif missing == "no-asyncio-client":
+        monkeypatch.setitem(sys.modules, "websockets.asyncio.client", None)
     else:
         old = types.ModuleType("websockets")
-        old.__version__ = "12.1"
+        old.__version__ = {"websockets-12": "12.1",
+                           "websockets-14": "14.2"}[missing]
         monkeypatch.setitem(sys.modules, "websockets", old)
     app, lines = _boot_lines(caplog, tmp_path, peers={
         "b": {"origin": "http://b:1"}, "c": {"origin": "http://c:1"}})
     warned = [ln for ln in lines if ln.startswith("peer proxy unavailable")]
-    assert warned == ["peer proxy unavailable: install webterm[proxy] "
-                      "(httpx, websockets>=15); /peer/* answers 503 "
-                      "proxy_unavailable"]
+    assert warned == ["peer proxy unavailable: install webterm[proxy]: "
+                      + why + "; /peer/* answers 503 proxy_unavailable"]
     assert app.ctx.peer_proxy is False
 
 
