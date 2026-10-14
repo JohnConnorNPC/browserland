@@ -180,21 +180,30 @@
             }
         }
         // ---- switching a host's mode (#252 phase 3) ---------------------------
-        // An origin whose host means "this machine" (or "any") names a
-        // DIFFERENT machine depending on who dials it: the browser's
-        // `localhost` is the browser's box, the same string in this broker's
-        // peers config is this broker's. A token never survives a mode switch
-        // to or from one of those -- equal strings, maybe another machine.
-        function originIsLocalOnly(origin) {
+        // The browser and this broker each resolve a host name on their OWN
+        // network: the browser's `localhost`, `nas`, `192.168.1.5` or
+        // `box.lan` may well be another machine than this broker's. So a
+        // token survives a mode switch only for an origin both sides very
+        // likely mean the same way: a dotted DNS name that is not a loopback
+        // alias and not under a local-only suffix. Every IP literal (any
+        // form; the URL parser has already normalized it), every single-label
+        // name (`localhost`, `ip6-localhost`, `nas`, ...) and every name
+        // under the suffixes below asks for the password again. Switches are
+        // rare; asking again is the safe failure.
+        const _LOCAL_ONLY_SUFFIXES = ['.localhost', '.local', '.lan',
+            '.internal', '.home.arpa', '.localdomain'];
+        function originKeepsToken(origin) {
             let u;
-            try { u = new URL(origin); } catch (_) { return true; }
+            try { u = new URL(origin); } catch (_) { return false; }
             const host = u.hostname.toLowerCase().replace(/\.$/, '');
-            // An IPv4-mapped address is serialized in hex by the URL parser
-            // ([::ffff:127.0.0.1] -> [::ffff:7f00:1]).
-            return host === 'localhost' || host.endsWith('.localhost')
-                || host === '0.0.0.0' || host === '[::]' || host === '[::1]'
-                || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
-                || /^\[::ffff:(7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\]$/.test(host);
+            if (/^[0-9]+(\.[0-9]+){3}$/.test(host)) return false;   // IPv4
+            // One label -- and every IPv6 literal, which the URL parser
+            // writes in hex, a mapped IPv4 included, so it has no dot.
+            if (host.indexOf('.') === -1) return false;
+            for (const sfx of _LOCAL_ONLY_SUFFIXES) {
+                if (host.endsWith(sfx)) return false;
+            }
+            return true;
         }
         // Switch a remote host between DIRECT (peerId null) and FROM SERVER
         // (reached through this broker's /peer/<peerId>/). `info` is
@@ -220,7 +229,7 @@
                 if (hostIsProxied(h) && h.peerId === peerId) return false;
                 const keep = !hostIsProxied(h) && !!h.token
                     && normalizeHostUrl(h.url) === origin
-                    && !originIsLocalOnly(origin);
+                    && originKeepsToken(origin);
                 if (!keep) h.token = '';
                 h.via = 'server';
                 h.peerId = peerId;
@@ -229,7 +238,7 @@
             } else {
                 if (!hostIsProxied(h)) return false;
                 const keep = !!h.token && !!h.peerOrigin
-                    && h.peerOrigin === h.url && !originIsLocalOnly(h.url);
+                    && h.peerOrigin === h.url && originKeepsToken(h.url);
                 if (!keep) h.token = '';
                 delete h.via;
                 delete h.peerId;

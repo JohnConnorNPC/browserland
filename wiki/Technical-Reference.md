@@ -477,9 +477,12 @@ Hosts row's mode control writes them (a registry import never does).
 
 * **Switching** keeps the token only where it was paired with the address
   dialed afterwards: direct → peer when the host's url is the peer's
-  published origin, peer → direct when `peerOrigin` is the url. A loopback
-  or unspecified host (`localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0`,
-  `[::]`) never keeps it. A switch drops the learned broker id and the OSC 52
+  published origin, peer → direct when `peerOrigin` is the url -- and only
+  when that origin's host is a dotted DNS name: an IP literal (v4 or v6, any
+  spelling), a single-label name (`localhost`, `ip6-localhost`, `nas`, …) or
+  a name under `.localhost`, `.local`, `.lan`, `.internal`, `.home.arpa` or
+  `.localdomain` never keeps it, since the browser and this broker may
+  resolve it to different machines. A switch drops the learned broker id and the OSC 52
   grant, and re-dials that host's sockets.
 * **OSC 52** grants are keyed `[id, url]` for a direct host (unchanged) and
   `[id, url, peerId, peerOrigin]` for a proxied one, so a re-pointed,

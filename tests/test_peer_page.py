@@ -1325,6 +1325,12 @@ def _mode(tmp_path, hosts, body, info=INFO):
                 extra_src=MODE_STUBS + _osc_src())
 
 
+#: A dotted DNS name: the only kind of origin a switch keeps a token for
+#: (round 1b S3).
+DOTTED = "https://b.example.com"
+DOTTED_INFO = {"ok": True, "peers": {"b": DOTTED}, "peer_proxy": True}
+
+
 SNAP = """
 const snap = (id) => { const h = hostById(id); return h && {
     url: h.url, token: h.token, via: h.via || null, peerId: h.peerId || null,
@@ -1337,11 +1343,12 @@ def test_switching_a_host_to_from_server_and_back(tmp_path):
     """P3-1 (A7): the token survives a switch only where it was paired with
     the address now dialed; caches are invalidated, the identity is dropped,
     the change is announced."""
+    # round 1b S3: a token is kept only for a dotted DNS name
     out = _mode(tmp_path, [
-        _direct("same", token="T1", brokerId="B-ID"),
+        _direct("same", url=DOTTED, token="T1", brokerId="B-ID"),
         _direct("other", url="http://d:4445", token="T2"),
-        _via("paired", token="T3"),
-        _via("unpaired", token="T4", peerOrigin=""),
+        _via("paired", url=DOTTED, peerOrigin=DOTTED, token="T3"),
+        _via("unpaired", url=DOTTED, token="T4", peerOrigin=""),
     ], SNAP + """
 const r = {};
 r.same = [setHostMode('same', 'b', info), snap('same')];
@@ -1354,17 +1361,17 @@ r.samePeer = setHostMode('other', 'b', info);
 r.unknownId = setHostMode('nope', null, info);
 return { r: r, invalidated: invalidated, emitted: emitted,
          saves: saves.length };
-""")
+""", info=DOTTED_INFO)
     r = out["r"]
-    assert r["same"] == [True, {"url": "http://b:4448", "token": "T1",
+    assert r["same"] == [True, {"url": DOTTED, "token": "T1",
                                 "via": "server", "peerId": "b",
-                                "peerOrigin": "http://b:4448",
+                                "peerOrigin": DOTTED,
                                 "brokerId": ""}]
-    assert r["other"] == [True, {"url": "http://b:4448", "token": "",
+    assert r["other"] == [True, {"url": DOTTED, "token": "",
                                  "via": "server", "peerId": "b",
-                                 "peerOrigin": "http://b:4448",
+                                 "peerOrigin": DOTTED,
                                  "brokerId": ""}]
-    assert r["paired"] == [True, {"url": "http://b:4448", "token": "T3",
+    assert r["paired"] == [True, {"url": DOTTED, "token": "T3",
                                   "via": None, "peerId": None,
                                   "peerOrigin": None, "brokerId": ""}]
     assert r["unpaired"][1]["token"] == "" and r["unpaired"][1]["via"] is None
@@ -1377,11 +1384,13 @@ return { r: r, invalidated: invalidated, emitted: emitted,
 
 
 def test_a_host_on_a_broker_that_cannot_proxy_can_still_go_direct(tmp_path):
-    out = _mode(tmp_path, [_direct("d", token="T"), _via("p", token="T3")],
+    out = _mode(tmp_path, [_direct("d", token="T"),
+                           _via("p", url=DOTTED, peerOrigin=DOTTED,
+                                token="T3")],
                 SNAP + """
 return [setHostMode('d', 'b', info), snap('d').via,
         setHostMode('p', null, info), snap('p').via, snap('p').token];
-""", info={"ok": True, "peers": {"b": "http://b:4448"}, "peer_proxy": False})
+""", info={"ok": True, "peers": {"b": DOTTED}, "peer_proxy": False})
     assert out == [False, None, True, None, "T3"]
 
 
@@ -1395,16 +1404,21 @@ return [setHostMode('p', 'c', info), snap('p')];
 
 
 @pytest.mark.parametrize("origin", [
-    "http://localhost:4448", "http://127.0.0.1:4448", "http://127.9.9.9:4448",
-    "http://[::1]:4448", "http://0.0.0.0:4448", "http://[::]:4448",
-    "http://app.localhost:4448",
-    # codex review: IPv4-mapped loopback/unspecified, as the URL parser
-    # serializes them ([::ffff:7f00:1], [::ffff:0:0])
-    "http://[::ffff:127.0.0.1]:4448", "http://[::ffff:0.0.0.0]:4448"])
-def test_a_local_only_origin_never_keeps_a_token(tmp_path, origin):
-    """S1: `localhost` typed in the browser is the browser's machine; the same
-    string in this broker's config is this broker's. Equal strings, maybe two
-    machines: the token is asked again, both ways."""
+    "http://localhost:4448", "http://localhost.:4448", "http://127.0.0.1:4448",
+    "http://127.1:4448", "http://127.9.9.9:4448", "http://[::1]:4448",
+    "http://0.0.0.0:4448", "http://[::]:4448", "http://app.localhost:4448",
+    "http://[::ffff:127.0.0.1]:4448", "http://[::ffff:0.0.0.0]:4448",
+    # round 1b S3: every IP literal, every one-word name, local suffixes
+    "http://ip6-localhost:4448", "http://ip6-loopback:4448",
+    "http://[::7f00:1]:4448", "http://192.168.1.5:4448", "http://10.0.0.5:4448",
+    "http://100.64.0.2:4448", "http://[fe80::1]:4448", "http://nas:4448",
+    "http://b.lan:4448", "http://b.local:4448", "http://b.internal:4448",
+    "http://b.home.arpa:4448", "http://b.localdomain:4448"])
+def test_an_ambiguous_origin_never_keeps_a_token(tmp_path, origin):
+    """S1 / round 1b S3: the browser and this broker resolve a name on their
+    own networks, so only a dotted DNS name outside the local-only suffixes
+    is taken to mean one machine to both. Everything else asks again, in
+    both directions."""
     info = dict(INFO, peers={"l": origin})
     out = _mode(tmp_path, [
         _direct("d", url=origin, token="T1"),
@@ -1414,6 +1428,21 @@ return [setHostMode('d', 'l', info), snap('d').token,
         setHostMode('p', null, info), snap('p').token];
 """, info=info)
     assert out == [True, "", True, ""]
+
+
+@pytest.mark.parametrize("origin", ["https://b.example.com",
+                                    "http://b.example.com:4448",
+                                    "https://box.tailnet-x.ts.net"])
+def test_a_dotted_dns_name_keeps_its_token_both_ways(tmp_path, origin):
+    info = dict(INFO, peers={"l": origin})
+    out = _mode(tmp_path, [
+        _direct("d", url=origin, token="T1"),
+        _via("p", peer="l", url=origin, peerOrigin=origin, token="T2"),
+    ], SNAP + """
+return [originKeepsToken(info.peers.l), setHostMode('d', 'l', info),
+        snap('d').token, setHostMode('p', null, info), snap('p').token];
+""", info=info)
+    assert out == [True, True, "T1", True, "T2"]
 
 
 def test_a_switch_and_back_does_not_revive_an_osc52_grant(tmp_path):
@@ -1612,15 +1641,6 @@ def test_an_older_mints_late_success_does_not_clear_a_newer_refusal(tmp_path):
     assert out["results"][0].endswith("ticket=T")
     assert "peer_busy" in out["results"][1]
     assert out["refusal"] == "peer_busy"
-
-
-def test_a_mapped_lan_address_is_not_local_only(tmp_path):
-    out = _run(tmp_path, _prefs(), """
-return [originIsLocalOnly('http://[::ffff:10.0.0.1]:4448'),
-        originIsLocalOnly('http://box:4448'),
-        originIsLocalOnly('http://[::ffff:127.0.0.1]:4448')];
-""")
-    assert out == [False, False, True]
 
 
 def test_a_put_queued_while_direct_never_leaves_after_a_switch(tmp_path):

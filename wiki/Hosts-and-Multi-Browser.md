@@ -42,10 +42,12 @@ seconds, until that terminal connects). It is tied to the address the operator c
 operator points `b` somewhere else, the password is forgotten and you are
 asked again. A switch keeps the password only when it was entered for the
 very address the host is reached at afterwards (a direct
-`http://box:4445` and a peer published as `http://box:4445`); any other
-switch asks again, and so does every switch involving `localhost`, `127.x`,
-`[::1]`, `0.0.0.0` or `[::]`, which name a different machine depending on
-who dials them. A switch also drops that host's clipboard (OSC 52)
+`https://box.example.com` and a peer published as `https://box.example.com`)
+**and** that address is a full DNS name. Any other switch asks again: every
+IP address (`127.0.0.1`, `192.168.1.5`, `[::1]`, …), every one-word name
+(`localhost`, `nas`, …) and every name ending in `.local`, `.lan`,
+`.internal`, `.home.arpa`, `.localdomain` or `.localhost` — your browser and
+this broker may each reach a different machine by it. A switch also drops that host's clipboard (OSC 52)
 permission: grant it again on the host's tab.
 
 A host reached this way says **(via this broker)** on its row, in the status
