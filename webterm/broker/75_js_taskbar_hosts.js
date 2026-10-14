@@ -391,7 +391,11 @@
         // is inherently debounced ~4s — one dropped poll never cries wolf.
         function hostNeedsAttention(host) {
             if (host.hidden) return false;
-            const s = hostMenuState(pollStateFor(host.id));
+            const p = pollStateFor(host.id);
+            // #252: a proxied host whose terminals got no ticket (hostChipTip
+            // says why) needs the chip even when its polls are fine.
+            if (p.wsRefusal) return true;
+            const s = hostMenuState(p);
             return s === 'auth' || s === 'down' || s === 'lease';
         }
         // #178: the chip's three-mode visibility. A BODY CLASS, never
@@ -448,6 +452,15 @@
                 tip += host.hidden
                     ? ' — hidden (click to show)'
                     : ' — click to hide';
+            }
+            // #252: why a proxied host's terminals could not connect (the
+            // ticket mint's refusal, set by _peerWsUrl in 63).
+            const refusal = pollStateFor(host.id).wsRefusal;
+            if (refusal) {
+                tip += ' — terminals: ' + (refusal === 'peer_busy'
+                    ? 'the peer is busy'
+                    : refusal === 'proxy_unavailable'
+                        ? PROXY_UNAVAILABLE_MSG : 'could not connect');
             }
             return tip;
         }

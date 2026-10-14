@@ -347,11 +347,10 @@
 
         function openControlWs(host) {
             if (!host) return;
-            // #252 phase 1: a proxied host has no /control yet (hostWsUrl
-            // answers null). No socket, no record, and so no reattach timer.
-            if (hostWsUrl(host, '/control') === null) return;
             const hid = host.id;
             const existing = controlSockets.get(hid);
+            // #252: a ticket for this host's /control is being minted.
+            if (existing && existing.minting) return;
             if (existing && existing.ws && (
                     existing.ws.readyState === WebSocket.OPEN
                     || existing.ws.readyState === WebSocket.CONNECTING)) {
@@ -373,14 +372,36 @@
         // Dial one /control socket for `rec` in `role` ('cur' or 'cand') and
         // wire its handlers to ITS OWN state `st`. rec.ws always mirrors
         // rec.cur's socket (sendBecomeActive and the startup guard read it).
-        function _dialControl(rec, host, role) {
+        function _dialControl(rec, host, role, ticketed) {
             const hid = rec.hostId;
-            let url;
-            try {
-                url = hostWsUrl(host, '/control?clientId='
-                    + encodeURIComponent(CLIENT_ID));
-            } catch (e) { return null; }
-            if (url === null) return null;     // #252: do not connect
+            let url = ticketed;
+            if (url === undefined) {
+                try {
+                    url = hostWsUrl(host, '/control?clientId='
+                        + encodeURIComponent(CLIENT_ID));
+                } catch (e) { return null; }
+            }
+            if (typeof url !== 'string') {
+                // #252: a host reached through this broker mints a one-time
+                // ticket first (hostWsUrl answers a promise); the dial follows
+                // its answer if the record is still the one in charge of the
+                // host and wants this socket. A 401 at the mint dials nothing
+                // (the overlay has it); any other refusal is a failed dial: the
+                // socket in charge backs off, a replacement just does not come.
+                rec.minting = true;
+                url.then((got) => {
+                    rec.minting = false;
+                    if (got === null || rec.closedByUs
+                            || controlSockets.get(hid) !== rec) return;
+                    if (role === 'cand' && (rec.cand || !rec.cur)) return;
+                    const h = hostById(hid);
+                    if (h) _dialControl(rec, h, role, got);
+                }, () => {
+                    rec.minting = false;
+                    if (role === 'cur') scheduleControlReattach(hid);
+                });
+                return null;
+            }
             let ws;
             try { ws = new WebSocket(url); }
             catch (e) {

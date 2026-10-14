@@ -22,27 +22,36 @@
             // keeps a greyed window socketless; leaveControlled clears the
             // flag before it reattaches.
             if (win.controlled) return;
+            // #252: this window's ticket is being minted; its answer dials.
+            if (win.minting) return;
             const host = hostById(win.hostId);
             if (!host) {
                 // Host removed from settings mid-flight — nothing to dial.
                 closeWindow(win.id);
                 return;
             }
-            const url = hostWsUrl(host,
+            const url = win.ticketUrl || hostWsUrl(host,
                 '/ws?session=' + encodeURIComponent(win.sid)
                 + '&clientId=' + encodeURIComponent(CLIENT_ID));
-            if (url === null) {
-                // #252 phase 1: a host reached through this broker has no
-                // terminal socket yet. Say so once per window, and do not
-                // dial: nothing is scheduled, so nothing reconnects.
-                if (!win.proxyNoticeShown) {
-                    win.proxyNoticeShown = true;
-                    const _note = 'proxied terminals arrive in the next phase';
-                    try {
-                        win.term.write(_note + '\r\n');
-                        dispatchTermOut(win, _note + '\r\n');
-                    } catch (_) {}
-                }
+            if (typeof url !== 'string') {
+                // #252: a host reached through this broker mints a one-time
+                // ticket first (hostWsUrl answers a promise). Its url comes
+                // back through this function (win.ticketUrl, for that one
+                // call), so every guard above runs again and a ticket a guard
+                // turned away is dropped. A 401 at the mint is a 4401 here:
+                // the overlay owns it and the healing loop leaves the window
+                // alone. Any other refusal backs off like a failed dial.
+                win.minting = true;
+                url.then((got) => {
+                    win.minting = false;
+                    if (win.disposed) return;
+                    if (got === null) { win.authFailed = true; return; }
+                    win.ticketUrl = got;
+                    try { attachWebSocket(win); } finally { win.ticketUrl = null; }
+                }, () => {
+                    win.minting = false;
+                    if (!win.disposed) scheduleReattach(win);
+                });
                 return;
             }
             const ws = new WebSocket(url);

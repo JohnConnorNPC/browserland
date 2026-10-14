@@ -23,7 +23,6 @@ anywhere in core shows up and must be classified before the suite goes green.
 
 | Where | Receiver | What it carries | Hookable at a core call site? |
 |---|---|---|---|
-| `73_js_window_runtime.js` proxied-host notice (#252 phase 1: a host reached through this broker has no terminal socket yet; written once per window, nothing is dialed) | `win.term.write` | core-authored status text | yes |
 | `73_js_window_runtime.js` "connecting to …" banner | `win.term.write` | core-authored status text | yes |
 | `73_js_window_runtime.js` ws `onopen` banner | `win.term.write` | core-authored status text | yes |
 | `73_js_window_runtime.js` ws `onmessage`, binary frame | `win.term.write` | **PTY bytes** (`Uint8Array` from an `ArrayBuffer` frame) | yes |
@@ -32,7 +31,7 @@ anywhere in core shows up and must be classified before the suite goes green.
 | `73_js_window_runtime.js` ws `onclose` | `win.term.write` | `[connection closed]` | yes |
 | `73_js_window_runtime.js` ws `onerror` | `win.term.write` | `[ws error]` | yes |
 
-Eight sites, one receiver: **every core write goes through the single
+Seven sites, one receiver: **every core write goes through the single
 `Terminal` instance held at `win.term`**, and that instance is created at exactly
 one place in core (`67_js_window_lifecycle.js`, `new Terminal({...})`). There is
 no second write spelling in core — no `writeln`, no `writeUtf8`, no

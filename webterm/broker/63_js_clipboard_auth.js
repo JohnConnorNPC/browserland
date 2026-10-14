@@ -717,11 +717,11 @@
                 status: 401, headers: { 'Content-Type': 'application/json' } });
         }
         function hostWsUrl(host, path) {
-            // #252 phase 1: a proxied host's sockets are not relayed yet
-            // (phase 2 brings a ticketed /ws and /control). null means "do
-            // not connect": every dial site checks it, and a proxied host's
-            // url is never dialed, so B's token never rides a URL to B.
-            if (host && host.via === 'server') return null;
+            // #252: a host reached through this broker answers a PROMISE
+            // (_peerWsUrl): its sockets go through a one-time ticket, so its
+            // url is never dialed and no token rides a URL to it. Every
+            // other host answers the string at once, as it always has.
+            if (host && host.via === 'server') return _peerWsUrl(host, path);
             let base;
             if (host && host.url) {
                 base = host.url.replace(/^http/, 'ws');
@@ -738,6 +738,55 @@
             if (!host || !host.token) return base + path;
             return base + path + (path.indexOf('?') === -1 ? '?' : '&')
                 + 'token=' + encodeURIComponent(host.token);
+        }
+
+        // #252 phase 2: a proxied host's socket url. Mints a one-time ticket
+        // through the browser gate (POST /peer/<id>/ws-ticket, both tokens,
+        // the pairing header -- _peerFetch), then resolves THIS origin's
+        // /peer/<id><path> with ?ticket= and nothing else. Settles three ways:
+        //   - the url: the ticket was minted (any earlier refusal is cleared);
+        //   - null: a 401 (a pairing 409 arrives here as one) -- the login
+        //     overlay takes over, and the site does not dial;
+        //   - a rejection: anything else (503 peer_busy or proxy_unavailable,
+        //     a 5xx, a failed fetch) -- the host chip says why
+        //     (pollStateFor().wsRefusal, 75) and the site backs off on its
+        //     own clock, as for a failed dial.
+        function _peerWsUrl(host, path) {
+            const route = path.indexOf('/control') === 0 ? 'control' : 'ws';
+            const refused = (code) => {
+                pollStateFor(host.id).wsRefusal = code;
+                renderHostStatus();
+                throw new Error('ticket refused: ' + code);
+            };
+            return _peerFetch(host, '/ws-ticket', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ route: route, clientId: CLIENT_ID }),
+            }).then(async (r) => {
+                if (r.status === 401) {
+                    pollStateFor(host.id).authNeeded = true;
+                    showAuthOverlay(host);
+                    renderHostStatus();
+                    return null;
+                }
+                let body = null;
+                try { body = await r.json(); } catch (_) {}
+                if (!r.ok || !body || typeof body.ticket !== 'string') {
+                    // Only THIS broker's marker names the refusal (_peerFetch's
+                    // own cannot-proxy answer carries the code in its body).
+                    refused(r.headers.get(PEER_REFUSAL_HEADER)
+                        || (body && body.error === 'proxy_unavailable'
+                            ? 'proxy_unavailable' : 'error'));
+                }
+                const st = pollStateFor(host.id);
+                if (st.wsRefusal) { st.wsRefusal = null; renderHostStatus(); }
+                const proto = window.location.protocol === 'https:'
+                    ? 'wss:' : 'ws:';
+                return proto + '//' + window.location.host + '/peer/'
+                    + encodeURIComponent(host.peerId) + path
+                    + (path.indexOf('?') === -1 ? '?' : '&')
+                    + 'ticket=' + encodeURIComponent(body.ticket);
+            }, () => refused('error'));    // the mint itself failed
         }
 
         // Login overlay, per host: shown on any 401/4401 — first visit

@@ -1,4 +1,4 @@
-"""#252 phase 1, atom 4: the page side of the peer proxy, run in node.
+"""#252 phase 1 atom 4 and phase 2 atom 4: the page side of the peer proxy, run in node.
 
 The shipped fragments are SLICED (by phrase, never copied) and executed with
 stubbed ``fetch`` / ``WebSocket`` / ``localStorage``-backed ``prefs``:
@@ -11,8 +11,11 @@ stubbed ``fetch`` / ``WebSocket`` / ``localStorage``-backed ``prefs``:
   ``peer_origin_changed`` clears it and reads as a 401;
 * a broker that cannot proxy fails the host CLOSED (synthetic 503, "this
   broker cannot proxy", nothing dialed); only an OK ``/info`` is memoized;
-* ``hostOriginsForCsp`` skips proxied hosts, ``hostWsUrl`` answers null for
-  them and neither dial site constructs a WebSocket;
+* ``hostOriginsForCsp`` skips proxied hosts; ``hostWsUrl`` answers a direct
+  host's url at once and a proxied host's as a promise (a one-time ticket
+  minted through ``/peer/<id>/ws-ticket``), and both dial sites dial what it
+  resolves -- or show the overlay (401) or the chip's reason and back off
+  (anything else) (#252 phase 2);
 * a registry row cannot make a host proxied (the host-registry importer drops
   the three fields), and the header names match the server's constants.
 """
@@ -77,7 +80,8 @@ function invalidateHost(id) { invalidated.push(id); }
 async function fetch(url, o) {
     const h = {};
     if (o && o.headers) o.headers.forEach((v, k) => { h[k] = v; });
-    calls.push({ url: url, headers: h });
+    calls.push({ url: url, headers: h, method: o && o.method,
+                 body: o && o.body });
     if (url === '/info') {
         const next = infoAnswers.length ? infoAnswers.shift() : null;
         if (next === 'reject') throw new TypeError('Failed to fetch');
@@ -105,6 +109,7 @@ def _run(tmp_path, prefs, body, extra_src=""):
     path = tmp_path / "harness.js"
     path.write_text(script, encoding="utf-8")
     proc = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                          encoding="utf-8",
                           timeout=120)
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -290,51 +295,254 @@ def test_record_normalization(tmp_path):
     assert (r3["via"], r3["peerId"], r3["peerOrigin"]) == ("server", "b", "")
 
 
-def test_ws_url_is_null_for_a_proxied_host(tmp_path):
+def test_ws_url_is_sync_for_a_direct_host_and_a_promise_through_a_peer(
+        tmp_path):
     out = _run(tmp_path, _prefs(), """
-return { via: hostWsUrl(hostById('rb'), '/ws?session=1'),
-         direct: hostWsUrl(hostById('rd'), '/ws?session=1') };
-""")
-    assert out["via"] is None
+infoAnswers = [INFO];
+peerAnswer = { status: 200, body: { ok: true, ticket: 'T/1+', ttl: 30 } };
+const direct = hostWsUrl(hostById('rd'), '/ws?session=1');
+const p = hostWsUrl(hostById('rb'), '/ws?session=1&clientId=cid');
+const isPromise = typeof p.then === 'function';
+const via = await p;
+const ctl = await hostWsUrl(hostById('rb'), '/control?clientId=cid');
+return { direct: direct, isPromise: isPromise, via: via, ctl: ctl,
+         calls: calls.filter(c => c.url !== '/info') };
+""".replace("INFO", json.dumps(INFO)), extra_src=VIA_STUBS)
     assert out["direct"] == "ws://d:4445/ws?session=1&token=D-TOKEN"
+    assert out["isPromise"] is True
+    # Same origin, the ticket and nothing else: no token on the url.
+    assert out["via"] == ("ws://a:4445/peer/b/ws?session=1&clientId=cid"
+                          "&ticket=T%2F1%2B")
+    assert out["ctl"] == "ws://a:4445/peer/b/control?clientId=cid&ticket=T%2F1%2B"
+    assert "token" not in out["via"] and B_TOKEN not in out["via"]
+    mints = out["calls"]
+    assert [c["url"] for c in mints] == ["/peer/b/ws-ticket"] * 2
+    for c, route in zip(mints, ("ws", "control")):
+        assert c["method"] == "POST"
+        assert json.loads(c["body"]) == {"route": route, "clientId": "cid"}
+        assert c["headers"]["authorization"] == "Bearer " + A_TOKEN
+        assert c["headers"]["x-browserland-peer-token"] == B_TOKEN
+        assert c["headers"]["x-browserland-peer-origin"] == "http://b:4448"
 
 
 # ---- the dial sites ----------------------------------------------------------
 
-DIAL_STUBS = r"""
+VIA_STUBS = r"""
 let wsMade = 0;
 class WebSocket { constructor(u) { wsMade++; this.url = u; } }
 WebSocket.OPEN = 1; WebSocket.CONNECTING = 0;
 const CLIENT_ID = 'cid';
+const WS_CONNECT_TIMEOUT_MS = 1;
 const controlSockets = new Map();
+const _ctlSockState = new WeakMap();
+function _armStatusWatchdog() {}
 const written = [];
-function scheduleControlReattach() { written.push('reattach'); }
+const overlays = [];
+const reattached = [];
+let renders = 0;
+const polls = new Map();
+function pollStateFor(id) {
+    if (!polls.has(id)) polls.set(id, { authNeeded: false });
+    return polls.get(id);
+}
+function showAuthOverlay(h) { overlays.push(h && h.id); }
+function renderHostStatus() { renders++; }
+function scheduleReattach(w) { reattached.push('win'); }
+function scheduleControlReattach(id) { reattached.push('ctl:' + id); }
 function closeWindow() {}
-function dispatchTermOut() {}
+function dispatchTermOut(w, t) { written.push(t); }
+function hostMenuState() { return 'ok'; }
+const settle = async () => { for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 0)); } };
+function mkWin(hid) {
+    return { id: 1, hostId: hid, sid: 's1', controlled: false,
+             term: { write: (t) => written.push(t) } };
+}
 """
 
 
-def test_no_websocket_is_made_for_a_proxied_host(tmp_path):
+def _dial_src():
     s64 = _src("64_js_sessions_poll_control.js")
     s73 = _src("73_js_window_runtime.js")
-    extra = (DIAL_STUBS + _func(s64, "openControlWs")
-             + _func(s64, "_dialControl") + _func(s73, "attachWebSocket"))
-    out = _run(tmp_path, _prefs(), """
-const host = hostById('rb');
-openControlWs(host);
-const cand = _dialControl({ hostId: 'rb' }, host, 'cand');
-const win = { id: 1, hostId: 'rb', sid: 's1', controlled: false,
-              term: { write: (t) => written.push(t) } };
+    s75 = _src("75_js_taskbar_hosts.js")
+    return (VIA_STUBS + _func(s64, "openControlWs")
+            + _func(s64, "_dialControl") + _func(s73, "attachWebSocket")
+            + _func(s75, "hostNeedsAttention") + _func(s75, "hostChipTip"))
+
+
+def _dial(tmp_path, body, answer=None, info=INFO):
+    pre = "infoAnswers = [INFO, INFO, INFO];\n".replace(
+        "INFO", json.dumps(info))
+    if answer is not None:
+        pre += "peerAnswer = " + json.dumps(answer) + ";\n"
+    return _run(tmp_path, _prefs(), pre + body, extra_src=_dial_src())
+
+
+OK_TICKET = {"status": 200, "body": {"ok": True, "ticket": "T", "ttl": 30}}
+BUSY = {"status": 503, "body": {"ok": False, "error": "peer_busy"},
+        "headers": {"X-Browserland-Peer-Refusal": "peer_busy"}}
+
+
+def test_a_direct_host_dials_on_the_same_tick(tmp_path):
+    out = _dial(tmp_path, """
+const win = mkWin('rd');
 attachWebSocket(win);
-attachWebSocket(win);           // a re-dial: still no socket, no 2nd notice
-return { wsMade: wsMade, sockets: controlSockets.size, cand: cand,
-         written: written, ws: win.ws === undefined };
-""", extra_src=extra)
-    assert out["wsMade"] == 0
-    assert out["sockets"] == 0
+const sync = wsMade;
+openControlWs(hostById('rd'));
+return { sync: sync, made: wsMade, url: win.ws.url,
+         ctl: controlSockets.get('rd').ws.url };
+""")
+    assert out["sync"] == 1 and out["made"] == 2
+    assert out["url"] == "ws://d:4445/ws?session=s1&clientId=cid&token=D-TOKEN"
+    assert out["ctl"] == "ws://d:4445/control?clientId=cid&token=D-TOKEN"
+
+
+def test_both_sites_dial_the_ticketed_url(tmp_path):
+    out = _dial(tmp_path, """
+const win = mkWin('rb');
+attachWebSocket(win);
+attachWebSocket(win);              // a re-dial during the mint
+openControlWs(hostById('rb'));
+openControlWs(hostById('rb'));     // the poll loop's next tick
+const during = wsMade;
+await settle();
+const rec = controlSockets.get('rb');
+return { during: during, made: wsMade, url: win.ws.url, ctl: rec.ws.url,
+         inState: _ctlSockState.has(rec.ws), minting: [!!win.minting,
+         !!rec.minting], mints: calls.filter(
+             c => c.url === '/peer/b/ws-ticket').length,
+         written: written, reattached: reattached };
+""", OK_TICKET)
+    assert out["during"] == 0
+    assert out["made"] == 2
+    assert out["mints"] == 2                       # one per site, not four
+    assert out["url"] == "ws://a:4445/peer/b/ws?session=s1&clientId=cid&ticket=T"
+    assert out["ctl"] == "ws://a:4445/peer/b/control?clientId=cid&ticket=T"
+    assert out["inState"] is True
+    assert out["minting"] == [False, False]
+    # The window is told nothing but the dial banner (the phase-1 notice is
+    # gone), and nothing backs off.
+    assert out["written"] == ["connecting to B…"] * 2
+    assert out["reattached"] == []
+
+
+def test_a_mint_401_opens_the_overlay_and_dials_nothing(tmp_path):
+    out = _dial(tmp_path, """
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+openControlWs(hostById('rb'));
+await settle();
+return { made: wsMade, auth: pollStateFor('rb').authNeeded,
+         overlays: overlays, renders: renders, failed: win.authFailed,
+         reattached: reattached, written: written };
+""", {"status": 401, "body": {"ok": False, "error": "auth_required"}})
+    assert out["made"] == 0
+    assert out["auth"] is True
+    assert out["overlays"] == ["rb", "rb"]
+    assert out["renders"] >= 2
+    assert out["failed"] is True           # the healing loop leaves it alone
+    assert out["reattached"] == []
+    assert out["written"] == []
+
+
+def test_a_busy_peer_shows_on_the_chip_and_backs_off(tmp_path):
+    out = _dial(tmp_path, """
+const host = hostById('rb');
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+openControlWs(host);
+await settle();
+const rec = { hostId: 'rb', cur: { ws: null }, cand: null, closedByUs: false };
+controlSockets.set('rb', rec);
+const cand = _dialControl(rec, host, 'cand');
+await settle();
+const busy = { refusal: pollStateFor('rb').wsRefusal,
+               tip: hostChipTip(host, 'ok'),
+               attention: hostNeedsAttention(host) };
+peerAnswer = OK;
+attachWebSocket(win);
+await settle();
+return { busy: busy, cand: cand, made: wsMade, reattached: reattached,
+         after: pollStateFor('rb').wsRefusal || null,
+         attentionAfter: hostNeedsAttention(host),
+         tipAfter: hostChipTip(host, 'ok') };
+""".replace("OK", json.dumps(OK_TICKET)), BUSY)
+    assert out["busy"]["refusal"] == "peer_busy"
+    assert out["busy"]["tip"].endswith(" — terminals: the peer is busy")
+    assert out["busy"]["attention"] is True
     assert out["cand"] is None
-    assert out["written"] == ["proxied terminals arrive in the next phase\r\n"]
-    assert out["ws"] is True
+    # 73 backs off once, the socket in charge once, the replacement never.
+    assert out["reattached"] == ["win", "ctl:rb"]
+    assert out["made"] == 1
+    assert out["after"] is None
+    assert out["attentionAfter"] is False
+    assert "terminals:" not in out["tipAfter"]
+
+
+@pytest.mark.parametrize("answer, info, phrase", [
+    (None, {"ok": True, "peers": {}, "peer_proxy": False},
+     "this broker cannot proxy"),
+    ({"status": 500, "body": {}}, INFO, "could not connect"),
+    ("throw", INFO, "could not connect"),
+])
+def test_other_mint_failures_name_their_reason(tmp_path, answer, info,
+                                               phrase):
+    body = """
+const host = hostById('rb');
+const win = mkWin('rb');
+attachWebSocket(win);
+await settle();
+return { made: wsMade, tip: hostChipTip(host, 'ok'), reattached: reattached };
+"""
+    if answer == "throw":
+        body = "peerAnswer = { hook: () => { throw new TypeError('x'); } };\n" \
+            + body
+        answer = None
+    out = _dial(tmp_path, body, answer, info)
+    assert out["made"] == 0
+    assert out["tip"].endswith(" — terminals: " + phrase)
+    assert out["reattached"] == ["win"]
+
+
+def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):
+    out = _dial(tmp_path, """
+const win = mkWin('rb');
+attachWebSocket(win);
+win.disposed = true;
+await settle();
+return { made: wsMade, minting: !!win.minting };
+""", OK_TICKET)
+    assert out == {"made": 0, "minting": False}
+
+
+def test_a_ticket_a_guard_turned_away_is_never_reused(tmp_path):
+    out = _dial(tmp_path, """
+const win = mkWin('rb');
+attachWebSocket(win);
+win.controlled = { label: 'phone' };     // taken over during the mint
+await settle();
+const held = wsMade;
+win.controlled = false;
+peerAnswer = { status: 200, body: { ok: true, ticket: 'T2', ttl: 30 } };
+attachWebSocket(win);
+await settle();
+return { held: held, made: wsMade, url: win.ws.url, mints: calls.filter(
+    c => c.url === '/peer/b/ws-ticket').length };
+""", OK_TICKET)
+    assert out["held"] == 0
+    assert out["mints"] == 2
+    assert out["made"] == 1
+    assert out["url"].endswith("&ticket=T2")
+
+
+def test_the_phase_1_notice_is_gone():
+    for name in ("73_js_window_runtime.js", "64_js_sessions_poll_control.js",
+                 "63_js_clipboard_auth.js"):
+        src = _src(name)
+        assert "proxyNoticeShown" not in src
+        assert "arrive in the next phase" not in src
 
 
 def test_identity_refresh_probes_through_the_branch(tmp_path):
@@ -386,6 +594,7 @@ def test_a_registry_row_cannot_set_via_or_peer_id(tmp_path):
     path = tmp_path / "reg.js"
     path.write_text(script, encoding="utf-8")
     proc = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                          encoding="utf-8",
                           timeout=60)
     assert proc.returncode == 0, proc.stderr
     entry = json.loads(proc.stdout)
