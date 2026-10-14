@@ -86,8 +86,8 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import (auth, modinstall, peers, relay, roles, supervise,
-               update as update_check)
+from . import (auth, modinstall, peer_sockets, peers, relay, roles,
+               supervise, update as update_check)
 from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
 # the per-window store that validates them (#228), and so are the scope
@@ -3949,12 +3949,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                name: str = "webterm-broker") -> Sanic:
     config = config or {}
     app = Sanic(name)
-    # Browser pastes arrive as one input/paste frame and producer snapshots
-    # scale with --ring-bytes; Sanic's default WEBSOCKET_MAX_SIZE (1 MiB)
-    # kills either socket with a 1009 close and the bytes silently vanish
-    # (Linux verification finding F2). 16 MiB bounds memory while clearing
-    # any realistic paste or snapshot; the UI additionally chunks its sends.
-    app.config.WEBSOCKET_MAX_SIZE = 16 * 2**20
+    # The frame cap of every socket (F2: Sanic's 1 MiB default kills a big
+    # paste or snapshot with a 1009); see peer_sockets.PEER_WS_FRAME_MAX.
+    app.config.WEBSOCKET_MAX_SIZE = peer_sockets.PEER_WS_FRAME_MAX
     # sanic-ext auto-loads when merely installed (it is NOT one of our
     # dependencies), adding its own CORS middleware, auto-OPTIONS/HEAD, and
     # an unauthenticated /docs + /openapi.json. Pin it off so every install
@@ -4955,13 +4952,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             await ws.close(code=4400, reason="clientId required")
             return
         ctx = app.ctx
-
-        def _cid8(cid):
-            # #248 A6: lease log lines name a client by an 8-char prefix of
-            # its clientId, never the whole id, and never a raw control
-            # character (a clientId is client-chosen: no forged log lines).
-            return "".join(ch if ch.isprintable() else "?"
-                           for ch in (cid or "-")[:8])
+        # #248 A6: lease log lines name a client by an 8-char prefix.
+        _cid8 = peer_sockets.cid8
 
         def _lease_view(owner_id):
             # (active, activeClientId, gen, bootId) for a socket opened by
