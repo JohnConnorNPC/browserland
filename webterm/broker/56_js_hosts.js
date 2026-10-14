@@ -459,8 +459,11 @@
         // reached THROUGH this broker then (so its own origin was never
         // reported) and is direct now. Display-only, like HOST_ADDED_NOTE.
         const _hostOriginsAtLoad = new Set(hostOriginsForCsp());
-        const HOST_SWITCHED_NOTE = 'direct now — open terminals reconnect '
-            + 'directly on their next attach (or on reload)';
+        // Honest for both CSP modes: report-only today (#190), the re-dial
+        // goes through; once connect-src is enforced it is blocked until a
+        // reload.
+        const HOST_SWITCHED_NOTE = 'direct now — reconnects directly; '
+            + 'if it does not, reload the page';
         function hostSwitchedAfterLoad(h) {
             if (!h || h.id === 'local' || hostIsProxied(h)) return false;
             if (!_hostIdsAtLoad.has(h.id)) return false;   // "added" says it

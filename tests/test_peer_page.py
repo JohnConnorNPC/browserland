@@ -1605,8 +1605,8 @@ return { rbVia: rbVia, rb: hostSwitchedAfterLoad(rb),
                    "bounceVia": False,
                    "bounce": False, "fresh": False, "freshAdded": True,
                    "local": False,
-                   "note": "direct now — open terminals reconnect directly "
-                           "on their next attach (or on reload)"}
+                   "note": "direct now — reconnects directly; if it does "
+                           "not, reload the page"}
 
 
 def test_the_hosts_row_wires_the_mode_control_and_the_note():
@@ -1841,3 +1841,33 @@ def test_a_switch_that_would_make_a_twin_is_refused(tmp_path, hosts, id_,
                    "errors": ["host already configured"], "saves": 0,
                    "invalidated": [], "redialed": [], "control": [],
                    "renders": 1}
+
+
+
+FORM_STUBS = r"""
+let editingHostId = null;
+const hostLabelEl = { value: '', focus() {} };
+const hostUrlEl = { value: '', disabled: false };
+const hostPassEl = { value: '' };
+const hostAddBtn = { textContent: 'add' };
+function setHostError() {}
+"""
+
+
+def test_resetting_the_host_form_re_enables_the_url_box(tmp_path):
+    """Round 1b S4: editing a proxied row disables the URL box (its address
+    is this broker's config); leaving that edit -- save, cancel, or a tab
+    switch, all through resetHostForm -- must enable it again, or no host
+    can be added until a reload."""
+    s82 = _src("82_js_settings_keys_hosts.js")
+    s83 = _src("83_js_broker_identity.js")
+    out = _run(tmp_path, _prefs(), """
+startEditHost('rb');
+const editingVia = hostUrlEl.disabled;
+resetHostForm();
+const afterReset = hostUrlEl.disabled;
+startEditHost('rd');
+return [editingVia, afterReset, hostUrlEl.disabled];
+""", extra_src=FORM_STUBS + _func(s82, "resetHostForm")
+        + _func(s83, "startEditHost"))
+    assert out == [True, False, False]

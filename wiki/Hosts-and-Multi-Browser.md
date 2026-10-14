@@ -59,8 +59,10 @@ relays `/state`; they stay on the other broker and come back when the host
 is switched back to direct. Editing its row changes only the label and the
 password — the address belongs to this broker's `peers`. A host that was
 reached through this broker when the page loaded, and is then switched back
-to direct, says so on its row: its terminals reconnect directly, and a
-reload may be needed before the browser lets the page reach that address. If it is **this** broker's password that is wrong, this broker's
+to direct, says so on its row: its terminals reconnect directly, and if
+they do not, reload the page. Today the page's connection policy only
+reports (#190); once it is enforced, a host switched back this way needs
+that reload before the page may reach its address. If it is **this** broker's password that is wrong, this broker's
 own login opens, never the other host's. If this broker cannot relay (no peers, no `proxy` extra, or an
 older build) the host says **this broker cannot proxy** and nothing is
 dialed — it never quietly falls back to connecting directly.
