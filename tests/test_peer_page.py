@@ -682,6 +682,30 @@ return { made: wsMade, max: peerInflightMax,
     assert out["minting"] == 0
 
 
+@pytest.mark.parametrize("meanwhile", ["another candidate", "no socket in charge"])
+def test_a_late_candidate_mint_dials_nothing(tmp_path, meanwhile):
+    # Review round 1b SHOULD 5: a replacement's ticket arrives after another
+    # replacement took its place, or after the socket in charge is gone.
+    out = _dial(tmp_path, """
+const host = hostById('rb');
+const rec = { hostId: 'rb', ws: null, cur: { ws: null }, cand: null,
+              closedByUs: false, attempts: 0 };
+controlSockets.set('rb', rec);
+const st = _dialControl(rec, host, 'cand');
+const minting = !!rec.minting;
+if (MEANWHILE === 'another candidate') rec.cand = { other: true };
+else rec.cur = null;
+await settle();
+return { st: st, minting: minting, made: wsMade,
+         cand: rec.cand && rec.cand.other === true, reattached: reattached };
+""".replace("MEANWHILE", json.dumps(meanwhile)), OK_TICKET)
+    assert out["st"] is None and out["minting"] is True
+    assert out["made"] == 0
+    assert out["reattached"] == []
+    if meanwhile == "another candidate":
+        assert out["cand"] is True          # the other one is left alone
+
+
 def test_a_window_closed_during_the_mint_is_not_dialed(tmp_path):
     out = _dial(tmp_path, """
 const win = mkWin('rb');
