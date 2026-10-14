@@ -1610,3 +1610,21 @@ return [originIsLocalOnly('http://[::ffff:10.0.0.1]:4448'),
         originIsLocalOnly('http://[::ffff:127.0.0.1]:4448')];
 """)
     assert out == [False, False, True]
+
+
+def test_a_put_queued_while_direct_never_leaves_after_a_switch(tmp_path):
+    """codex 2: putHostState serializes per host, so a save queued behind a
+    slow one while the host was direct runs AFTER it was switched; the check
+    sits on that path too."""
+    out = _run(tmp_path, _prefs(), """
+peerAnswer = { status: 200, body: { rev: 2 }, delay: 40 };
+const entry = () => ({ rev: 1, settings: {}, layout: {}, layoutLoaded: true });
+const p1 = putHostState('rd', entry());
+const p2 = putHostState('rd', entry());
+await new Promise(r => setTimeout(r, 10));
+Object.assign(hostById('rd'), { via: 'server', peerId: 'b',
+                                peerOrigin: 'http://b:4448' });
+const r = await Promise.all([p1, p2]);
+return { r: r, puts: calls.filter(c => c.method === 'PUT').map(c => c.url) };
+""", extra_src=_state_src())
+    assert out == {"r": ["ok", "skipped"], "puts": ["http://d:4445/state"]}

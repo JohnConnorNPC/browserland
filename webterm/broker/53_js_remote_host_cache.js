@@ -90,11 +90,8 @@
         function putHostState(hostId, entry) {
             // Local writes go through the untouched F0 path.
             if (hostId === 'local') { savePrefs(); return Promise.resolve('ok'); }
-            // #252: never relayed (see fetchHostState), whatever entry a
-            // caller hands in.
-            if (hostIsProxied(hostById(hostId))) {
-                return Promise.resolve('skipped');
-            }
+            // #252: a proxied host's save is refused in _putHostStateOnce,
+            // when it leaves (see fetchHostState), whatever entry it carries.
             // Use the entry the settings tab CAPTURED (makeRemoteTarget passes it)
             // — never re-read hostStateCache here: an in-flight background prefetch
             // can replace the cached object after the tab fetched it, and PUTting
@@ -111,6 +108,10 @@
         async function _putHostStateOnce(hostId, entry) {
             const host = hostById(hostId);
             if (!host || !entry) return 'skipped';
+            // #252: checked again HERE, when the PUT actually leaves: one
+            // queued behind an earlier save while the host was direct may run
+            // after it was switched to "from server".
+            if (hostIsProxied(host)) return 'skipped';
             // PUT requires BOTH settings and layout objects. We only edit
             // settings, so the host's real layout rides along unchanged — but a
             // bare {} would WIPE that layout, so a save before the layout
