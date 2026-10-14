@@ -183,10 +183,22 @@
         //
         // JSON, not `id + '|' + url`: a separator that can appear in either half
         // lets two different host records spell the same key.
+        // #252 (D10): a host reached through this broker is keyed on its
+        // pairing as well -- the peer id and the origin its token was paired
+        // with -- so re-pointing the peer, re-pairing it or switching the
+        // host's mode revokes the grant. A direct host's key is unchanged,
+        // so its existing grants survive. ONE spelling, shared with the prune.
+        function _osc52KeyOf(h) {
+            if (h.via === 'server') {
+                return JSON.stringify([h.id, h.url || '', h.peerId,
+                                       h.peerOrigin || '']);
+            }
+            return JSON.stringify([h.id, h.url || '']);
+        }
         function _osc52HostKey(hostId) {
             const h = hostById(hostId);
             if (!h) return null;
-            return JSON.stringify([h.id, h.url || '']);
+            return _osc52KeyOf(h);
         }
         // Every key that no longer names a CURRENT host is dropped, and the
         // pruned map is written back. Without this, re-pointing a host's URL
@@ -196,7 +208,7 @@
         // so re-adding one always starts shut.
         function _osc52PruneStale(map) {
             let live;
-            try { live = new Set(getHosts().map(h => JSON.stringify([h.id, h.url || '']))); }
+            try { live = new Set(getHosts().map(_osc52KeyOf)); }
             catch (e) { return map; }        // never fail a gate on a bad host list
             let changed = false;
             for (const k of Object.keys(map)) {

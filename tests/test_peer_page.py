@@ -989,3 +989,60 @@ def test_a_direct_and_a_proxied_record_of_one_broker_are_not_twins(tmp_path):
         == {"d2": "d1"}
     assert _dups(tmp_path, [local, _direct("d1", url="http://a:4445")]) \
         == {"d1": "local"}
+
+
+OSC_STUBS = r"""
+const store = new Map();
+const localStorage = {
+    getItem: (k) => store.has(k) ? store.get(k) : null,
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: (k) => { store.delete(k); },
+};
+const OSC_KEY = 'webterm:osc52Hosts:v1';
+const stored = () => Object.keys(JSON.parse(store.get(OSC_KEY) || '{}'));
+"""
+
+
+def _osc_src():
+    s63 = _src("63_js_clipboard_auth.js")
+    return OSC_STUBS + s63[s63.index("// ---- OSC 52:"):
+                           s63.index("// ---- auth ---")]
+
+
+def test_the_osc52_key_carries_the_pairing(tmp_path):
+    """P3-3 (A3, D10): a proxied host's grant is keyed on its peer id and
+    paired origin, so a change of either drops it; a direct host's key is
+    today's, so a grant stored before this change still holds."""
+    prefs = _prefs()
+    prefs["_hosts"][2]["url"] = "http://d:4445"
+    out = _run(tmp_path, prefs, """
+// (a) a grant stored under today's literal key
+store.set(OSC_KEY, JSON.stringify({ '["rd","http://d:4445"]': true }));
+const a = isOsc52Allowed('rd');
+// (b) a proxied grant, then a re-pairing
+setOsc52Allowed('rb', true);
+const b0 = isOsc52Allowed('rb');
+const keyB = stored().filter(k => k.indexOf('"rb"') !== -1);
+hostById('rb').peerOrigin = 'http://b2:4448';
+const b1 = isOsc52Allowed('rb');
+const b1keys = stored().filter(k => k.indexOf('"rb"') !== -1);
+// (c) the same for a new peer id
+hostById('rb').peerOrigin = 'http://b:4448';
+setOsc52Allowed('rb', true);
+hostById('rb').peerId = 'c';
+const c1 = isOsc52Allowed('rb');
+// (d) direct -> proxied
+setOsc52Allowed('rd', true);
+const d0 = isOsc52Allowed('rd');
+Object.assign(hostById('rd'), { via: 'server', peerId: 'd',
+                                peerOrigin: 'http://d:4445' });
+const d1 = isOsc52Allowed('rd');
+return { a: a, b0: b0, keyB: keyB, b1: b1, b1keys: b1keys, c1: c1,
+         d0: d0, d1: d1 };
+""", extra_src=_osc_src())
+    assert out["a"] is True
+    assert out["b0"] is True
+    assert out["keyB"] == ['["rb","http://b:4448","b","http://b:4448"]']
+    assert out["b1"] is False and out["b1keys"] == []
+    assert out["c1"] is False
+    assert out["d0"] is True and out["d1"] is False
