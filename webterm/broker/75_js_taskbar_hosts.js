@@ -460,7 +460,9 @@
                 tip += ' — terminals: ' + (refusal === 'peer_busy'
                     ? 'the peer is busy'
                     : refusal === 'proxy_unavailable'
-                        ? PROXY_UNAVAILABLE_MSG : 'could not connect');
+                        ? PROXY_UNAVAILABLE_MSG
+                        : refusal === 'hub_auth_required'
+                            ? HUB_AUTH_MSG : 'could not connect');
             }
             return tip;
         }

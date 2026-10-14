@@ -87,7 +87,9 @@ async function fetch(url, o) {
     if (url === '/info') {
         const next = infoAnswers.length ? infoAnswers.shift() : null;
         if (next === 'reject') throw new TypeError('Failed to fetch');
-        if (next === 500) return new Response('{}', { status: 500 });
+        if (typeof next === 'number') {
+            return new Response('{}', { status: next });
+        }
         return new Response(JSON.stringify(next || {}), { status: 200 });
     }
     if (peerAnswer) {
@@ -1046,3 +1048,136 @@ return { a: a, b0: b0, keyB: keyB, b1: b1, b1keys: b1keys, c1: c1,
     assert out["b1"] is False and out["b1keys"] == []
     assert out["c1"] is False
     assert out["d0"] is True and out["d1"] is False
+
+
+MARKED_401 = {"status": 401, "body": {"ok": False, "error": "auth_required"},
+              "headers": {"X-Browserland-Peer-Refusal": "auth_required"}}
+PEERS_401 = {"status": 401, "body": {"ok": False, "error": "auth_required"}}
+
+
+def _attrib(tmp_path, body, answer, token=B_TOKEN, info=INFO):
+    pre = ("infoAnswers = [INFO, INFO, INFO];\n"
+           .replace("INFO", json.dumps(info))
+           + "peerAnswer = " + json.dumps(answer) + ";\n")
+    s75 = _src("75_js_taskbar_hosts.js")
+    return _run(tmp_path, _prefs(token=token), pre + body,
+                extra_src=_dial_src() + _func(s75, "pollHost"))
+
+
+ATTRIB_BODY = """
+const r = await hostFetch(hostById('rb'), '/sessions');
+let j = null; try { j = await r.json(); } catch (_) {}
+return { status: r.status, error: j && j.error, overlays: overlays,
+         localAuth: pollStateFor('local').authNeeded,
+         bAuth: pollStateFor('rb').authNeeded, token: hostById('rb').token };
+"""
+
+
+def test_this_brokers_own_401_opens_this_brokers_overlay(tmp_path):
+    """P3-2 (A4): a 401 with this broker's marker on a request that SENT a
+    peer token is this broker's bearer rung: its own overlay opens, and the
+    caller sees a 503 hub_auth_required -- never the peer's login."""
+    out = _attrib(tmp_path, ATTRIB_BODY, MARKED_401)
+    assert out["status"] == 503 and out["error"] == "hub_auth_required"
+    assert out["overlays"] == ["local"]
+    assert out["localAuth"] is True and out["bAuth"] is False
+    assert out["token"] == B_TOKEN
+
+
+def test_the_peers_own_401_still_reaches_the_caller(tmp_path):
+    out = _attrib(tmp_path, ATTRIB_BODY, PEERS_401)
+    assert out["status"] == 401 and out["overlays"] == []
+    assert out["localAuth"] is False
+
+
+def test_a_marked_401_without_a_peer_token_stays_the_peers(tmp_path):
+    """No peer token sent: the 401 may be either rung, and the peer needs its
+    password regardless -- it passes as a 401 (the peer's login)."""
+    out = _attrib(tmp_path, ATTRIB_BODY, MARKED_401, token="")
+    assert out["status"] == 401 and out["overlays"] == []
+
+
+def test_both_polls_flag_auth_when_neither_token_is_known(tmp_path):
+    """S4: a wrong token here and no peer token: this broker's OWN poll still
+    flags it (its /sessions answers 401 too); which overlay the user sees
+    first is the order the two answers arrive (documented)."""
+    out = _attrib(tmp_path, """
+await pollHost(localHost());
+await pollHost(hostById('rb'));
+return { overlays: overlays, localAuth: pollStateFor('local').authNeeded,
+         bAuth: pollStateFor('rb').authNeeded };
+""", MARKED_401, token="")
+    assert out["localAuth"] is True and out["bAuth"] is True
+    assert out["overlays"] == ["local", "rb"]
+
+
+def test_a_wrong_token_before_info_was_read_is_a_down_host(tmp_path):
+    """S3: with no /info memo, a wrong token here rejects at /info -- the
+    caller reads it as down, and nobody's overlay opens from _peerFetch."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [401];
+let threw = null;
+try { await hostFetch(hostById('rb'), '/sessions'); }
+catch (e) { threw = String(e); }
+return { threw: threw, overlays: overlays,
+         calls: calls.map(c => c.url) };
+""", extra_src=_dial_src())
+    assert "/info: HTTP 401" in out["threw"]
+    assert out["overlays"] == []
+    assert out["calls"] == ["/info"]
+
+
+def test_a_mint_refused_by_this_brokers_gate_names_it(tmp_path):
+    out = _attrib(tmp_path, """
+let threw = null;
+try { await hostWsUrl(hostById('rb'), '/ws?session=1'); }
+catch (e) { threw = String(e); }
+return { threw: threw, overlays: overlays,
+         refusal: pollStateFor('rb').wsRefusal,
+         tip: hostChipTip(hostById('rb'), 'ok') };
+""", MARKED_401)
+    assert "hub_auth_required" in out["threw"]
+    assert out["overlays"] == ["local"]
+    assert out["refusal"] == "hub_auth_required"
+    assert "terminals: this broker needs its own password" in out["tip"]
+
+
+LOGIN_STUBS = r"""
+let authOverlayHostId = null;
+let authSubmitting = false;
+let authGeneration = 0;
+const authTokenEl = { value: '' };
+const authSubmitBtn = { disabled: false, textContent: 'log in' };
+const authErrorEl = { textContent: '', classList: { add() {} } };
+const authPrompted = new Set();
+const hostPolls = new Map();
+const windows = new Map();
+function hideAuthOverlay() { overlays.push('hide'); }
+let _submit = null;
+const document = { getElementById: (id) => id === 'auth-form'
+    ? { addEventListener: (t, fn) => { _submit = fn; } } : null };
+"""
+
+
+def _login_src():
+    s63 = _src("63_js_clipboard_auth.js")
+    a = s63.index("        document.getElementById('auth-form')"
+                  ".addEventListener('submit', async (e) => {")
+    b = s63.index("\n        });\n", a) + len("\n        });\n")
+    return LOGIN_STUBS + s63[a:b]
+
+
+def test_the_login_probe_says_when_this_broker_refused_it(tmp_path):
+    """A4: a proxied host's login probe refused by this broker's own gate says
+    so, and stores nothing (the password typed may be right)."""
+    out = _run(tmp_path, _prefs(), """
+infoAnswers = [INFO, INFO];
+peerAnswer = MARKED;
+authOverlayHostId = 'rb';
+authTokenEl.value = 'NEW-B';
+await _submit({ preventDefault() {} });
+return { msg: authErrorEl.textContent, token: hostById('rb').token };
+""".replace("INFO", json.dumps(INFO)).replace("MARKED", json.dumps(MARKED_401)),
+        extra_src=_dial_src() + _login_src())
+    assert out["msg"] == "this broker needs its own password"
+    assert out["token"] == B_TOKEN

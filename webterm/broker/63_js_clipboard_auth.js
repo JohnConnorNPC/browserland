@@ -576,6 +576,7 @@
         // answer can never carry it (peers.py's response allowlist).
         const PEER_REFUSAL_HEADER = 'X-Browserland-Peer-Refusal';
         const PROXY_UNAVAILABLE_MSG = 'this broker cannot proxy';
+        const HUB_AUTH_MSG = 'this broker needs its own password';
         function hostUrl(host, path) {
             // A proxied host is reached through THIS origin's /peer/ prefix.
             // Its url is never dialed: that is the point of the mode. (The
@@ -698,6 +699,31 @@
             // door's own header and deadline handling, unchanged.
             const r = await hostFetch({ url: '', token: localHost().token },
                                       hostUrl(host, path), o);
+            // Whose 401 is it? This broker's gate checks ITS bearer first and
+            // only then the peer token, so a 401 carrying this broker's
+            // marker on a request that SENT a peer token can only be this
+            // broker refusing its own password. That is this broker's login,
+            // not the peer's: open this broker's overlay, and answer the
+            // caller "not reachable right now" (503), never "wrong password"
+            // -- every 401 site (polls, launches, the mint, the login probe)
+            // would otherwise pop the PEER's overlay for this broker's token.
+            // Two 401s still pass as they are: an unmarked one is the peer's
+            // own, and a marked one with no peer token sent is ambiguous but
+            // the peer needs its password anyway (this broker's own poll
+            // says so too when its token is the one that is wrong). A wrong
+            // token before /info was ever read rejects above, as a down host.
+            if (r.status === 401 && sentToken
+                    && r.headers.get(PEER_REFUSAL_HEADER) === 'auth_required') {
+                const local = localHost();
+                pollStateFor(local.id).authNeeded = true;
+                showAuthOverlay(local);
+                renderHostStatus();
+                return new Response(JSON.stringify({
+                    ok: false, error: 'hub_auth_required',
+                    message: HUB_AUTH_MSG }), {
+                    status: 503,
+                    headers: { 'Content-Type': 'application/json' } });
+            }
             // 409 is also an answer B can give (a mod-store revision clash),
             // and B writes B's bodies: only THIS broker's marker header says
             // the pairing was refused.
@@ -832,8 +858,9 @@
                     // Only THIS broker's marker names the refusal (_peerFetch's
                     // own cannot-proxy answer carries the code in its body).
                     refused(r.headers.get(PEER_REFUSAL_HEADER)
-                        || (body && body.error === 'proxy_unavailable'
-                            ? 'proxy_unavailable' : 'error'));
+                        || (body && (body.error === 'proxy_unavailable'
+                                     || body.error === 'hub_auth_required')
+                            ? body.error : 'error'));
                 }
                 const st = pollStateFor(host.id);
                 if (st.wsRefusal) { st.wsRefusal = null; renderHostStatus(); }
@@ -967,7 +994,17 @@
                 return;
             }
             if (!resp.ok) {
-                authErrorEl.textContent = 'probe failed: HTTP ' + resp.status;
+                // #252: a host reached through this broker whose probe was
+                // refused by this broker's OWN gate (_peerFetch) -- the
+                // password typed here may be fine; this broker's is not.
+                let why = null;
+                if (host.via === 'server' && resp.status === 503) {
+                    try { why = (await resp.json()).error; } catch (_) {}
+                    if (gen !== authGeneration) return;   // dismissed meanwhile
+                }
+                authErrorEl.textContent = why === 'hub_auth_required'
+                    ? HUB_AUTH_MSG
+                    : 'probe failed: HTTP ' + resp.status;
                 authErrorEl.classList.add('show');
                 return;
             }
