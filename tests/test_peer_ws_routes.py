@@ -538,12 +538,53 @@ async def test_a_killed_peer_is_1012(live, fake):
     assert await closed_with(ws) == (1012, "")
 
 
-async def test_the_idle_ceiling_through_the_route(live, fake, monkeypatch):
-    monkeypatch.setattr(ps, "PEER_WS_IDLE_S", 0.5)
-    t = await ticket(live, "b", fake.origin)
-    ws, conn = await opened(fake, live, "b", "ws", "clientId=c1&fake=never", t)
-    assert await closed_with(ws, 2.0) == (1000, "idle")
-    assert conn_closed(conn) == (1000, "")
+def _fast_pings(app, monkeypatch, period=0.2):
+    # Both legs ping every `period` and give up after as long: the page's
+    # leg by Sanic (read per connection), the peer's by A's client.
+    app.config.WEBSOCKET_PING_INTERVAL = period
+    app.config.WEBSOCKET_PING_TIMEOUT = period
+    kw = dict(ps.UPSTREAM_WS_KWARGS, ping_interval=period,
+              ping_timeout=period)
+    monkeypatch.setattr(ps, "UPSTREAM_WS_KWARGS", kw)
+
+
+async def test_a_quiet_pair_whose_legs_answer_pings_stays_open(
+        tmp_path, fake, monkeypatch):
+    # Review round 1b (P2-R3 amended): no idle ceiling. Silent for far more
+    # than many ping periods, both legs answering: nothing closes.
+    app = _make_app(tmp_path, {"b": {"origin": fake.origin}})
+    _fast_pings(app, monkeypatch)
+    srv = LiveApp(app).start()
+    try:
+        t = await ticket(srv, "b", fake.origin)
+        ws, conn = await opened(fake, srv, "b", "ws",
+                                "clientId=c1&fake=never", t)
+        await asyncio.sleep(2.0)
+        assert ws.protocol.close_rcvd is None and not conn.done.is_set()
+        await ws.send("still here")
+        assert await wait_for(lambda: conn.frames_in == ["still here"])
+        await ws.close()
+        assert conn_closed(conn) == (1000, "")
+    finally:
+        srv.stop()
+
+
+async def test_a_page_that_stops_answering_pings_ends_both_legs(
+        tmp_path, fake, monkeypatch):
+    app = _make_app(tmp_path, {"b": {"origin": fake.origin}})
+    _fast_pings(app, monkeypatch)
+    srv = LiveApp(app).start()
+    try:
+        t = await ticket(srv, "b", fake.origin)
+        ws, conn = await opened(fake, srv, "b", "ws",
+                                "clientId=c1&fake=never", t)
+        ws.transport.pause_reading()          # the page goes deaf
+        assert conn.done.wait(3.0), "the peer's leg stayed open"
+        assert conn.closed == (1000, "")
+        assert await wait_for(lambda: app.ctx.peer_sock_cap._busy == {})
+        ws.transport.abort()
+    finally:
+        srv.stop()
 
 
 async def test_a_stopping_broker_closes_the_peer_1001(tmp_path, fake):

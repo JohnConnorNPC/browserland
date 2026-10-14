@@ -43,9 +43,13 @@ PEER_MAX_TICKETS = 64
 PEER_MAX_SOCKETS_PER_PEER = 32
 PEER_MAX_SOCKETS = 128
 
-#: A relayed socket with no frame in either direction for this long is
-#: closed (1000 ``idle``). Protocol pings are not frames.
-PEER_WS_IDLE_S = 3600.0
+#: Both legs of a relayed pair are pinged this often and dropped after this
+#: long without a pong: the peer's by this broker's client
+#: (:data:`UPSTREAM_WS_KWARGS`), the page's by Sanic (``create_app`` sets
+#: ``WEBSOCKET_PING_INTERVAL``/``_TIMEOUT`` from it, for every socket of this
+#: broker, as Sanic's own default already was). That is how a dead leg ends.
+#: A quiet but healthy terminal is never closed: there is no idle ceiling.
+PEER_WS_PING_S = 20
 
 #: The largest frame any socket of this broker takes, its own ``/ws`` and
 #: ``/control`` included (``create_app`` sets ``WEBSOCKET_MAX_SIZE`` from it).
@@ -236,8 +240,8 @@ def peer_ws_connect():
 #: ``max_queue=2``: at most two frames buffered from the peer (the default
 #: is 16); its low-water mark is ``2 // 4 = 0``, so reading resumes only once
 #: the buffer is empty -- a slow page slows the peer instead of filling this
-#: broker's memory. The peer is pinged every 20 s and dropped after 20 s
-#: without a pong; a ping is not a frame for the idle ceiling.
+#: broker's memory. The peer is pinged every :data:`PEER_WS_PING_S` and
+#: dropped after as long without a pong.
 UPSTREAM_WS_KWARGS = {
     "proxy": None,
     "user_agent_header": None,
@@ -246,8 +250,8 @@ UPSTREAM_WS_KWARGS = {
     "max_queue": 2,
     "open_timeout": peers.PEER_CONNECT_TIMEOUT_S,
     "close_timeout": peers.PEER_CONNECT_TIMEOUT_S,
-    "ping_interval": 20,
-    "ping_timeout": 20,
+    "ping_interval": PEER_WS_PING_S,
+    "ping_timeout": PEER_WS_PING_S,
 }
 
 
@@ -317,14 +321,15 @@ async def _cancel(tasks) -> None:
     await asyncio.wait(tasks, timeout=peers.PEER_CONNECT_TIMEOUT_S)
 
 
-async def relay_sockets(down, up, *, peer_id: str, route: str,
-                        idle_s: Optional[float] = None, stop=None,
+async def relay_sockets(down, up, *, peer_id: str, route: str, stop=None,
                         stopping=lambda: False, log) -> str:
     """Relay messages between the page's socket ``down`` (Sanic's) and the
     peer's ``up`` until either ends, unchanged both ways: a text message
     stays text, a binary one binary, nothing is parsed. (Each leg keeps its
     own framing and its own pings.) Returns why it ended: ``page``,
-    ``shutdown``, ``peer``, ``idle``, ``revoked`` or ``error``.
+    ``shutdown``, ``peer``, ``revoked`` or ``error``. A quiet pair is never
+    closed for being quiet: a dead leg ends through its pings
+    (:data:`PEER_WS_PING_S`).
 
     * The page went (its close, a dropped connection, or a close Sanic
       started, e.g. 1009 for an oversized message): the peer gets 1000.
@@ -333,8 +338,6 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
     * The peer closed: the page gets the peer's code and reason when a
       close frame may carry them, else 1012 (no close frame at all, or a
       code like 1005 or 2000).
-    * No message either way for ``idle_s`` (:data:`PEER_WS_IDLE_S`): both
-      get 1000 ``idle``.
     * ``stop`` (a future, :class:`Pair`) resolved with ``(why, page code,
       page reason, peer code)``: the peer's leg is closed first, then the
       page's, each with its own code (revoked: 1000, then 4401).
@@ -351,8 +354,6 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
     caller, but can never abandon a close half-way."""
     from websockets.protocol import State
     loop = asyncio.get_running_loop()
-    idle_s = PEER_WS_IDLE_S if idle_s is None else idle_s
-    last = [loop.time()]
 
     async def down_to_up():
         while True:
@@ -361,23 +362,13 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
             frame = await down.recv()
             if frame is None:
                 continue
-            last[0] = loop.time()
             await up.send(frame)
 
     async def up_to_down():
         async for frame in up:
-            last[0] = loop.time()
             await down.send(frame)
 
-    async def watchdog():
-        while True:
-            left = last[0] + idle_s - loop.time()
-            if left <= 0:
-                return
-            await asyncio.sleep(left)
-
-    tasks = [loop.create_task(down_to_up()), loop.create_task(up_to_down()),
-             loop.create_task(watchdog())]
+    tasks = [loop.create_task(down_to_up()), loop.create_task(up_to_down())]
     waits = tasks + ([stop] if stop is not None else [])
     cancelled = False
     try:
@@ -397,10 +388,6 @@ async def relay_sockets(down, up, *, peer_id: str, route: str,
                 return "shutdown"
             await quiet_close(up, 1000)
             return "page"
-        if tasks[2] in done:
-            await quiet_close(down, 1000, "idle")
-            await quiet_close(up, 1000)
-            return "idle"
         if stop is not None and stop in done and not stop.cancelled():
             # Explicit codes, B's leg first.
             why, down_code, reason, up_code = stop.result()

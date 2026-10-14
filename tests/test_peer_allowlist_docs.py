@@ -92,12 +92,12 @@ def test_the_sockets_part_states_what_the_code_does():
             f"{ps.PEER_MAX_TICKETS} tickets**") in s
     assert (f"**{ps.PEER_MAX_SOCKETS_PER_PEER} per peer within "
             f"{ps.PEER_MAX_SOCKETS} sockets**") in s
-    assert f"**{ps.PEER_WS_IDLE_S:g} s**" in s
+    assert "1000 `idle`" not in s and "Idle ceiling" not in s   # 1b
     kw = ps.UPSTREAM_WS_KWARGS
     flat = " ".join(s.split())          # the prose wraps anywhere
     assert f"at most {kw['max_queue']} messages buffered" in flat
-    assert (f"pings the peer every {kw['ping_interval']:g} s and drops it "
-            f"after {kw['ping_timeout']:g} s") in flat
+    assert (f"Each leg is pinged every {ps.PEER_WS_PING_S:g} s and dropped "
+            f"after {ps.PEER_WS_PING_S:g} s without an answer") in flat
     assert "The server-side handshake never follows a redirect" in flat
     assert f"`websockets` {peers.PEER_WS_MIN_MAJOR} or later" in flat
     assert "until phase 2" not in s and "Phase 1 limits" not in s

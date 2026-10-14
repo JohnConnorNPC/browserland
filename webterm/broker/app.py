@@ -3952,6 +3952,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The frame cap of every socket (F2: Sanic's 1 MiB default kills a big
     # paste or snapshot with a 1009); see peer_sockets.PEER_WS_FRAME_MAX.
     app.config.WEBSOCKET_MAX_SIZE = peer_sockets.PEER_WS_FRAME_MAX
+    # Every socket is pinged, and dropped without a pong, on this period
+    # (Sanic's own default, pinned): it is what ends a dead page leg of a
+    # relayed pair, which has no idle ceiling (#252).
+    app.config.WEBSOCKET_PING_INTERVAL = peer_sockets.PEER_WS_PING_S
+    app.config.WEBSOCKET_PING_TIMEOUT = peer_sockets.PEER_WS_PING_S
     # sanic-ext auto-loads when merely installed (it is NOT one of our
     # dependencies), adding its own CORS middleware, auto-OPTIONS/HEAD, and
     # an unauthenticated /docs + /openapi.json. Pin it off so every install

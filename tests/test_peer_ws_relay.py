@@ -69,7 +69,7 @@ class Counting:
             yield frame
 
 
-async def _start(fake, path, idle_s=None, wrap=None, down=None,
+async def _start(fake, path, wrap=None, down=None,
                  stopping=False):
     n = len(fake.conns)
     up = await ps.dial_upstream(_url(fake, path), BT)
@@ -78,7 +78,7 @@ async def _start(fake, path, idle_s=None, wrap=None, down=None,
     logged = []
     relay_up = wrap(up) if wrap else up
     task = asyncio.ensure_future(ps.relay_sockets(
-        down, relay_up, peer_id="b", route="ws", idle_s=idle_s,
+        down, relay_up, peer_id="b", route="ws",
         stopping=lambda: stopping, log=lambda *a: logged.append(a)))
     return up, conn, down, task, logged, relay_up
 
@@ -304,34 +304,6 @@ async def test_a_cancelled_handler_after_a_page_close_is_1000(fake):
     assert await asyncio.get_running_loop().run_in_executor(
         None, conn.done.wait, 1.0)
     assert conn.closed[0] == 1000
-
-
-async def test_the_idle_ceiling_closes_both(fake):
-    up, conn, down, task, _, _ = await _start(fake, "/never", idle_s=0.5)
-    assert await asyncio.wait_for(task, 1.5) == "idle"
-    assert (down.close_code, down.close_reason) == (1000, "idle")
-    assert await asyncio.get_running_loop().run_in_executor(
-        None, conn.done.wait, 1.0)
-    assert conn.closed[0] == 1000
-
-
-async def test_page_frames_alone_keep_a_socket_alive(fake):
-    up, conn, down, task, _, _ = await _start(fake, "/never", idle_s=0.5)
-    for i in range(4):
-        await asyncio.sleep(0.3)
-        down.push("k%d" % i)
-    assert not task.done()
-    down.page_close()
-    assert await task == "page"
-
-
-async def test_peer_frames_alone_keep_a_socket_alive(fake):
-    up, conn, down, task, _, _ = await _start(fake, "/tick", idle_s=0.5)
-    await asyncio.sleep(1.2)
-    assert not task.done()
-    assert len(down.sent) >= 3
-    down.page_close()
-    assert await task == "page"
 
 
 # ---- the log ------------------------------------------------------------------

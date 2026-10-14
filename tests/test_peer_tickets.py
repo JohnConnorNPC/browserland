@@ -254,10 +254,15 @@ def test_the_ruled_numbers(tmp_path):
     assert ps.PEER_TICKET_TTL_S == 30.0
     assert (ps.PEER_MAX_TICKETS_PER_PEER, ps.PEER_MAX_TICKETS) == (16, 64)
     assert (ps.PEER_MAX_SOCKETS_PER_PEER, ps.PEER_MAX_SOCKETS) == (32, 128)
-    assert ps.PEER_WS_IDLE_S == 3600.0
+    assert ps.PEER_WS_PING_S == 20
+    assert not hasattr(ps, "PEER_WS_IDLE_S")     # no idle ceiling (1b)
     assert ps.PEER_CLIENT_ID_MAX == 128
     assert ps.PEER_WS_FRAME_MAX == 16 * 2**20
     app = create_app({"state_path": str(tmp_path / "s.json"),
                       "auth_token": A_TOKEN, "serve_ui": False},
                      port=4999, name="webterm-peer-tickets")
     assert app.config.WEBSOCKET_MAX_SIZE == ps.PEER_WS_FRAME_MAX
+    assert app.config.WEBSOCKET_PING_INTERVAL == ps.PEER_WS_PING_S
+    assert app.config.WEBSOCKET_PING_TIMEOUT == ps.PEER_WS_PING_S
+    kw = ps.UPSTREAM_WS_KWARGS
+    assert (kw["ping_interval"], kw["ping_timeout"]) == (20, 20)

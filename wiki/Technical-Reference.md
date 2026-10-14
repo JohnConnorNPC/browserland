@@ -570,10 +570,11 @@ pools: **32 per peer within 128 sockets**. A ticket holds its slot from the
 mint, so an upgrade never fails for the pool; the refusal is the mint's
 503 `peer_busy`.
 
-**Idle ceiling.** A pair with no message in either direction for
-**3600 s** is closed (1000 `idle` both ways). Protocol pings are not
-messages; this
-broker pings the peer every 20 s and drops it after 20 s without an answer.
+**Liveness.** A pair is never closed for being quiet: a terminal with no
+output overnight stays connected. Each leg is pinged every 20 s and dropped
+after 20 s without an answer — the peer's by this broker, the page's by the
+server (as every socket of this broker is) — and a leg that drops ends the
+pair.
 
 **Revocation.** Every ticket mint and every redemption first closes each
 pair, and voids each ticket, whose peer is gone, whose origin is no longer
@@ -590,7 +591,6 @@ stay open until the next mint or redemption, or `apply_change`.
 | 1011 `peer_unreachable` | the page | the dial at redemption failed (its slot is released) |
 | 4401 `ticket` | the page | the ticket was bad, expired, reused, mis-bound or voided |
 | 4401 `revoked` | the page (the peer gets 1000) | a peer, origin or token change unbound the pair |
-| 1000 `idle` | both | the idle ceiling |
 | 1000 | the peer | the page went: its close, a lost connection, or a close this broker started for it (1009 for an oversized message, say) |
 | 1001 | both | this broker is stopping (signalled before Sanic cancels the socket handlers, never guessed from who closed first) |
 | 1011 | both | anything else (one log line naming the error class) |
