@@ -208,9 +208,9 @@ browser that loads its page. The desktop ships with nineteen:
 
 `clipboard` and `aistatus` are off by default on principle — clipboards carry
 secrets, and status polling talks to third-party endpoints; `git` and
-`termfont` are simply opt-in preferences; `update` is off because turning it
-on is the consent for that broker to check, apply and restart (see the mod's
-help). Enabling any of them is one click
+`termfont` are simply opt-in preferences; `update` is off because ticking it
+on yourself is the consent for the serving broker to check, apply and restart
+(see the mod's help). Enabling any of them is one click
 in the Mods pane.
 
 ## MCP & AI agent access
