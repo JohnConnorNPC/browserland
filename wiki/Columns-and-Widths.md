@@ -17,7 +17,7 @@ To set a preset, right-click the window's title bar and pick a width under the *
 
 ### Fine-tune by dragging
 
-For a width between the presets, drag a column's **side gutter** — the seam between two columns — left or right. This resizes the column to a custom width.
+For a width between the presets, drag a column's **side gutter** — the seam between two columns — left or right. This resizes the column to a custom width; the neighbour gives up or takes the same width, so the rest of the strip stays put. Picking a preset afterwards drops the custom width. (The check keeps showing the last preset you picked.)
 
 ## Move & focus columns
 
@@ -33,14 +33,16 @@ You can shuffle columns and jump focus between them without touching the mouse. 
 - **Focus** jumps your selection to the window in the neighboring column without moving or rearranging anything.
 - **Move** picks up the focused column and swaps it with its neighbor, so you can reorder the strip.
 
+The title-bar menu has **Move column left** / **Move column right** too, and **Stack into left column** / **Stack into right column** to merge a window into a neighbour as a row.
+
 ## Eject a window into its own column
 
-When two or more windows share a column (stacked as rows), the window context menu can pull one out:
+When a window shares its column with others (as rows, tabs or a split), the window context menu can pull one out:
 
 | Menu item | What it does |
 |---|---|
 | **Move to own column** | Ejects a window that shares a column into its own column. Available only when the window is sharing. |
-| **Move to new column** | Spawns a fresh column immediately to its right and drops the window there — the click equivalent of dragging a window to a column edge. |
+| **Move to new column** | Spawns a fresh column immediately to its right and drops the window there — the click equivalent of dragging a window to a column edge. Does nothing if the window is already alone in its column. |
 
 `Move to new column` is the menu shortcut for the same result you get by dragging a window onto a column's far left or right edge (the **new column** drop zone). See the drop-zone cheat sheet in [[Arranging Windows|Arranging-Windows]] for the drag gestures.
 
