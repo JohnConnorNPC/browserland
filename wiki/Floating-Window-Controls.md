@@ -64,7 +64,7 @@ By default a floating window scrolls away with the tiling strip. To keep it put,
 The **color button** is on the title bar of terminals, sticky notes and text editors (hidden on screens 520 px wide or less), so **recolor works the same whether the window is floating or snapped** into the tiling strip.
 
 - **Recolor** — Use the **color button** in the title bar of a terminal, sticky note or text editor. You can pick from the palette, choose a custom color, or reuse a recent one.
-- **Rename** — Double-click an **app window's** title to rename it.
+- **Rename** — Double-click a **sticky note's** or **text editor's** title to rename it.
 
 ## Arrange all floating windows
 
