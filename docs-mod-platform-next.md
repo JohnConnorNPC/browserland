@@ -1,5 +1,10 @@
 # Browserland Mod Support — Current State and Next-Version Requirements
 
+> **Dated audit written at 1da9f77 (2026-08-15); not current documentation.**
+> Most of gaps G1–G11 shipped under #189–#225. Read it as the rationale behind
+> that work, not as the current state; the authoring contract is
+> `wiki/Writing-a-Mod.md`.
+
 **Audience:** project owner, planning the next major version of the mod platform.
 **Sources:** `86_js_mod_loader.js` (2491 lines), `86b_js_mod_packages.js`, `90_js_mod_boot.js`, `84_js_active_view_lifecycle.js`, `64_js_sessions_poll_control.js`, all 19 mods under `webterm/broker/mods/`, broker routes in `webterm/broker/app.py`, `wiki/Writing-a-Mod.md`, `wiki/Installing-Mods.md`, `wiki/Technical-Reference.md`.
 
