@@ -55,7 +55,7 @@ Linux:
 ```
 python -m webterm.agent [opts] [--] command...
   --broker-url URL     $BROWSERLAND_BROKER_URL > flag > ws://127.0.0.1:4445/browserland
-  --auth-token TOK     $WEB_TERMINAL_TOKEN; appended as ?token= (REQUIRED
+  --auth-token TOK     flag > $WEB_TERMINAL_TOKEN; appended as ?token= (REQUIRED
                        for every broker since #142, loopback included)
   --cols/--rows        initial PTY size (default 80x24)
   --title T            initial title (default: command basename)
@@ -63,6 +63,11 @@ python -m webterm.agent [opts] [--] command...
   --ring-bytes N       snapshot ring cap (default 262144)
   --snapshot-mode raw|pyte
   --cwd DIR
+  --profile NAME       launch-profile name, echoed in the hello so the UI can
+                       pick that profile's colour (#115)
+  --pty-backend auto|conpty|winpty
+                       Windows only (see the backend row above, #25);
+                       ignored on POSIX
 ```
 
 The agent's exit code is the child's exit code. While the broker is down
