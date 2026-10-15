@@ -864,8 +864,9 @@
             // from core's `win.term.resize(cols, rows)` call site in 73. Both
             // spellings would cover the broker-confirmed `resized` frame, but
             // only this one covers the named limit in docs-terminal-funnels.md:
-            // a MOD calling `win.fitAddon.fit()` (mods/termfont/termfont.js:87)
-            // resizes INSIDE xterm, with no core call site involved. The event
+            // a MOD calling `win.fitAddon.fit()` (any mod can: the create bag
+            // hands it `win`) resizes INSIDE xterm, with no core call site
+            // involved. The event
             // fires after the grid has been applied, so this is post-dispatch
             // by construction, and it fires ONCE per applied resize whichever
             // path drove it — so there is deliberately no second dispatch at
