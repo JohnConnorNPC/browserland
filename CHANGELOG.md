@@ -47,8 +47,9 @@ story behind anything named below.
   allowlisted set of another broker's routes under `/peer/<id>/`, so a browser
   or phone that can reach only the hub still reaches the others. A Hosts row
   switches between **direct** and **from server · <id>**; terminals connect
-  through one-time 30 s tickets, and the hub stores no credential of the
-  peer's. The browser gate takes the hub's token, the peer's token
+  through one-time 30 s tickets, and the hub's config stores no credential of
+  the peer's (an unredeemed socket ticket holds the peer's token in memory for
+  at most 30 s). The browser gate takes the hub's token, the peer's token
   (`X-Browserland-Peer-Token`) and the pairing (`X-Browserland-Peer-Origin`);
   a peer configured with `mcp: true` also relays its `/mcp/*` surface to an
   agent holding the peer's MCP token, and mcptool's per-host `peer_origin`
@@ -72,8 +73,9 @@ story behind anything named below.
   #185, #187, #205). The **Update check** mod (off by default) adds a taskbar
   chip and an **Update check** window that compares every configured broker
   with upstream on GitHub, each broker by itself (one row per broker, with the
-  reason any broker could not be checked). Turning the mod on is the consent
-  for the serving broker to check, apply and restart, for each of those three
+  reason any broker could not be checked). Ticking the mod on yourself in
+  Control Panel → Mods (not a restored, synced or broker-pinned setting) is
+  the consent for the serving broker to check, apply and restart, for each of those three
   gates its `broker_config.json` does not already own (`update_check_enabled`,
   `update_apply_enabled`, `restart_enabled`; a present key pins its gate);
   the window's **Allow this broker to update itself** row grants or stops apply
@@ -81,20 +83,14 @@ story behind anything named below.
   carries its own **Update…** button: a confirm naming that broker, its commit
   range and what its restart costs its sessions, then `POST /update/apply`
   (`git fetch` of the previewed commit + `git merge --ff-only`, hooks off) and
-  a restart. Manual only — no schedule, no auto-install. `python -m
+  a restart. Checks poll every 30 minutes while the mod is on; applying and
+  restarting are manual only — no schedule, no auto-install. `python -m
   webterm.broker` is now a supervisor that relaunches its worker on an
   intentional exit 75 (sentinel-checked, crash-budgeted, rolled back to the
   prior commit if the new code never comes up); `GET /info` reports
   `restart.available`, `mechanism` and `bootId`. See
   [`wiki/Technical-Reference.md`](wiki/Technical-Reference.md) → *Update
   apply* and *Broker restart*.
-- **The Control Panel is an applet grid** (#181). The single long scroll became
-  a Browser tab plus one tab per host, each opening on a grid of applets —
-  Desktop, Windows, Input, Terminals, Startup, Access, Mods, Advanced — with a
-  filter box over every section and a **Show everything** switch back to one
-  flat list (remembered in this browser only). An applet only appears on a tab
-  where it has something to show. See
-  [`wiki/Getting-Started.md`](wiki/Getting-Started.md).
 - **MCP agents can read and arrange the desktop, and manage workspaces**
   (#244). A new `allow_desktop` switch (Control Panel → Access → MCP access, or an
   admin's `set_mcp_knobs`; default off, master switch for the whole relay,
@@ -222,6 +218,14 @@ story behind anything named below.
 
 ### Changed
 
+- **The Control Panel is an applet grid** (#181). The single long scroll became
+  one tab per broker, each opening on a grid of applets — Desktop, Windows,
+  Input, Terminals, Startup, Access, Mods, Advanced — with a filter box over
+  that tab's sections and a **Show everything** switch back to one flat list
+  (remembered in this browser only). An applet only appears on a tab where it
+  has something to show. The **Browser** tab (the Hosts list, Broker registry,
+  Sync mods, Troubleshooting) stays a short flat pane. See
+  [`wiki/Getting-Started.md`](wiki/Getting-Started.md).
 - **Every shipped mod runs on the ctx surface** (#206: #207–#225). The 19
   bundled mods moved off loader-private names and hand-rolled scaffolds onto
   the documented `ctx` members above; behaviour is unchanged unless that mod's
