@@ -1,4 +1,4 @@
-The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar unless you opt them in), the workspace pager, host status, a fullscreen button, and clock, AI status, clipboard, update, and help chips.
+The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar unless you opt them in), the workspace pager, host status, a fullscreen button, and clock, AI status, update, clipboard, and help chips.
 
 ## Anatomy
 
@@ -13,8 +13,8 @@ From left to right, the taskbar contains:
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
-| Clipboard chip | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
 | Update chip (**⬆**) | Whether every configured broker is current with upstream. One aggregate chip colors by the worst state (up to date, N behind, N ahead, or N unchecked). Click to open the Update check window, which shows one row per broker and explains why any broker could not be checked. A broker that is behind gets an **Update…** button on its row, remote ones included: it asks that broker to pull and restart, after a confirmation that names the broker, its commit range and what the restart costs its sessions. Shown while the **Update check** mod is enabled; it ships **off by default**, and enabling it is your consent for the serving broker to check for updates and to apply one and restart itself, for each of those gates its config does not already own (only that click counts, and no restart is needed). Any broker in the list can be switched on from its row, remote ones behind a confirmation that names the machine. By default the chip hides itself while every configured broker is current |
+| Clipboard chip | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
 On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a running record button stay. On touch screens up to 900 px wide the title-bar buttons are larger.
@@ -53,7 +53,7 @@ To change it, open **Control Panel → Windows → Taskbar / title labels**. Eac
 
 ### MCP scope badge
 
-A terminal tagged with an MCP scope (see [[MCP-and-AI-Agents]]) shows the scope as a small blue badge after its label, ahead of any workspace badge. A long scope is cut short with `…`; the hover tooltip names it in full (`scope <name>`).
+A terminal tagged with an MCP scope (see [[MCP-and-AI-Agents]]) shows the scope as a small blue badge after its label. A window an MCP admin agent launched, or whose scope/mode it last set, also shows an amber **admin** badge (tooltip *Set by an MCP admin agent*; any edit you make in the window's MCP menu clears it). The order is scope, admin, then any workspace badge. A long scope is cut short with `…`; the hover tooltip names it in full (`scope <name>`).
 
 ### Items for other workspaces
 
