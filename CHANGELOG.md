@@ -16,6 +16,46 @@ story behind anything named below.
 
 ### Added
 
+- **Broker roles: hub and node, and `terminals: false`** (#253). A broker is a
+  **hub** (serves the desktop page) or a **node** (API only, for another
+  Browserland to reach): `--role hub|node`, `--headless` as the alias of
+  `--role node`, or a config `role` key, all folded into the stored
+  `serve_ui`. `--no-terminals` / `terminals: false` makes a hub refuse new
+  launches with 403 `terminals_disabled` (`POST /launch`, `POST /mcp/launch`,
+  `POST /profiles/config`, `GET /profiles/detect`) while existing terminals
+  and reconnecting agents are untouched; a node with `terminals: false` is
+  refused at startup. `GET /info` reports `role` and `terminals`,
+  `GET /mcp/info` reports `terminals`, a node's `GET /` answers
+  `{"ui": false, "role": "node"}`, and the launch menu marks such a broker
+  *terminals off — launches nothing here*. See
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#broker-roles-hub-and-node-and-terminals-false-253).
+- **"From server": a broker can relay to the brokers behind it** (#252). With
+  `peers: {<id>: {origin}}` in its config and the `proxy` extra installed
+  (`pip install -e ".[proxy]"`: `httpx` and `websockets` 15+), a hub relays an
+  allowlisted set of another broker's routes under `/peer/<id>/`, so a browser
+  or phone that can reach only the hub still reaches the others. A Hosts row
+  switches between **direct** and **from server · <id>**; terminals connect
+  through one-time 30 s tickets, and the hub stores no credential of the
+  peer's. The browser gate takes the hub's token, the peer's token
+  (`X-Browserland-Peer-Token`) and the pairing (`X-Browserland-Peer-Origin`);
+  a peer configured with `mcp: true` also relays its `/mcp/*` surface to an
+  agent holding the peer's MCP token, and mcptool's per-host `peer_origin`
+  makes a re-pointed peer answer 409 `peer_origin_changed` instead of
+  receiving that token. See
+  [`wiki/Hosts-and-Multi-Browser.md`](wiki/Hosts-and-Multi-Browser.md#reaching-a-broker-through-this-one)
+  and [`wiki/Upgrading.md`](wiki/Upgrading.md#the-peer-proxy-needs-websockets-15-252).
+- **A terminal can be driven from another device without taking the lease**
+  (#238, #239, #240). An outside client attaches to one terminal's `/ws` and
+  sends `{"type": "control", "op": "claim", "label": …}`; while it holds the
+  terminal, only its input and resize reach the PTY, and every surface carries
+  a `{state, label, since, gen}` view (`GET /info` advertises
+  `"terminal_control": 1`). The desktop window greys out in place, holds no
+  socket, and shows *Controlled from … since …* with **Take back control**
+  (`POST /session/control`); its taskbar button is marked ⇄. Mods learn about
+  it through `info.control()` / `info.onControlChanged`, and the recorder ends
+  the running part with a marker and resumes on release. See
+  [`wiki/Technical-Reference.md`](wiki/Technical-Reference.md) → *Terminal
+  control* and [`wiki/Window-Types.md`](wiki/Window-Types.md).
 - **Update check, apply and restart from the desktop** (#182, #183, #184,
   #185, #187, #205). The **Update check** mod (off by default) adds a taskbar
   chip and an **Update check** window that compares every configured broker
@@ -170,6 +210,37 @@ story behind anything named below.
 
 ### Fixed
 
+- **A phone taking over no longer leaves the desktop silently locked out**
+  (#248, #249, #251). The desktop's lease socket now pings with a nonce and a
+  10 s pong deadline and replaces a dead socket make-before-break, so a
+  takeover always reaches it: the page greys out with its take-back prompt
+  instead of silently dropping keystrokes. The browser that holds the lease
+  re-sends every terminal's size once per newly held lease, so terminals stop
+  staying phone-sized, and a float keeps its own box. New **Fit to this
+  screen** (window menu) and **Fit all to this screen** (desktop menu, plus
+  key actions) give a terminal this screen's size back. The page gained a
+  viewport meta and a narrow-screen layout (≤ 520 px hides the clock chip and
+  cosmetic title-bar buttons; larger touch targets on coarse pointers), and a
+  phone that has never seen the desktop's floating terminals opens them as
+  floats instead of tiling them for everyone.
+- **The desktop relay cannot mix up answers across brokers or restarts**
+  (#250). `desktop_rpc` frames carry the lease `gen` and the broker `bootId`,
+  rids start at a random offset per broker run, the page keys its answered
+  rids on host, run and rid, and a deposed lease holder never applies an op
+  its caller was told failed. A `lost_lease` answer now says whether the op
+  was `dispatched`.
+- **Two tabs of one browser keep the shared layout in sync** (#246, #247). A
+  tab with an unsaved change but nothing queued now adopts newer `/state`
+  instead of reverting it; `/state` is single-flight per tab with
+  epoch-gated answers; a failed save stays owed and retries on a back-off
+  ladder (3 quick tries, then at least 4, 8, 16, 32 s, capped at 60 s); an
+  edit made while losing the lease is pushed on regain unless someone wrote
+  meanwhile; a save the broker rejects goes back to the saved layout with a
+  notice; and workspaces remember the focused column by id.
+- **Two mod subscriptions no longer leak when a replay disables their mod**
+  (#241, #242). `info.onModesChanged` and `ctx.windows.onTerminalCreate` now
+  arm their removal before the initial replay, so a mod that turns itself off
+  inside that replay leaves nothing registered.
 - **Delete note / Delete file only appears where a window opts in** (#186).
   The menu item used to be guarded by a denylist of the four window kinds that
   existed when it was written, so newer ephemeral windows showed it too. A
