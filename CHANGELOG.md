@@ -268,7 +268,8 @@ story behind anything named below.
   The menu item used to be guarded by a denylist of the four window kinds that
   existed when it was written, so newer ephemeral windows showed it too. A
   window kind now opts in with a `deleteLabel` (sticky notes, the Scratchpad
-  and the text editor do); every other window's menu ends at Close.
+  and the text editor do); every other app window's menu ends at Close, and a
+  terminal's at Terminate.
 - **The Update window reflects a policy change at once** (#188). A grant or
   stop that moved the restart gate re-reads that broker's `/info`, so the
   Restart button stops lagging the switch, and an older write's answer can no
