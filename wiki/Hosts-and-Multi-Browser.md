@@ -216,7 +216,7 @@ Either row can instead go **dead and name a config key** — an operator who put
 
 The **Update…** button is unavailable (and greyed with a reason) when one or more gates are still closed, or when the current state does not permit applying — the upstream commit is unreachable, the working tree is dirty, there are local commits to merge, or a dependency has changed. Clicking the button shows a confirm dialog with the commit range, count, and GitHub compare link, plus a preview of what happens to your sessions.
 
-The update fetches from the pinned upstream with an explicit git subprocess and verifies the target before applying. See [[Technical-Reference#update-apply]] for the complete technical details, rollback story, and what happens to sessions when the broker restarts.
+The update fetches from the pinned upstream with an explicit git subprocess and verifies the target before applying. See [[Technical-Reference#update-apply-182-part-2]] for the complete technical details, rollback story, and what happens to sessions when the broker restarts.
 
 ## Restarting this broker
 

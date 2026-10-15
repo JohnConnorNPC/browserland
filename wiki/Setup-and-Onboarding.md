@@ -35,7 +35,7 @@ The shape that trips people up:
   machine. Each machine you want terminals on runs its own broker.
 - **Agents are local to their broker.** You normally don't run an agent on
   machine A pointed at a broker on machine B. You run a broker on B, and B
-  launches B's agents. (A remote agent *is* possible — see TECHNICAL.md — but
+  launches B's agents. (A remote agent *is* possible — see [[Technical Reference → Multiple hosts|Technical-Reference#multiple-hosts]] — but
   it's the exception, not the multi-machine model.)
 - **Brokers are joined in the browser, not in config.** To see machine B's
   terminals next to machine A's, you don't edit a config file — you open the UI
@@ -165,7 +165,7 @@ Requirements worth knowing:
   localhost page. All-plain-http over a trusted tailnet still works; you just
   forfeit those.
 
-Full auth/CORS details: **[[Technical Reference → Multiple hosts|Technical-Reference]]**.
+Full auth/CORS details: **[[Technical Reference → Multiple hosts|Technical-Reference#multiple-hosts]]**.
 
 ## Don't hand-edit this
 
@@ -250,7 +250,7 @@ get there.
 
 ### Linux (systemd)
 
-Installable units ship in `launchers/systemd/`. See **[[Technical Reference → Linux deployment|Technical-Reference]]** for the full walkthrough
+Installable units ship in `launchers/systemd/`. See **[[Technical Reference → Linux deployment|Technical-Reference#linux-deployment]]** for the full walkthrough
 (`webterm-broker.service` / `webterm-agent.service`, `User=`, paths, token).
 
 ## See also

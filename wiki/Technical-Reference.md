@@ -380,7 +380,7 @@ direct host:
 * one scheme for the whole fleet — an https page fetching an http remote
   is blocked as mixed content, so cockpit + hosts must be all-https
   (preferred: unlocks secure-context features like clipboard image paste)
-  or all-plain-http (see SETUP.md → Multiple machines over Tailscale).
+  or all-plain-http (see [[Setup-and-Onboarding#multiple-machines-over-tailscale]]).
 
 A single broker's status chip is shown in the taskbar by default, even
 healthy and local. Since the per-broker actions moved onto the (+)
