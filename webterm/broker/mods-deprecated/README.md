@@ -16,10 +16,10 @@ That is why this is a **sibling** directory and not `mods/_deprecated/`.
 
 The obvious guess is wrong, so it is worth saying plainly: **you cannot
 re-enable a retired mod by dropping it into `mods_dir`.** Runtime-installed
-mods must use the reserved `x-` prefix (`modinstall._INSTALLED_ID_PREFIX`).
+mods must use the reserved `x-` prefix (`app._INSTALLED_ID_PREFIX`, checked by `app._is_reserved_mod_id`).
 The install validator rejects a reserved id with `400 reserved_id`, and the
 scanner skips any non-`x-` directory with a loud log so a hand-dropped folder
-can never shadow a shipped mod (#172, `modinstall.py:960`). A copied-back
+can never shadow a shipped mod (#172; the scanner's "an installed mod id must start with 'x-'" skip in `modinstall.py`). A copied-back
 `agent-docs/` under `mods_dir` is silently ignored.
 
 Re-enabling is a **source-tree** change, and "copy it back" alone is not
