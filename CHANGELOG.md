@@ -16,6 +16,18 @@ story behind anything named below.
 
 ### Added
 
+- **The mod platform's near-term work (G1–G15)** (#189–#204). For operators: a
+  `status_fetch_enabled` gate on `/status/fetch` (#189), a broader CSP sent
+  Report-Only while it soaks (#190), an optional `admin_token` that mod
+  install/uninstall/rescan, `/mods/policy` and `/update/policy` also require
+  in the `X-Webterm-Admin` header (#191), secret handling for `/mod-store`
+  (#192) and an install-time capability lint over a manifest's `permissions`
+  (#193). For mod authors: `ctx.windows.createAppWindow`, `ctx.events`,
+  `ctx.serverStore.update` / `saveChain`, `ctx.prefs`, `ctx.capabilities` and
+  `needs`, `ctx.signal`, `ctx.provide` / `ctx.consume` / `ctx.commands`,
+  `ctx.http.fetch` / `ctx.hosts.list()`, the terminal taps, `ctx.dialog` /
+  `ctx.popover` / `ctx.mods.list` / `ctx.assets`, and softer failure modes
+  (#194–#203). See [`wiki/Writing-a-Mod.md`](wiki/Writing-a-Mod.md) §8.
 - **Broker roles: hub and node, and `terminals: false`** (#253). A broker is a
   **hub** (serves the desktop page) or a **node** (API only, for another
   Browserland to reach): `--role hub|node`, `--headless` as the alias of
@@ -207,6 +219,13 @@ story behind anything named below.
   with documentation instead of a year later.
 - **A workflow publishes `wiki/` to the GitHub Wiki** on push to `main`, gated on
   the packaged corpus being current.
+
+### Changed
+
+- **Every shipped mod runs on the ctx surface** (#206: #207–#225). The 19
+  bundled mods moved off loader-private names and hand-rolled scaffolds onto
+  the documented `ctx` members above; behaviour is unchanged unless that mod's
+  own issue says otherwise.
 
 ### Fixed
 
