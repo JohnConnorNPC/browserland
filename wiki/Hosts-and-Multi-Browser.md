@@ -2,7 +2,7 @@ One Browserland desktop can attach to more than one broker at a time, so you can
 
 ## Add a remote host
 
-By default the UI talks to the broker it was served from (`http://127.0.0.1:4445/`). To attach another broker, open **Control Panel → Hosts** and add it:
+By default the UI talks to the broker it was served from (`http://127.0.0.1:4445/`). To attach another broker, open **Control Panel → Browser → Hosts** and add it:
 
 1. Enter a **label** (how the host appears in the UI).
 2. Enter the broker **URL**.
@@ -29,7 +29,7 @@ its `broker_config.json` and restart it.
 
 A host reached that way is fetched through `/peer/b/` on the broker that
 served the page, so the phone dials only that broker. You choose it per
-host: in **Control Panel → Hosts**, a remote host's row has a menu,
+host: in **Control Panel → Browser → Hosts**, a remote host's row has a menu,
 **direct** or **from server · b** (one entry per peer this broker
 publishes; the one at the host's own address comes first, marked
 "(same address)"). The menu appears once this broker can relay, and a host
@@ -149,7 +149,7 @@ One limit worth knowing: only settings owned by a mod that is **on** in this bro
 
 ## Default color per host
 
-Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.
+Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Browser → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.
 
 The default is only a *starting* color: recoloring an individual window with its own title-bar picker still wins and sticks, and clearing the host default (the **✕** next to the dot) reverts new terminals to the automatic per-window colors. Like a host's password, the default color is stored in this browser only and is not shared with your other browsers.
 
@@ -161,7 +161,7 @@ The profile color sits between the per-window and per-host colors in the order o
 
 ## Default host for the START (+) button
 
-A quick-launch of the START (**+**) button — a plain left-click by default — launches a terminal on your **default host**, using that host's own default terminal profile. Pick which host that is in **Control Panel → Hosts** with the **Default** button on that host's row; the current default is marked with a **default** badge and its own button is disabled. The local **this broker** is selectable too and is the default when you have not chosen one — so leaving it unset behaves exactly as before. (The button's picker menu still lets you launch on any host regardless of this setting.)
+A quick-launch of the START (**+**) button — a plain left-click by default — launches a terminal on your **default host**, using that host's own default terminal profile. Pick which host that is in **Control Panel → Browser → Hosts** with the **Default** button on that host's row; the current default is marked with a **default** badge and its own button is disabled. The local **this broker** is selectable too and is the default when you have not chosen one — so leaving it unset behaves exactly as before. (The button's picker menu still lets you launch on any host regardless of this setting.)
 
 If the default host — or, with no default chosen, this broker — **hosts no terminals** (`terminals: false`), quick-launch never picks another host for you: it opens a dialog saying why, and you pick a host in the launch menu or set a default here. In the launch menu such a broker's row reads `terminals off — launches nothing here` instead of listing profiles, and its launch profiles cannot be edited from the Control Panel.
 
@@ -182,11 +182,11 @@ With **two or more brokers**, the chips collapse into a single **aggregate badge
 
 A broker **you hid yourself** is not counted and does not color the badge — hiding one is a choice, not a fault, so parking an offline machine no longer leaves the badge permanently red. Its real state is still there in the badge's hover list and on its row in the (+) menu, both of which mark it `— hidden`. If every broker is hidden, the badge drops its state color entirely and just goes struck through.
 
-There, each broker has a **live status row** above its profiles: a state-colored dot (a per-host identity color becomes the dot's fill, with the state as its ring), the host's label, and a state suffix such as `— down` or `— password required`. The row performs the chip's action for its state — an **auth-needed** row opens the login prompt, a **lease** row requests the take-over, and an **ok**/**down** row toggles that broker's windows hidden or shown. The hide toggle **keeps the menu open** (the row goes struck through and gains `— hidden`), so you can sweep several brokers in one visit; hiding masks windows, it never closes them. The same toggle also lives as a **hidden** checkbox on each host's row in **Control Panel → Hosts**.
+There, each broker has a **live status row** above its profiles: a state-colored dot (a per-host identity color becomes the dot's fill, with the state as its ring), the host's label, and a state suffix such as `— down` or `— password required`. The row performs the chip's action for its state — an **auth-needed** row opens the login prompt, a **lease** row requests the take-over, and an **ok**/**down** row toggles that broker's windows hidden or shown. The hide toggle **keeps the menu open** (the row goes struck through and gains `— hidden`), so you can sweep several brokers in one visit; hiding masks windows, it never closes them. The same toggle also lives as a **hidden** checkbox on each host's row in **Control Panel → Browser → Hosts**.
 
 So the status surfaces stay interactive, not just indicators — and every recovery path that used to live on a chip (re-opening a cancelled login, taking back a lease, spotting a down broker) is one badge click away when several brokers are attached.
 
-Because those recovery paths now live on the (+) menu rows rather than on the chip, the chip itself is optional. **Control Panel → Desktop → Broker status chip** offers **Always** (the default), **Only when a broker needs attention** — it appears when a broker goes unreachable, wants a password, or is taken over by another browser, and vanishes again once nothing is wrong — and **Never**. A broker you hid yourself never triggers it. Whichever you pick, the (+) menu rows and the **hidden** checkboxes under Control Panel → Hosts are unchanged, so logging in, taking over and un-hiding stay reachable with no chip at all. See [[Taskbar]].
+Because those recovery paths now live on the (+) menu rows rather than on the chip, the chip itself is optional. **Control Panel → Desktop → Broker status chip** offers **Always** (the default), **Only when a broker needs attention** — it appears when a broker goes unreachable, wants a password, or is taken over by another browser, and vanishes again once nothing is wrong — and **Never**. A broker you hid yourself never triggers it. Whichever you pick, the (+) menu rows and the **hidden** checkboxes under Control Panel → Browser → Hosts are unchanged, so logging in, taking over and un-hiding stay reachable with no chip at all. See [[Taskbar]].
 
 ## Update check chip
 

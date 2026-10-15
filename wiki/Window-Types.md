@@ -4,7 +4,7 @@ Browserland's desktop holds several kinds of windows, all opened from the launch
 
 The **+** button at the left of the taskbar is how you create windows:
 
-- **Left-click +** to launch a terminal on your **default host** — the local broker unless you pick another in Control Panel → Hosts.
+- **Left-click +** to launch a terminal on your **default host** — the local broker unless you pick another in Control Panel → Browser → Hosts.
 - **Right-click +** for the full profile / app menu. Alongside the terminal profiles (grouped per broker when you have more than one host), it lists the app windows:
 
 The items appear in this order, which is the order the window kinds register in — not
@@ -60,7 +60,7 @@ A few things worth knowing:
 - Mods run in the popped-out window as on the desktop, except **Workspaces** (there is no desktop to organize there).
 - Ownership is tracked with a browser lock, which needs an https or localhost page (the [[recommended setup|Hosts-and-Multi-Browser]]). On a plain-http page that is not localhost the feature is unavailable and says so, because nothing there can promise that only one window is typing into the shell.
 
-A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left-click on the **+** button launches on your **default host** — the local broker unless changed in Control Panel → Hosts. To start one on a specific host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts and setting the default.
+A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left-click on the **+** button launches on your **default host** — the local broker unless changed in Control Panel → Browser → Hosts. To start one on a specific host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts and setting the default.
 
 **Pasting images**: paste a screenshot (e.g. `Win+Shift+S`) straight into a terminal with `Ctrl+V`, `Alt+V`, or a right-click. The image itself cannot cross into the remote shell's clipboard, so the desktop uploads it to that terminal's broker host and pastes the resulting **file path** instead — AI agents like Claude Code read a pasted image path just like a drag-and-dropped file. Pasted images are kept for a few hours in the host's temp area and swept automatically. If the clipboard carries both text and an image, the text wins. `Alt+V` and right-click image capture need an https (or localhost) page; `Ctrl+V` image paste works everywhere.
 

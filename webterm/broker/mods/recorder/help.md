@@ -12,7 +12,7 @@ them from the library removes them.
 
 ## Auto-record every session
 
-**Control Panel → Session recorder → auto-record every session** (off by
+**Control Panel → Mods → Session recorder → auto-record every session** (off by
 default) starts recording every terminal as it opens, without anyone pressing
 ⏺. Like the other browser-global settings it is shared across every browser
 viewing this broker.

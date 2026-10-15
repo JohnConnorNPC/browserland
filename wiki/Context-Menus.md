@@ -116,7 +116,7 @@ Because this menu also opens from an empty part of the **taskbar**, it is the on
 
 ## Launch (+) button
 
-Left-click the `+` to launch the default host's default terminal — the local broker unless you've picked another default in Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]). Right-click it for the full launch menu:
+Left-click the `+` to launch the default host's default terminal — the local broker unless you've picked another default in Control Panel → Browser → Hosts (see [[Hosts-and-Multi-Browser]]). Right-click it for the full launch menu:
 
 - **Broker status rows** — one per attached broker: a state dot and label doing what the taskbar chip does (log in, take over the lease, or hide/show that broker's windows — the hide toggle keeps the menu open). See [[Hosts-and-Multi-Browser]].
 - **Terminal profiles** — each launchable profile for the host (the default is marked `(default)`), listed under its broker's status row.

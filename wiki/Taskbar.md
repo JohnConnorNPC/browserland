@@ -6,7 +6,7 @@ From left to right, the taskbar contains:
 
 | Element | What it does |
 |---|---|
-| Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
+| Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Browser → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (sticky notes only when opted in — see below) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch. From the Workspaces mod, enabled by default (see [[Workspaces]]) |
 | Host status | One status chip for a single broker; with several, one aggregate badge that opens the broker menu. A Control Panel option decides whether it shows always, only when a broker needs attention, or never (see [[Hosts-and-Multi-Browser]]) |
@@ -62,7 +62,7 @@ The launch button doubles as a Start button.
 
 By default:
 
-- **Left-click** launches a terminal using your **default host's** default profile. The default host is the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]).
+- **Left-click** launches a terminal using your **default host's** default profile. The default host is the local broker unless you pick another under Control Panel → Browser → Hosts (see [[Hosts-and-Multi-Browser]]).
 - **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types, in registration order — control panel, help, task manager, file manager, text editor, sticky note, scratchpad, session recorder — with more entries, such as clipboard history or an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). Every broker leads with a **live status row** (its state, and the old chip's click actions — log in, take over the lease, or hide/show its windows, which keeps the menu open) with its profiles below it, so you can launch on a remote host from here. With several hosts attached, the taskbar's aggregate broker badge opens this same menu (see [[Hosts-and-Multi-Browser]]).
 
 ### Swapping the click gestures
@@ -97,6 +97,6 @@ The host-status area shows a chip for your broker (or one aggregate badge once y
 | Only when a broker needs attention | The chip appears only while a broker is unreachable, wants a password, or is held by another browser — and disappears again once nothing is wrong |
 | Never | The chip is never drawn |
 
-A broker **you hid yourself** never counts as needing attention, so parking one you don't want right now keeps the chip quiet in attention mode. Nothing becomes unreachable when the chip is gone: right-click the **+** button and every broker is listed with its state and its log-in / take-over / un-hide action, and the same hide toggle is a checkbox on each host's row under Control Panel → Hosts. Attention mode is also deliberately slow to fire — a broker has to miss two polls (about four seconds) before it counts as down, so a single dropped poll never makes the chip flicker into view.
+A broker **you hid yourself** never counts as needing attention, so parking one you don't want right now keeps the chip quiet in attention mode. Nothing becomes unreachable when the chip is gone: right-click the **+** button and every broker is listed with its state and its log-in / take-over / un-hide action, and the same hide toggle is a checkbox on each host's row under Control Panel → Browser → Hosts. Attention mode is also deliberately slow to fire — a broker has to miss two polls (about four seconds) before it counts as down, so a single dropped poll never makes the chip flicker into view.
 
 The setting follows the browser you are sitting at rather than any one host, and is shared with other browsers viewing the same broker. See [[Hosts-and-Multi-Browser]] for what each chip state means.

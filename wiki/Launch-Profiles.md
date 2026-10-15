@@ -59,7 +59,7 @@ brick startup or leave zero launchable shells.
 
 ## Editing profiles (no restart)
 
-**Control Panel → (a host tab) → Launch profiles.** You can:
+**Control Panel → (a host tab) → Terminals → Launch profiles.** You can:
 
 - **Add profile** — name, optional title, optional cwd, and the command as a
   textarea with **one argv token per line**.

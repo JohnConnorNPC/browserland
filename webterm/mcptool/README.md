@@ -116,7 +116,7 @@ browserland-mcp --scope projA            # or BROWSERLAND_MCP_SCOPE=projA
 ### Admin credentials (#245)
 
 One agent per broker can hold the **admin credential** — a second, separate
-secret minted in the broker's Control Panel (MCP access → admin token). It is
+secret minted in the broker's Control Panel (Access → MCP access → admin token). It is
 sent as the `X-Browserland-Mcp-Admin` header **in addition to** the MCP token
 on every request to that host, and it unlocks the admin-only surface there:
 listing every window (off and foreign-scope included), setting any window's

@@ -37,7 +37,7 @@ The shape that trips people up:
   it's the exception, not the multi-machine model.)
 - **Brokers are joined in the browser, not in config.** To see machine B's
   terminals next to machine A's, you don't edit a config file — you open the UI
-  and add B as a **host** (Control Panel → Hosts).
+  and add B as a **host** (Control Panel → Browser → Hosts).
 
 So the canonical two-machine setup is:
 
@@ -49,7 +49,7 @@ So the canonical two-machine setup is:
   └──────┬───────┘                  └──────┬───────┘
          │                                 │
          └──────────► browser ◄────────────┘
-            (Control Panel → Hosts: adds B by its Tailscale IP)
+            (Control Panel → Browser → Hosts: adds B by its Tailscale IP)
 ```
 
 ## Single machine
@@ -120,7 +120,7 @@ Goal: one browser tab showing terminals from every machine.
 3. **Open the UI on one machine** (`http://<that-machine>:4445/`). This is your
    "cockpit" — it doesn't have to be special, any broker's UI can host the view.
 
-4. **Add the other brokers as hosts.** Control Panel → **Hosts** → add each
+4. **Add the other brokers as hosts.** Control Panel → Browser → **Hosts** → add each
    remote broker by its URL — `https://<machine>.<tailnet>.ts.net/` if you
    fronted it with `tailscale serve`, else `http://<tailscale-ip>:4445/` — and
    its token/password. The **browser connects directly** to each host
@@ -154,7 +154,7 @@ The single most common setup mistake (especially when an AI agent is driving) is
 editing the wrong thing. Rules of thumb:
 
 - **Joining brokers is a UI action, not a config edit.** To attach machine B,
-  use Control Panel → Hosts in the browser. There is **no** "remote brokers"
+  use Control Panel → Browser → Hosts in the browser. There is **no** "remote brokers"
   list in `broker_config.json` — looking for one and inventing one is a dead end.
 - **`broker_config.json` describes *this* broker only**: its bind (`host`/
   `port`), `auth_token`, MCP gates, and the launchable `profiles`. Nothing in it
@@ -162,7 +162,7 @@ editing the wrong thing. Rules of thumb:
 - **`profiles` are an allow-list, deliberately.** The browser can only launch
   pre-approved profiles — it can never supply a raw command. The `agent.profiles`
   here are the **seed**; the easiest way to add a WSL/zsh/PowerShell profile is
-  **Control Panel → Launch profiles** (add/edit/detect, applied live with no
+  **Control Panel → (a host tab) → Terminals → Launch profiles** (add/edit/detect, applied live with no
   restart), which persists to a `webterm_profiles.json` sidecar that then owns
   the set. See **[[Launch-Profiles]]** for copyable recipes and the
   sidecar-vs-`broker_config` rule.
@@ -170,7 +170,7 @@ editing the wrong thing. Rules of thumb:
   set through the add-host form — not in any file on disk.
 
 If you're an agent and you find yourself about to edit `broker_config.json` to
-"connect to the other machine," stop: that's a Control Panel → Hosts action
+"connect to the other machine," stop: that's a Control Panel → Browser → Hosts action
 instead.
 
 ## Running the broker in the background

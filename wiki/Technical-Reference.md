@@ -357,7 +357,7 @@ token-gated instead.
 
 ### Multiple hosts
 
-Control Panel → Hosts lets the UI attach to sessions on additional brokers
+Control Panel → Browser → Hosts lets the UI attach to sessions on additional brokers
 (e.g. a WSL box over Tailscale). By default the **browser connects
 directly** to each host (cross-origin `fetch /sessions` + `ws://host/ws`);
 a host can instead be reached **through this broker** (below). Hosts and
@@ -927,7 +927,7 @@ missing every `/mcp/*` request is **403 `{"error":"mcp_disabled"}`**.
 
 Get a token any of three ways (precedence **env > sidecar > config seed**):
 
-* **Control Panel → MCP access → *Generate*** — mints a `token_urlsafe(32)`
+* **Control Panel → Access → MCP access → *Generate*** — mints a `token_urlsafe(32)`
   secret and persists it to the sidecar (below). The normal path.
 * config `mcp_token` — a seed value in `broker_config.json`.
 * env **`WEB_TERMINAL_MCP_TOKEN`** — **pins** the token over both of the above,
@@ -958,7 +958,7 @@ otherwise the broker-wide `default_mode`:
 | `readwrite` | read **and** `/mcp/input` |
 
 * **`default_mode`** (global, default `off`) — applies to every window without an
-  override; change it live in Control Panel → MCP access or `POST /mcp/config`.
+  override; change it live in Control Panel → Access → MCP access or `POST /mcp/config`.
 * **per-window override** — set from the window title-bar **MCP access** menu or
   `POST /session/mcp`, where `"mode": null` clears it so the window inherits
   `default_mode` again. **Durable**: it is stored with the window's scope in
@@ -1055,7 +1055,7 @@ visibility and reach, and only tags the admin's own launches.
 
 ### Desktop relay (#244)
 
-`allow_desktop` (Control Panel → MCP access, `POST /mcp/config`, or an
+`allow_desktop` (Control Panel → Access → MCP access, `POST /mcp/config`, or an
 admin's `POST /mcp/knobs`; default **off**) is the master switch for the whole
 desktop relay — window arranging *and* workspace management, admin included.
 `GET /mcp/info` advertises it as `"allow_desktop": true|false`. The two routes

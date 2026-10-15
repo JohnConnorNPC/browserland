@@ -60,7 +60,7 @@ browser's attach triggers a snapshot redraw from the ring buffer.
 
 The part people miss: Browserland is a **remote control plane**, not just a
 terminal for the machine it runs on. Run a broker on each of your machines,
-then register them as **hosts** in the UI (**Control Panel → Hosts** — a name,
+then register them as **hosts** in the UI (**Control Panel → Browser → Hosts** — a name,
 a URL, and that broker's token; a [Tailscale](https://tailscale.com/) address
 works great). One browser tab then fronts the whole fleet:
 
@@ -145,7 +145,7 @@ The desktop with tiled and floating terminals
   URL to open. Launching is **profiles-only** (the client can never supply a raw
   command).
 - **Launch profiles you can edit in the UI**: add WSL/zsh/PowerShell shells from
-  **Control Panel → Launch profiles** (one-click WSL-distro / shell **Detect…**),
+  **Control Panel → (a host tab) → Terminals → Launch profiles** (one-click WSL-distro / shell **Detect…**),
   applied live with no restart — still profiles-only. See
   **[wiki/Launch-Profiles.md](wiki/Launch-Profiles.md)** for recipes and the security model.
 
@@ -416,7 +416,7 @@ too, behind **Include developer docs**.
 
 New here, or setting up more than one machine? Start with
 **[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)** — the onboarding guide: the broker / agent /
-browser mental model, joining machines over Tailscale via Control Panel → Hosts,
+browser mental model, joining machines over Tailscale via Control Panel → Browser → Hosts,
 what *not* to hand-edit, and running the broker unattended in the background
 (Windows Task Scheduler / Linux systemd). It's written to be followed by a human
 or a coding agent.
