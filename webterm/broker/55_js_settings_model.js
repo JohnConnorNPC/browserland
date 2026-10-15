@@ -165,7 +165,8 @@
                 s.hostStatusChip = 'always';
             }
             // Issue #10: single default start path for new terminals (collapses
-            // the per-OS pair from #2). Browser-local (like startLabel) and
+            // the per-OS pair from #2). Saved in prefs._settings, so it syncs
+            // through the serving broker's /state like startLabel, and it
             // belongs to THIS broker's host; resolveStartPath only sends it to a
             // host whose OS matches this broker's, so a wrong-OS cwd is never
             // sent. '' = the agent's own default cwd. The legacy
