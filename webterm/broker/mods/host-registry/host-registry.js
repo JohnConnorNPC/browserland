@@ -1837,14 +1837,31 @@
                             intro.className = 'app-dialog-msg';
                             intro.textContent = 'Save this browser\'s host list to '
                                 + 'the broker so another browser can pull it. The '
-                                + 'broker only stores the list — it never proxies.';
+                                + 'broker only stores the list. Hosts marked '
+                                + '"from server" are not published.';
                             c.appendChild(intro);
                             const list = document.createElement('div');
                             list.className = 'hostreg-list';
                             for (const h of hosts) {
+                                // #254: a from-server row is shown, greyed and
+                                // unticked, so a missing host is explained rather
+                                // than silently absent. buildValue skips it
+                                // anyway; this only keeps the dialog honest.
+                                const off = !!(h && h.via === 'server');
                                 const r = mkRowCheck(h.id === 'local'
                                     ? 'this broker' : (h.label + ' — ' + h.url),
-                                    true);
+                                    !off);
+                                if (off) {
+                                    r.cb.disabled = true;
+                                    r.row.classList.add('hostreg-off');
+                                    r.row.title = 'Reached through this broker; '
+                                        + 'publishing its address would make it a '
+                                        + 'direct host in the other browser.';
+                                    const tag = document.createElement('span');
+                                    tag.className = 'hostreg-tag';
+                                    tag.textContent = 'from server: not published';
+                                    r.row.appendChild(tag);
+                                }
                                 list.appendChild(r.row);
                                 refs.push({ host: h, cb: r.cb });
                             }

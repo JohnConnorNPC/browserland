@@ -47,6 +47,8 @@
             letter-spacing: 0.04em;
             color: var(--fg-dim);
         }
+        /* #254: a from-server host in the publish dialog — shown, never sent. */
+        .hostreg-off { color: var(--fg-dim); }
         .hostreg-haspw {
             color: var(--warn);
             font-size: 11px;
