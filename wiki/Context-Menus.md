@@ -59,7 +59,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 
 Close, terminate, delete, and pinning are detailed on [[Floating-Window-Controls]].
 
-> **Color and rename** aren't on this right-click menu. Recolor a window from the **color button** in its title bar (palette, custom, and recents), and **double-click** an app window's title to rename it — both covered on [[Floating-Window-Controls]].
+> **Color and rename** aren't on this right-click menu. Recolor a terminal, sticky note or text editor from the **color button** in its title bar (palette, custom, and recents; hidden on screens 520 px wide or less), and **double-click** an app window's title to rename it — both covered on [[Floating-Window-Controls]].
 
 ## Tab strip
 

@@ -47,6 +47,10 @@ The offered fonts are:
 
 Picking a font applies immediately to every open terminal window, and to every terminal you open afterward — no reload needed. (The letters change at once; the grid of rows and columns is re-measured a moment afterwards, once the far end confirms the new size.) A font you pick but don't have installed simply falls back to the default. If you later disable the mod, terminals return to the built-in default font — or to another installed font mod's font, if one is also styling them.
 
+## On a phone
+
+On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a running record button stay. On touch screens up to 900 px wide the title-bar buttons are larger.
+
 ## Related pages
 
 - [[Getting-Started]] — opening the Control Panel and finding the Desktop applet.
