@@ -2,6 +2,8 @@ Browserland has two "hold-to-snap" gestures that move a window between the [[flo
 
 > Looking to move a terminal into a separate browser window? That is **Open in new window** on the title-bar menu — see [[Window-Types]]. On this page, *pop out* means turning a tiled window back into a floating one inside the desktop.
 
+These are mouse gestures (a pen works too); a touch drag on a title bar does nothing.
+
 Both gestures share a single timer — the **drag hold delay** (the *dwell*). You start a drag, hold the window still long enough, and the window arms the gesture.
 
 ## Snap a floating window into the grid
@@ -31,9 +33,15 @@ Use this to detach a window from the tiling strip back into a free-floating wind
 
 To cancel, **move the window again** before releasing — that keeps it tiling. Pressing `Escape` aborts the drag entirely.
 
+Pop-out works on one window at a time: dragging a whole tab group never arms it (use the bottom band). While Shift or Alt is held during a floating drag, the snap timer waits.
+
 ### Skip the gesture
 
-To detach a window directly without the hold, **right-click the title bar** and choose **"Float this window"**.
+To detach a window directly without the hold, **right-click the title bar** and choose **"Float this window"**. Or drop the window on the **bottom band** of the desktop (it lights up as you reach it), or right-click while dragging, and it floats at once. Both work even with the delay set to 0.
+
+## Modifier drags
+
+While dragging a floating window, hold **Alt** and drop it on another window to tile both and tab it into that window's tile, or hold **Shift** and drop it on another floating window to swap their positions. While Shift or Alt is held, the hold-to-snap timer does not run.
 
 ## Hold delay (configurable)
 
