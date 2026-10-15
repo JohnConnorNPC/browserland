@@ -86,6 +86,14 @@ works great). One browser tab then fronts the whole fleet:
 - Each host keeps its own token, profiles, and file API — the UI fans out,
   the brokers stay independent. A machine going down takes its windows
   stale, not the desktop.
+- Can't reach a machine directly (a phone off the tailnet, a firewalled box)?
+  Name it under `peers` in the serving broker's config and switch its Hosts
+  row to **from server**: the serving broker relays to it under
+  `/peer/<id>/…` (needs the `proxy` extra, #252). See
+  [Hosts & Multi-Browser](wiki/Hosts-and-Multi-Browser.md).
+- A broker can run as a **node** (`--headless`: API only, no page) behind a
+  **hub**, and a hub can refuse launches with `terminals: false`
+  (`--no-terminals`, #253).
 - The MCP server speaks the same multi-host language: one `--hosts` list lets
   an AI harness enumerate and drive terminals across **all** brokers through
   a single tool surface.

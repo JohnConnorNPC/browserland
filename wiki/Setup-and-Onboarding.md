@@ -39,7 +39,11 @@ The shape that trips people up:
   it's the exception, not the multi-machine model.)
 - **Brokers are joined in the browser, not in config.** To see machine B's
   terminals next to machine A's, you don't edit a config file — you open the UI
-  and add B as a **host** (Control Panel → Browser → Hosts).
+  and add B as a **host** (Control Panel → Browser → Hosts). (One exception:
+  when the browser can reach only one broker, that broker's operator can list
+  the others under `peers` so it relays to them — the host is still added in
+  the browser, then switched to **from server**; see
+  [[Hosts-and-Multi-Browser#reaching-a-broker-through-this-one]].)
 
 So the canonical two-machine setup is:
 
@@ -120,14 +124,20 @@ Goal: one browser tab showing terminals from every machine.
    bind too if you want to reach it from elsewhere.
 
 3. **Open the UI on one machine** (`http://<that-machine>:4445/`). This is your
-   "cockpit" — it doesn't have to be special, any broker's UI can host the view.
+   "cockpit" — it doesn't have to be special, any **hub**'s UI can host the view
+   (a node — `--role node` / `serve_ui: false` — serves no page).
 
 4. **Add the other brokers as hosts.** Control Panel → Browser → **Hosts** → add each
    remote broker by its URL — `https://<machine>.<tailnet>.ts.net/` if you
    fronted it with `tailscale serve`, else `http://<tailscale-ip>:4445/` — and
-   its token/password. The **browser connects directly** to each host
-   (cross-origin `fetch` + WebSocket); hosts and passwords live per-browser in
-   `localStorage`, never in any config file.
+   its token/password. By default the **browser connects directly** to each
+   host (cross-origin `fetch` + WebSocket); hosts and passwords live
+   per-browser in `localStorage`, never in any config file. If the browser
+   (say, a phone) can reach only one broker, that broker can relay to the
+   others instead: list them under `peers` in its `broker_config.json`, install
+   the proxy extra there (`pip install -e ".[proxy]"`), restart it, then pick
+   **from server · <id>** on the host's row in Control Panel → Browser → Hosts.
+   See [[Hosts-and-Multi-Browser#reaching-a-broker-through-this-one]].
 
 Broker status lives in the taskbar: a single broker gets its own chip, always
 (green ok / red down / amber password-needed / blue lease-inactive; the chip
@@ -155,12 +165,18 @@ Full auth/CORS details: **[[Technical Reference → Multiple hosts|Technical-Ref
 The single most common setup mistake (especially when an AI agent is driving) is
 editing the wrong thing. Rules of thumb:
 
-- **Joining brokers is a UI action, not a config edit.** To attach machine B,
-  use Control Panel → Browser → Hosts in the browser. There is **no** "remote brokers"
-  list in `broker_config.json` — looking for one and inventing one is a dead end.
-- **`broker_config.json` describes *this* broker only**: its bind (`host`/
-  `port`), `auth_token`, MCP gates, and the launchable `profiles`. Nothing in it
-  points at other machines.
+- **Joining brokers is normally a UI action, not a config edit.** To attach
+  machine B, use Control Panel → Browser → Hosts in the browser. The one
+  exception is `peers` (#252): an operator can name other brokers that *this*
+  broker will relay to (`/peer/<id>/`), for a browser or phone that can reach
+  only this broker — see
+  [[Hosts-and-Multi-Browser#reaching-a-broker-through-this-one]]. Even then
+  the browser still adds the host itself and holds its password; `peers`
+  stores no credential.
+- **`broker_config.json` describes *this* broker**: its bind (`host`/`port`),
+  `auth_token`, its role (`serve_ui` / `terminals`), MCP gates, the launchable
+  `profiles`, and — optionally — the `peers` it relays to. Apart from `peers`,
+  nothing in it points at other machines.
 - **`profiles` are an allow-list, deliberately.** The browser can only launch
   pre-approved profiles — it can never supply a raw command. The `agent.profiles`
   here are the **seed**; the easiest way to add a WSL/zsh/PowerShell profile is
