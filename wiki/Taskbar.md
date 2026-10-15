@@ -94,7 +94,7 @@ The host-status area shows a chip for your broker (or one aggregate badge once y
 | Show | Effect |
 |---|---|
 | Always | The default, and the same as before this option existed |
-| Only when a broker needs attention | The chip appears only while a broker is unreachable, wants a password, or is held by another browser — and disappears again once nothing is wrong |
+| Only when a broker needs attention | The chip appears only while a broker is unreachable, wants a password, or is held by another browser — or, for a host reached *from server* through this broker, while its terminals cannot connect (the chip's tooltip says why) — and disappears again once nothing is wrong |
 | Never | The chip is never drawn |
 
 A broker **you hid yourself** never counts as needing attention, so parking one you don't want right now keeps the chip quiet in attention mode. Nothing becomes unreachable when the chip is gone: right-click the **+** button and every broker is listed with its state and its log-in / take-over / un-hide action, and the same hide toggle is a checkbox on each host's row under Control Panel → Browser → Hosts. Attention mode is also deliberately slow to fire — a broker has to miss two polls (about four seconds) before it counts as down, so a single dropped poll never makes the chip flicker into view.

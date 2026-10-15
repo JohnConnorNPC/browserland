@@ -8,7 +8,7 @@ By default the UI talks to the broker it was served from (`http://127.0.0.1:4445
 2. Enter the broker **URL**.
 3. Enter the broker's **password** — the broker's auth token, which doubles as its browser login. Every broker has one: either the `auth_token` its owner configured, or one it minted for itself on first run. Print it on that machine with `python -m webterm.broker --print-token`.
 
-**Serve remote brokers over https** — the easy way is [`tailscale serve`](https://tailscale.com/kb/1312/serve) on each machine (real TLS inside your tailnet, no certificates to manage, the broker stays bound to loopback), or any https reverse proxy of your own. Two reasons: a browser blocks an **https page from talking to an http host** (mixed content), so the cockpit page and every added host must share one scheme — all https or all plain http, never a mix; and only an https (or localhost) page is a *secure context*, which clipboard **image paste** into a terminal (`Alt+V` / right-click) requires. All-plain-http over a trusted tailnet works too, minus those features.
+**Serve remote brokers over https** — the easy way is [`tailscale serve`](https://tailscale.com/kb/1312/serve) on each machine (real TLS inside your tailnet, no certificates to manage, the broker stays bound to loopback), or any https reverse proxy of your own. Two reasons: a browser blocks an **https page from talking to an http host** (mixed content), so the cockpit page and every host it dials **directly** must share one scheme — all https or all plain http, never a mix (a host reached **through this broker**, below, rides this page's own origin, so it is exempt); and only an https (or localhost) page is a *secure context*, which clipboard **image paste** into a terminal (`Alt+V` / right-click) requires. All-plain-http over a trusted tailnet works too, minus those features.
 
 Each host you add gets its own settings tab in the Control Panel. Settings like window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path are stored **per host**, so they can differ from broker to broker. A separate set of **browser-global** settings (theme and background, terminal font, the start-button label, restore-on-refresh, when the broker status chip shows, the taskbar workspace filter, whether the workspace pager shows, and the clock chip's time zone) belong to the browser you are sitting at and are shared across every host. For more on opening the Control Panel and the rest of its tabs, see [[Getting-Started]].
 
@@ -21,7 +21,10 @@ The password you enter is the broker's browser-login token. The bearer token AI 
 Sometimes the browser can reach only one broker — the public one — while the
 others sit on its LAN or tailnet, or speak plain http to an https page. The
 operator of that broker can let it **relay** to them: add a `peers` entry to
-its `broker_config.json` and restart it.
+its `broker_config.json`, install the proxy extra on that broker
+(`pip install -e ".[proxy]"` — `httpx` and `websockets` 15+; the other
+broker needs nothing), and restart it. A malformed `peers` entry stops the
+broker at startup with one line naming it.
 
 ```json
 "peers": {"b": {"origin": "http://100.64.0.2:4445"}}
@@ -53,10 +56,14 @@ this broker may each reach a different machine by it. A switch also drops that h
 permission: grant it again on the host's tab.
 
 A host reached this way says **(via this broker)** on its row, in the status
-chip's tooltip and on its password prompt. Its per-host settings (default
-profile, tiling, start folder) are the defaults, because this broker never
-relays `/state`; they stay on the other broker and come back when the host
-is switched back to direct. Editing its row changes only the label and the
+chip's tooltip and on its password prompt. It has no settings of its own here,
+because this broker never relays `/state`: its tab says *settings are not
+available for a host reached through this broker*. Its per-host settings
+(launch profiles, MCP access, keybindings, start path) can only be changed
+from that broker's own page, or from a browser that adds it directly; they
+stay on the other broker and come back when the host is switched back to
+direct. The browser-local controls on its tab, such as Clipboard (OSC 52),
+still work. Editing its row changes only the label and the
 password — the address belongs to this broker's `peers`. A host that was
 reached through this broker when the page loaded, and is then switched back
 to direct, says so on its row: its terminals reconnect directly, and if
@@ -89,7 +96,7 @@ See [[Technical-Reference#peer-proxy-252]] for the routes, the headers and every
 
 ## Sharing your broker list
 
-Your host list normally lives only in the browser you added it in: open the desktop from a different browser and you start with an empty list, and clearing local storage to fix a UI glitch also wipes your remote brokers. The optional **Broker registry** fixes that by storing a copy of the list on a broker, so you can pull it back somewhere else. It is a convenience layer, not a change to how connections work — your host list stays browser-local and remains the source of truth, and the registry only stores the list. A registry row can never make a host one that is reached through a broker (see below); that is set in this browser only.
+Your host list normally lives only in the browser you added it in: open the desktop from a different browser and you start with an empty list, and clearing local storage to fix a UI glitch also wipes your remote brokers. The optional **Broker registry** fixes that by storing a copy of the list on a broker, so you can pull it back somewhere else. It is a convenience layer, not a change to how connections work — your host list stays browser-local and remains the source of truth, and the registry only stores the list. A registry row can never make a host one that is reached through a broker (see [Reaching a broker through this one](#reaching-a-broker-through-this-one), above); that is set in this browser only.
 
 Find it in **Control Panel → Browser → Broker registry**, just below the Hosts list.
 
