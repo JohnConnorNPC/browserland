@@ -63,7 +63,8 @@ brick startup or leave zero launchable shells.
 
 - **Add profile** — name, optional title, optional cwd, and the command as a
   textarea with **one argv token per line**.
-- **Edit** / **Delete** / **Make default** an existing profile.
+- **Default** / **Edit** / **Delete** an existing profile (the current default
+  shows a **default** badge, and its Default button is disabled).
 - **Detect…** — one-click environment scan that seeds the Add dialog:
   - **Windows** → your installed **WSL distros** (`wsl.exe -l -q`).
   - **Linux/macOS** → the shells actually present (`bash`, `zsh`, `fish`, `sh`).
@@ -86,7 +87,9 @@ Editing profiles means defining commands the host will run, so the editor is
 token, on every interface, no exceptions. The endpoints:
 
 - `GET /profiles/config` / `POST /profiles/config` — the **full** objects
-  (commands included). Browser realm only.
+  (commands included). Browser realm only. A hub with `peers` relays these
+  under `/peer/<id>/` on its browser gate, which needs **both** the hub's token
+  and the peer's — the relay never opens them to an MCP caller.
 - `GET /profiles/detect` — the environment scan. Browser realm only.
 - On a `terminals: false` broker, `POST /profiles/config` and
   `GET /profiles/detect` answer 403 `terminals_disabled` (after the token
