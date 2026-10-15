@@ -188,9 +188,10 @@
         // Browser-global sections (theme/pattern/clock/start-button/restore/
         // taskbar-filter) edit the settings saved with THIS page's broker (its
         // /state, shared by every browser viewing it), not a remote host's —
-        // show them only on the local tab. Toggled SYNCHRONOUSLY on tab select (not just in
-        // renderSettings) so they can't linger visible-and-editing-local while a
-        // remote /state load is in flight or has failed (#17).
+        // show them only on the local tab. Toggled SYNCHRONOUSLY on tab select
+        // (not just in renderSettings) so they can't linger
+        // visible-and-editing-local while a remote /state load is in flight or
+        // has failed (#17).
         function applyBrowserGlobalVisibility(show) {
             for (const el of document.querySelectorAll('.set-browser-global')) {
                 el.style.display = show ? '' : 'none';
