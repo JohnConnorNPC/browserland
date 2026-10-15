@@ -112,7 +112,7 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - **Rename &lt;workspace&gt;…** — rename the workspace you are on.
 - **Remove &lt;workspace&gt;** — delete the workspace you are on (disabled when only one remains).
 
-Both modes then offer **Fit all to this screen**, which does **Fit to this screen** for every terminal, and **🎛 Control panel** — this menu does still use the emoji. **Undo &lt;action&gt;** comes after it, as the **last** item in the menu, appearing in floating mode once there is an arrange to reverse (single-level). The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
+Both modes then offer **Fit all to this screen**, which does **Fit to this screen** for every terminal, and **🎛 Control panel** — this menu does still use the emoji. **Undo &lt;action&gt;** comes after it, as the **last** item in the menu, appearing in floating mode once there is an arrange to reverse (single-level). The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Fit all to this screen** and **🎛 Control panel**.
 
 Because this menu also opens from an empty part of the **taskbar**, it is the one workspace surface that is always reachable — no window can cover it — which is what makes hiding the pager safe.
 
