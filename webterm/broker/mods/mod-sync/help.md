@@ -38,6 +38,7 @@ Each case gets its own row rather than a generic failure:
 - **Master mod switch off** — it runs no mods at all (`mods_enabled: false`). Settings are still written; pins are not, because a pin made now would be inert *and* awkward to clear later (the pin editor disables itself while the master switch is off).
 - **Another browser is the active view there** — its shared settings are only accepted from its active browser, so the settings half is refused. The pins are still written: unlike settings, a broker's mod policy can be changed while somebody else is using it.
 - **Unreachable**, or **refused our password**.
+- **Reached "from server"** — a host you reach through this broker has no mod settings here (this broker does not relay a peer's shared state), so its settings half is skipped and its row says so. Its mod pins are still pushed.
 
 ### Brokers that require an admin token
 

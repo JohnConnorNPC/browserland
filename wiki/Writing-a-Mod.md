@@ -534,6 +534,13 @@ bumping it.
 - **`ctx.hosts.list()`** (#200) — a frozen `[{id, label, url, brokerId, self}]`
   snapshot, no token. `brokerId` is `null` until the host has answered over
   `/info`. See below.
+- **Hosts reached *from server* (#252).** A host the user set to *from server*
+  is an ordinary row: `id` is the same, `url` is the peer's own origin (not
+  where requests go — they go through this broker's `/peer/<id>/` prefix), and
+  nothing in the row tells you the mode. `ctx.http.fetch` to it works, but
+  only the routes this broker relays answer (see the peer allowlist in
+  [[Technical-Reference#peer-proxy-252]]), so `/state` and the mod install
+  routes do not.
 - **`ctx.file`** — `read` / `write` / `list` / `delete` / `upload` / `mkdir` /
   `copy` / `move` / `zip` / `unzip` / `stat` / `setattr` / `hash`, plus the
   chunked family (`readChunk`, `uploadBegin`, `uploadChunk`, `uploadCommit`,
