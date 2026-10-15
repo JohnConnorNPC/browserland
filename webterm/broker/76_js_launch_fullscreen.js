@@ -56,9 +56,10 @@
             const v = (chosen && chosen.id !== 'local')
                 ? chosen.label + ' (the default host) hosts no terminals. '
                     + 'Pick a host in the launch menu, or set another default '
-                    + 'in Settings → Hosts.'
+                    + 'in Control Panel → Browser → Hosts.'
                 : 'This broker is a Hub with terminals off. Pick a host in '
-                    + 'the launch menu, or set a default in Settings → Hosts.';
+                    + 'the launch menu, or set a default in Control Panel → '
+                    + 'Browser → Hosts.';
             openInfoModal({
                 title: 'No host can launch here',
                 rows: [{ k: '', v }],

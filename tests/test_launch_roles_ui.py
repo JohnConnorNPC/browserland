@@ -274,7 +274,7 @@ const launched = (w) => w.fetches.filter(f => f.endsWith(' /launch'));
         const chosen = mkWorld({ peers: [peer('a')], records: { a: { terminalsOff: true } },
                                  defaultHost: 'a' });
         chosen.showNoLaunchHost();
-        ok(/This broker is a Hub with terminals off\. Pick a host in the launch menu, or set a default in Settings → Hosts\./
+        ok(/This broker is a Hub with terminals off\. Pick a host in the launch menu, or set a default in Control Panel → Browser → Hosts\./
                .test(unset.modals[0].rows[0].v)
            && /^peer-a \(the default host\) hosts no terminals\./.test(chosen.modals[0].rows[0].v),
            'L6 the null modal names the reason: this Hub, or the chosen default');
