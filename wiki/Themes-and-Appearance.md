@@ -2,7 +2,7 @@ Browserland's look comes from three independent mods: a **color scheme**, a **ba
 
 ## Color scheme
 
-The **Color scheme** setting (Control Panel → Desktop) picks the desktop's chrome colors — background, panel and accent tones. It ships enabled by default.
+The **Color scheme** setting (Control Panel → Desktop) picks the desktop's chrome colors — background, panel and accent tones. Terminal contents keep their own colors; the scheme changes only the desktop and window chrome. It ships enabled by default.
 
 | Scheme | Look |
 |---|---|
@@ -33,7 +33,7 @@ The pattern is drawn using the current color scheme's tones, so switching scheme
 
 ## Terminal font
 
-The **Terminal font** setting changes the font every terminal window renders with. Unlike the two settings above, it ships **off by default** as a mod: enable **Terminal font** under **Control Panel → Mods** first (see [[Installing-Mods]]), which takes effect on the **next page load**. Once enabled, its select appears alongside Color scheme and Background pattern in Control Panel → Desktop.
+The **Terminal font** setting changes the font every terminal window renders with. Unlike the two settings above, it ships **off by default** as a mod: enable **Terminal font** under **Control Panel → Mods** first (see [[Installing-Mods]] for the general toggle). It comes up at once, with no reload, and its select appears alongside Color scheme and Background pattern in Control Panel → Desktop.
 
 The offered fonts are:
 
