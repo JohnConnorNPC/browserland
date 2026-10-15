@@ -21,7 +21,10 @@ canonical manifest comes from `_canonical_manifest`, which types, caps and
 normalizes every field, rejects any key outside the closed `MANIFEST_KEYS`
 allowlist, drops `defaultEnabled` and `help.slug`, and returns a fixed-shape dict
 (`id, version, ctxVersion, title, description, scripts, styles, requires, tiers,
-help`). The canonical manifest — not the payload's own bytes — is what gets
+help`, plus `permissions` when the package declares it — #193; a pre-#193
+package has none). An absent `permissions` and `permissions: []` are different
+canonical bytes, so they hash to different generations and would sign
+differently. The canonical manifest — not the payload's own bytes — is what gets
 written to `mod.json` and what feeds the hash. The same function validates a wire
 install payload and a directory read off disk, so there is exactly one rule set.
 
