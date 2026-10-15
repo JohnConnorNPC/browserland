@@ -163,7 +163,7 @@
                 for (const act of keyActions()) {
                     const combo = map[act.id] || '';
                     const body = combo ? ('Bound to ' + combo + '.')
-                        : 'Unbound - assign a key in Control Panel -> Keyboard shortcuts.';
+                        : 'Unbound - assign a key in Control Panel -> Input -> Keybindings.';
                     entries.push({
                         slug: 'live-keyboard-shortcuts', section: 'Keyboard shortcuts',
                         title: act.label, bodyFrags: [helpTextBlock(body)],
