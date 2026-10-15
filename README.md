@@ -25,38 +25,6 @@ Python package and module name.)
 Browserland also exposes an **MCP server**, letting LLM harnesses drive the
 terminals directly — including full-screen TUIs.
 
-> ### ⚠️ Breaking change: a token is now required on every connection
->
-> Browserland used to treat **loopback as an auth exemption** — with no
-> `auth_token` set (the shipped default), anything on the machine could read
-> every terminal's title/pid/cwd, attach to any PTY, and reach host-wide file
-> read/write. That was never sound: `tailscale serve` in front of a `127.0.0.1`
-> bind makes *every* tailnet request arrive from loopback, and any web page you
-> have open can reach loopback too. A token is now required on every route and
-> every interface, with no exemption and no opt-out.
->
-> **New install? Nothing to do.** The broker mints its own token on first run
-> and prints a ready-to-open URL. You never have to create one.
->
-> **Were you running without a token?** Then on your next start:
->
-> - **The browser will ask for a password.** Get it with
->   `python -m webterm.broker --print-token` — it's also minted into
->   `webterm_token.json` beside your state store.
-> - **Terminals launched by the previous run cannot reconnect** and must be
->   relaunched once. Their shells keep running, but they were started without
->   the token and it can't be injected into a live process. This is the one
->   unavoidable loss — finish or accept whatever is in them first.
-> - **Scripts calling `/sessions`, `/launch` or `/file/*` over loopback now get
->   `401`.** Send `Authorization: Bearer <token>`.
->
-> Running a fleet? Set `auth_token` yourself in `broker_config.json` **before**
-> the cutover, so every host shares one password you already know instead of a
-> different minted value per machine.
->
-> Full details, a does-this-affect-me table, and recovery steps:
-> **[`wiki/Upgrading.md`](wiki/Upgrading.md)**.
-
 ## What is this?
 
 Browserland is two small programs and a browser:
