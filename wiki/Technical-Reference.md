@@ -372,8 +372,11 @@ direct host:
   a loopback bind fronted by `tailscale serve` / an https reverse proxy.
   Setting `auth_token` explicitly is worth it across a fleet so every host
   shares one password instead of a per-machine minted value;
-* **both brokers must run this webterm version** — a pre-CORS remote reads
-  as a red "down" broker even when it's running;
+* keep every broker on the same webterm version — there is no version gate
+  (`Access-Control-Allow-Origin: *` on every response), but an older direct
+  remote refuses a preflight for any header its build doesn't list, and it
+  lacks newer routes and fields; a from-server host is same-origin and needs
+  no CORS;
 * one scheme for the whole fleet — an https page fetching an http remote
   is blocked as mixed content, so cockpit + hosts must be all-https
   (preferred: unlocks secure-context features like clipboard image paste)

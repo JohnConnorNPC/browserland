@@ -146,12 +146,19 @@ badge — the worst state colors it, and clicking it opens the start (+) menu
 where every broker has a live status row carrying those same actions.
 Requirements worth knowing:
 
-- **Both brokers must run the same webterm version** — a too-old remote shows up
-  as a red "down" chip even while it's running (CORS is version-gated).
+- **Keep the fleet on one webterm version.** Nothing refuses an older remote
+  (every broker answers cross-origin requests with
+  `Access-Control-Allow-Origin: *`), but a remote older than the page lacks
+  newer routes and fields, so newer features degrade or hide for it (see
+  [[Hosts-and-Multi-Browser]] → *Mixed versions*). A host reached **from
+  server** needs no CORS at all: the browser only talks to the serving broker.
 - **Pick ONE scheme for the whole fleet — and prefer https.** An https page
   fetching an http broker is blocked by the browser as **mixed content**, so a
   half-and-half fleet breaks: the cockpit and every host must all be https, or
-  all be plain http. `tailscale serve` on every machine is the easy all-https
+  all be plain http — for hosts the browser dials **directly**. A host reached
+  **from server** (through the cockpit's own broker) is fetched on the
+  cockpit's origin, so an https cockpit can reach a plain-http broker that way.
+  `tailscale serve` on every machine is the easy all-https
   answer (an https proxy of your own works too). Https also makes the page a
   *secure context*, which some browser features require — clipboard **image
   paste** into a terminal (`Alt+V` / right-click) only works on an https or
