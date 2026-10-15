@@ -121,6 +121,14 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 
 Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`. The host part matches the name of the host the terminal belongs to, so one MCP server can front several brokers at once. See [[Hosts-and-Multi-Browser]] for how hosts are named.
 
+### A broker behind another one (#252)
+
+An agent that can reach only one broker can still drive a broker behind it, if that broker's operator allows it:
+
+- **The operator** sets `"mcp": true` on that peer in this broker's `peers` config (see [[Technical-Reference#peer-proxy-252]]).
+- **The agent** adds `http://<this broker>/peer/<id>` as another host in `BROWSERLAND_MCP_HOSTS`, with the **other** broker's MCP token. It may also add `"peer_origin"` (the origin this broker's `peers` names for it): this broker then refuses the call with 409 `peer_origin_changed` instead of passing the token on if the operator later points `<id>` elsewhere. A value that is not a plain origin is refused when the MCP server starts, never trimmed.
+- That host entry's `scope` and `admin_token` are the other broker's, passed through unchanged; this broker's own MCP token, scopes and admin credential play no part.
+
 ## Launch handles
 
 An agent that launches terminals gets a say in how they are exposed afterwards — including an **unscoped** agent, which previously could only watch its windows inherit the default mode. The rule is "the terminals *it* launched":

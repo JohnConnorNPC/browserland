@@ -156,6 +156,31 @@ writes the host's `admin_token` for you.)
   read the admin agent's `.mcp.json`, and with it the admin token. The admin
   token separates well-behaved agents; it is not a sandbox.
 
+### A broker behind another one (#252)
+
+A broker whose operator sets `"mcp": true` on a peer in its `peers` config
+relays that peer's `/mcp/*` surface. Add it as another `--hosts` entry at
+`http://<this broker>/peer/<id>` with the **other** broker's MCP token:
+
+```bash
+browserland-mcp --hosts '[
+  {"name": "hub",  "url": "http://127.0.0.1:4445",        "token": "abc…"},
+  {"name": "b",    "url": "http://127.0.0.1:4445/peer/b", "token": "xyz…",
+   "peer_origin": "http://100.64.0.2:4445"}
+]'
+```
+
+- `"peer_origin"` (optional) is the origin the hub's `peers` names for that
+  peer. The server sends it as `X-Browserland-Peer-Origin` on every call, so
+  the hub refuses with 409 `peer_origin_changed` instead of passing the token
+  on if the operator later points `<id>` elsewhere. A value that is not a
+  plain origin (a path, a query, userinfo, surrounding spaces) exits at
+  startup naming the host; it is never trimmed. Only the `--hosts` form
+  carries it.
+- That entry's `scope` and `admin_token` are the other broker's, passed
+  through unchanged; the hub's own MCP token, scopes and admin credential play
+  no part.
+
 ### Launch handles (#243)
 
 Every `launch_terminal` answer carries a `handle`, minted by the broker for

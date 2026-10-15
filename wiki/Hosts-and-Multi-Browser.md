@@ -76,7 +76,9 @@ included, is refused when the MCP server starts, never trimmed) to that
 host's entry in `BROWSERLAND_MCP_HOSTS`, and this broker refuses the call
 (409 `peer_origin_changed`) instead of passing the
 token on if the operator later points `b` elsewhere; without it, re-pointing
-`b` re-points that token too.
+`b` re-points that token too. That host entry's `scope` and `admin_token` are
+the other broker's, passed through unchanged; this broker's own MCP token,
+scopes and admin credential play no part.
 
 Its terminals open through the same prefix: each window's connection first
 takes a one-time ticket from this broker, so no password ever appears in a
