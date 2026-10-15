@@ -101,7 +101,7 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 
 | Tool | What it does |
 |---|---|
-| `mcp_info(host?)` | Reports feature flags (`allow_launch`, `default_mode`) |
+| `mcp_info(host?)` | Reports the broker's MCP flags (`allow_launch`, `terminals`, `default_mode`, `allow_desktop`, `window_edit`), whether this caller is `admin`, the declared `scope` echoed back, and the broker `version` |
 | `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode, scope); a scoped server lists only its scope's windows, and each row it can still manage with `set_window` is marked `owned: true` |
 | `list_profiles(host?)` | Lists launchable profile names and the default |
 | `read_screen(id, …)` | Returns the terminal's screen. Far more than a bounded grid: `view="scrollback"` and `lines` widen what is returned, `since` returns only what is new, `attrs` adds styling runs, and it can **wait** rather than poll — `wait_for_change`, `wait_for_text`, `wait_for_regex`, `wait_absent`, `wait_for_idle` |

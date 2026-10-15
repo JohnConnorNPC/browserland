@@ -232,7 +232,7 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 
 | Tool | Endpoint | Notes |
 |---|---|---|
-| `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`). Omit `host` → dict keyed by host name |
+| `mcp_info(host?)` | `GET /mcp/info` | the broker's MCP flags (`allow_launch`, `terminals`, `default_mode`, `allow_desktop`, `window_edit`), `admin`, the echoed `scope` and the broker `version`. Omit `host` → dict keyed by host name |
 | `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without sinking the rest. Each terminal carries a `pyte` flag — `false` = the agent lacks pyte, so `attr_runs`/keyframe-repair are unavailable and sparse alt-screen frames are flagged `partial` only (#134) |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback); result carries `content_hash`, `stable_hash` (the cursor-blind digest — a cursor blink in place doesn't change it, a cursor move does), and `idle_ms` (best-effort ms since the last PTY output — absent from older agents, unreliable for a perpetually-animating app). Waits (one call, `timeout_ms`-bounded, mutually exclusive): `wait_for_change` / `wait_for_text` / `wait_for_regex` / `wait_for_idle` (block until the screen settles — `stable_hash` unchanged for N ms) |

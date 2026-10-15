@@ -902,7 +902,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `terminals` #253, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `terminals` #253, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244), the broker `version` and the declared `scope` echoed back (#230) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -1158,7 +1158,7 @@ effective mode to permit them.
 
 **`GET /mcp/info`** →
 `{"ok":true,"allow_launch":false,"terminals":true,"default_mode":"off","version":"0.8.0+ba4b62e",
-"scope":null,"admin":false}`.
+"scope":null,"admin":false,"window_edit":true,"allow_desktop":false}`.
 `terminals` (#253) is `false` on a broker that hosts no terminals: every launch
 is refused with `terminals_disabled` whatever `allow_launch` says. Absent from an
 older broker, which launches.
