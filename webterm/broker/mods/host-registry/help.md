@@ -1,4 +1,4 @@
-The Broker registry is an optional way to share your **host list** — the brokers you connect to in **Control Panel → Browser → Hosts** — through a broker, so you can recover it in another browser or after clearing this browser's data. It is a convenience layer, not a change to how connections work: your host list still lives in this browser and stays the source of truth, and the registry never carries traffic: the broker only stores a copy of the list. (Each host row is either reached directly or, if you chose **from server** on the row, through the broker serving this page — see [[Hosts-and-Multi-Browser]].) **Hosts set to *from server* are published as plain addresses and arrive in another browser as direct hosts: switch them back on the Hosts row after pulling, and leave *Include passwords* off while such a host is in the list.**
+The Broker registry is an optional way to share your **host list** — the brokers you connect to in **Control Panel → Browser → Hosts** — through a broker, so you can recover it in another browser or after clearing this browser's data. It is a convenience layer, not a change to how connections work: your host list still lives in this browser and stays the source of truth, and the registry never carries traffic: the broker only stores a copy of the list. (Each host row is either reached directly or, if you chose **from server** on the row, through the broker serving this page — see [[Hosts-and-Multi-Browser]].) Hosts set to *from server* are not published: add them in the other browser and switch them to *from server* there, which needs that browser's own broker to reach them.
 
 You will find it in **Control Panel → Browser → Broker registry**, right below the Hosts list it manages. For adding and editing the hosts themselves, see [[Hosts-and-Multi-Browser]].
 
@@ -10,7 +10,7 @@ The host list normally lives only in this browser's local storage. That means op
 
 Click **Publish…** to save this browser's host list to the broker. The dialog lets you:
 
-- **Choose which hosts** to include (all are checked by default).
+- **Choose which hosts** to include (all are checked by default). A host set to *from server* is shown greyed out, marked *from server: not published*, and can't be ticked.
 - **Set this broker's address** — the absolute URL other machines use to reach it. A loopback address (`localhost` / `127.x`) can't be reached from another machine, so the local broker is skipped when its address is loopback.
 - **Also publish to every configured broker** — writes the same list to each broker you have, so opening the desktop from *any* of them can recover the full list. Each broker is reported separately; if one can't be written (for example another browser holds its active-writer lease), you are told which.
 

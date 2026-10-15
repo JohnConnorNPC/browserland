@@ -233,6 +233,13 @@ story behind anything named below.
 
 ### Fixed
 
+- **Publishing the broker list leaves "from server" hosts out** (#254). Host
+  registry **Publish** used to write a from-server host as a plain direct entry
+  at the peer's address, with its token when *Include passwords* was ticked, so
+  a browser that pulled the list dialled that address itself and, on another
+  network, could send the token to a different machine. Such hosts are now
+  never published, whatever their tick, and the Publish dialog shows them
+  greyed out with *from server: not published*.
 - **A phone taking over no longer leaves the desktop silently locked out**
   (#248, #249, #251). The desktop's lease socket now pings with a nonce and a
   10 s pong deadline and replaces a dead socket make-before-break, so a
