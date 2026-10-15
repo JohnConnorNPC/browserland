@@ -101,7 +101,7 @@ An update may be refused for any of these reasons:
 
 After an update applies and the broker restarts, the **last deploy** outcome is visible in the next update check — it shows whether the restart succeeded, whether the new build came up, and whether a rollback happened. A build that never comes up is automatically rolled back to the recorded previous commit, visible as a `rolled-back` outcome; the UI shows this so you know why the build changed back rather than forward.
 
-**The broker that was running the old code exits and is replaced with new code.** Agents and their sessions survive the restart and reconnect to the new process, but **terminals and agents do not live-reload**: they keep running the old code they imported at startup. The update window offers a **Fresh terminal** button to spawn a new one with the updated code.
+**The broker that was running the old code exits and is replaced with new code.** Agents and their sessions survive the restart and reconnect to the new process, but **terminals and agents do not live-reload**: they keep running the old code they imported at startup. The update window's **Last update** section offers a **New terminal** button to spawn a new one with the updated code.
 
 ## What this does not claim
 

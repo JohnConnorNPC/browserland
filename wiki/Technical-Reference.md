@@ -148,7 +148,7 @@ Failures are reported **accumulating every reason** — the UI shows all unmet p
 
 **The broker that was running the old code exits and is replaced.** A rollback is automatic: if the new broker never comes up (supervisor restarts it, but it exits again before a worker-ready timeout), the supervisor automatically reverts to the recorded prior commit sha (held in `deploy.journal` beside the checkout). The outcome (`rolled-back`, `deploy-failed`, etc.) rides in the next check response under `last_deploy.outcome`, visible to the operator.
 
-**Agents survive the restart** and reconnect to the new worker, but terminals do not re-execute: they keep running the old code they imported. The UI offers a **Fresh terminal** button to spawn a new one. Agents (AI coding assistants) also survive, but any in-memory state (context, plan, accumulated tokens) is lost — the restart is opaque to them, so they reconnect to an empty board.
+**Agents survive the restart** and reconnect to the new worker, but terminals do not re-execute: they keep running the old code they imported. The update window's **Last update** section offers a **New terminal** button to spawn a new one with the updated code. Agents (AI coding assistants) also survive, but any in-memory state (context, plan, accumulated tokens) is lost — the restart is opaque to them, so they reconnect to an empty board.
 
 The `deploy.journal` records every apply attempt (sha before, sha after, outcome, why it failed if it did) outside the checkout, so `git gc` cannot erase it. Rollback success is proved by a changed `bootId` (reported in `/info`); rollback failure is kept as `rollback-impossible` and requires manual repair.
 
