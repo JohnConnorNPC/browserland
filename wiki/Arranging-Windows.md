@@ -8,6 +8,9 @@ Tabbed windows share a single tile and show a **tab strip**; only one is visible
 
 - Drag a window onto another window's **top band** to stack them as tabs sharing one tile. (A *floating* window can also be Alt-dragged onto a target to dock as a tab in its column — see [[Snapping-and-Pop-out]].)
 - Click a tab in the tile's tab strip to switch between the tabbed windows.
+- Drag the empty part of a tab strip to move the whole group. Dropped on the float band, the group breaks up and each window floats on its own.
+
+Dragging a title bar works with a mouse (or pen); on a touch screen it does nothing, so use the title-bar menu instead (Stack/Tab/Move column, **Column width**).
 
 The title-bar menu offers the same thing without dragging:
 
@@ -19,7 +22,7 @@ The title-bar menu offers the same thing without dragging:
 
 ### Untabbing
 
-To pull a window back out of a tab strip, use the title-bar / tab context menu:
+To pull windows back out of a tab strip, click the strip's **⊟** button (**Split into rows**, or **Drop tabs side by side** on a nested group), or use the title-bar menu:
 
 | Menu item | What it does |
 |---|---|
@@ -41,7 +44,8 @@ A split places two windows next to each other inside one tile.
 
 ## Stacks: rows in a column
 
-- Drag a window onto another window's **TOP or BOTTOM edge** to stack them as rows within the same column.
+- Drag a window onto the **upper or lower part** of another window's interior (below its top tab band) to stack it as a row above or below that window in the same column.
+- Or right-click the title bar → **Stack into left column** / **Stack into right column** to add the window as a new bottom row of the neighbouring column.
 - Drag the **horizontal gutter** to resize the rows.
 
 ## The drop-zone cheat sheet
