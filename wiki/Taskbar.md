@@ -22,6 +22,7 @@ From left to right, the taskbar contains:
 Each open window has a button on the taskbar — except sticky notes, which by default stay off the taskbar and are reached from the **+** menu instead. If you'd rather have them there, the Sticky mod's **show sticky-note windows on the taskbar** setting (Control Panel → Mods) gives every open note a button too, applied live to notes already open.
 
 - **Click** a button to focus and raise that window. If the window is minimized, clicking it restores it; if it lives on another workspace, Browserland switches to that workspace first. Clicking the button of the window that is **already focused and on top minimizes it** — so the same button toggles a window in and out of view.
+- A button marked **↗** is a terminal opened in its own browser window (*Open in new window*): clicking it brings that browser window to the front instead of restoring it. A button marked **⇄** is a terminal another device controls; its tooltip names the device. See [[Window-Types]].
 - **Right-click** a button for per-window actions:
 
 | Action | Effect |

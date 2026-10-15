@@ -1,5 +1,7 @@
 Browserland has two "hold-to-snap" gestures that move a window between the [[floating and tiling layouts|Window-Modes]] just by dragging and pausing: you can **snap** a floating window into the tiling grid, or **pop** a tiled window back out to a float. Each gesture also has a one-click shortcut on the title-bar [[right-click menu|Context-Menus]].
 
+> Looking to move a terminal into a separate browser window? That is **Open in new window** on the title-bar menu — see [[Window-Types]]. On this page, *pop out* means turning a tiled window back into a floating one inside the desktop.
+
 Both gestures share a single timer — the **drag hold delay** (the *dwell*). You start a drag, hold the window still long enough, and the window arms the gesture.
 
 ## Snap a floating window into the grid
