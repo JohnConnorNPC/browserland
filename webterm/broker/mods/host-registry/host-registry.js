@@ -372,12 +372,22 @@
                 // 'local', which is browser-local and would collide on pull).
                 // This is always the PLAINTEXT value; sealing (if any) happens
                 // after, in sealTokens/sealAll.
+                //
+                // #254: a host reached THROUGH this broker ("from server", #252)
+                // is never published, ticked or not. Its url is the peer's own
+                // origin, which this browser does not dial, so an entry would
+                // arrive in a pulling browser as a DIRECT host at that address --
+                // carrying its token, with Include passwords, to whatever that
+                // address is on the puller's network. The test is written inline
+                // (core hostIsProxied's exact rule) because the node harnesses
+                // run this range without core.
                 function buildValue(selected, includeTokens, localUrl) {
                     const hosts = [];
                     for (const sel of selected) {
                         if (!sel.checked) continue;
                         if (hosts.length >= REG_MAX_HOSTS) break;
                         const h = sel.host;
+                        if (h && h.via === 'server') continue;
                         let e;
                         if (h.id === 'local') {
                             const origin = normalizeHostUrl(localUrl) || '';
@@ -1154,7 +1164,8 @@
                     const value = buildValue(selected, includeTokens, localUrl);
                     if (!value.hosts.length) {
                         showNotice('Nothing to publish — no shareable hosts '
-                            + 'selected (a loopback-only local address is skipped).');
+                            + 'selected (from-server hosts and a loopback-only '
+                            + 'local address are skipped).');
                         return;
                     }
                     const mode = encMode();

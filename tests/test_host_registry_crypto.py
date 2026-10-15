@@ -333,6 +333,67 @@ CASES.forget_on_encrypted = async () => {
     };
 };
 
+// --- #254: a from-server host is never published ----------------------------
+// Every row TICKED, so only buildValue's own rule decides. `p*` rows are
+// reached through this broker (via:'server'); `d*` rows are direct controls,
+// including the shapes a loose rule would wrongly catch (peer fields without
+// via, a via that is not exactly 'server').
+const TOKEN_P = 'TOKEN-PPP-proxied-peer-secret';
+function fromServerMatrix(withTokens) {
+    const row = (host) => ({ checked: true, host: host });
+    return buildValue([
+        row({ id: 'local', label: 'this broker', via: 'server', brokerId: 'BR-LOCAL-ROW' }),
+        row({ id: 'ps', label: 'peer', url: 'http://192.168.1.50:4445',
+              via: 'server', peerId: 'b', peerOrigin: 'http://192.168.1.50:4445',
+              token: TOKEN_P }),
+        row({ id: 'pn', label: 'no peer id', url: 'http://10.0.0.7:4445',
+              via: 'server', token: TOKEN_P }),
+        row({ id: 'ph', label: 'hidden peer', url: 'http://10.0.0.8:4445',
+              via: 'server', peerId: 'c', hidden: true, token: TOKEN_P }),
+        row({ id: 'd1', label: 'direct', url: 'https://one.example:4445',
+              color: '#112233', brokerId: 'BR-ONE', token: TOKEN_A }),
+        row({ id: 'dh', label: 'hidden direct', url: 'https://two.example:4445',
+              hidden: true }),
+        row({ id: 'dp', label: 'peer fields, no via', url: 'https://three.example:4445',
+              peerId: 'x', peerOrigin: 'https://three.example:4445' }),
+        row({ id: 'dj', label: 'junk via', url: 'https://four.example:4445',
+              via: 'SERVER' }),
+        row({ id: 'dd', label: 'direct via', url: 'https://five.example:4445',
+              via: 'direct' }),
+    ], !!withTokens, 'https://me.example:4445');
+}
+function matrixReport(v) {
+    return {
+        ids: v.hosts.map(h => h.id),
+        keys: v.hosts.map(h => Object.keys(h).sort()),
+        hidden: v.hosts.map(h => h.hidden),
+        wire: JSON.stringify(v),
+    };
+}
+CASES.from_server_tokens = async () => matrixReport(fromServerMatrix(true));
+CASES.from_server_plain = async () => matrixReport(fromServerMatrix(false));
+CASES.from_server_only = async () => matrixReport(buildValue([
+    { checked: true, host: { id: 'ps', label: 'peer', url: 'http://192.168.1.50:4445',
+                             via: 'server', peerId: 'b', token: TOKEN_P } },
+], true, ''));
+// The cap counts EMITTED entries: skipped from-server rows before the cap
+// must not use up the room direct rows are entitled to.
+CASES.from_server_cap = async () => {
+    const sel = [];
+    for (let i = 0; i < REG_MAX_HOSTS; i++) {
+        sel.push({ checked: true, host: { id: 'p' + i, url: 'http://10.1.0.' + i + ':4445',
+                                          via: 'server', peerId: 'b' } });
+    }
+    for (let i = 0; i < REG_MAX_HOSTS + 1; i++) {
+        sel.push({ checked: true, host: { id: 'd' + i,
+                                          url: 'https://d' + i + '.example:4445' } });
+    }
+    const v = buildValue(sel, false, '');
+    return { cap: REG_MAX_HOSTS, n: v.hosts.length,
+             proxied: v.hosts.filter(h => h.id.startsWith('p')).length,
+             last: v.hosts.length ? v.hosts[v.hosts.length - 1].id : null };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -558,3 +619,48 @@ def test_forget_passwords_works_on_an_encrypted_registry_with_no_passphrase(harn
     assert plain["v"] == 1 and plain["hosts"] == 3 and not plain["anyToken"]
     assert TOKEN_A not in plain["wire"]
     assert plain["hasTokensAfter"] is False
+
+
+# ---- #254: a from-server host is never published ---------------------------
+
+TOKEN_P = "TOKEN-PPP-proxied-peer-secret"
+_DIRECT_IDS = ["d1", "dh", "dp", "dj", "dd"]
+_BASE_KEYS = ["color", "hidden", "id", "label", "url"]
+
+
+def _assert_from_server_matrix(r, with_tokens):
+    # Every row was ticked: only buildValue's rule removed the from-server
+    # ones -- with a peer id, without one, hidden, and even a 'local' record
+    # carrying the flag. The direct controls all survive in order.
+    assert r["ids"] == _DIRECT_IDS
+    assert TOKEN_P not in r["wire"], "a from-server host's token was published"
+    for gone in ("192.168.1.50", "10.0.0.7", "10.0.0.8", "BR-LOCAL-ROW",
+                 "me.example"):
+        assert gone not in r["wire"]
+    # Routing fields never ride along, not even on a direct row that had them.
+    for field in ('"via"', '"peerId"', '"peerOrigin"'):
+        assert field not in r["wire"]
+    d1 = sorted(_BASE_KEYS + ["brokerId"] + (["token"] if with_tokens else []))
+    assert r["keys"] == [d1] + [_BASE_KEYS] * 4, "the direct entry shape changed"
+    assert r["hidden"] == [False, True, False, False, False]
+    assert (TOKEN_A in r["wire"]) is with_tokens
+
+
+def test_a_from_server_host_is_never_published_with_passwords(harness):
+    _assert_from_server_matrix(run(harness, "from_server_tokens"), True)
+
+
+def test_a_from_server_host_is_never_published_without_passwords(harness):
+    _assert_from_server_matrix(run(harness, "from_server_plain"), False)
+
+
+def test_a_list_of_only_from_server_hosts_publishes_nothing(harness):
+    r = run(harness, "from_server_only")
+    assert r["ids"] == [] and TOKEN_P not in r["wire"]
+
+
+def test_skipped_from_server_hosts_do_not_use_up_the_cap(harness):
+    r = run(harness, "from_server_cap")
+    assert r["proxied"] == 0
+    assert r["n"] == r["cap"], "direct rows lost room to skipped from-server rows"
+    assert r["last"] == "d%d" % (r["cap"] - 1)

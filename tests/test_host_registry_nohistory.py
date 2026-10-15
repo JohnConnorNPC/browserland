@@ -64,7 +64,8 @@ globalThis.hostById = (id) => HOSTS.find(h => h.id === id) || null;
 globalThis.strictHex = (v) => v;
 globalThis.normalizeHostUrl = (u) => String(u);
 globalThis.mintHostId = () => 'minted';
-globalThis.showNotice = () => {};
+const notices = [];
+globalThis.showNotice = (t) => { notices.push(String(t)); };
 globalThis.srcLabel = (h) => (h && (h.label || h.id)) || 'unknown';
 globalThis.PROBE_MS = 8000;
 globalThis.withDeadline = async (p, _ms, fallback) => {
@@ -214,6 +215,41 @@ CASES.capability_shapes = async () => {
     return { out: out, puts: puts.slice() };
 };
 
+// #254, end to end through the REAL doPublish (inside the executed range):
+// every row ticked, publish-to-all on, passwords included. Whatever each
+// broker stores -- the from-server broker itself included, which is only a
+// place the list is kept -- must hold neither the from-server host nor its
+// token. And a list holding nothing else publishes nothing, and says why.
+const TOKEN_P = 'TOKEN-PPP-proxied-peer-secret';
+const FLEET = () => [
+    { id: 'local', label: 'this broker', brokerId: 'BR-ME' },
+    { id: 'd1', label: 'direct', url: 'https://one.example:4445', token: 'SECRET-D' },
+    { id: 'pp', label: 'peer', url: 'http://192.168.1.50:4445', via: 'server',
+      peerId: 'b', peerOrigin: 'http://192.168.1.50:4445', token: TOKEN_P },
+];
+CASES.publish_all_skips_from_server = async () => {
+    reset(FLEET());
+    INFO.local = 'modern'; INFO.d1 = 'modern'; INFO.pp = 'modern';
+    notices.length = 0;
+    await doPublish(HOSTS.map(h => ({ host: h, checked: true })), true,
+                    'https://me.example:4445', true);
+    const stored = {};
+    for (const hid of Object.keys(STORE)) {
+        stored[hid] = JSON.stringify(STORE[hid].value);
+    }
+    return { putTo: puts.map(p => p.host), stored: stored,
+             ids: Object.keys(STORE).map(hid =>
+                 ((STORE[hid].value || {}).hosts || []).map(h => h.id)) };
+};
+CASES.publish_only_from_server = async () => {
+    reset([FLEET()[0], FLEET()[2]]);
+    INFO.local = 'modern'; INFO.pp = 'modern';
+    notices.length = 0;
+    await doPublish([{ host: HOSTS[1], checked: true }], true, '', true);
+    return { puts: puts.slice(), infoCalls: infoCalls.slice(),
+             notices: notices.slice() };
+};
+
 (async () => {
     const name = process.argv[2];
     const fn = CASES[name];
@@ -303,3 +339,22 @@ def test_every_uncertain_capability_answer_is_a_no(harness):
         assert r[hid]["capable"] is False, hid
         assert r[hid]["why"], f"{hid} must say why"
     assert "host not found" in r["ghost"]["why"]
+
+
+def test_publish_to_all_stores_no_from_server_host_anywhere(harness):
+    """#254 through the real doPublish: every broker written (the from-server
+    one included -- where the list is KEPT is out of scope) holds the direct
+    hosts and not the from-server one or its token."""
+    r = run(harness, "publish_all_skips_from_server")
+    assert sorted(r["putTo"]) == ["d1", "local", "pp"]
+    for hid, wire in r["stored"].items():
+        assert "TOKEN-PPP-proxied-peer-secret" not in wire, hid
+        assert "192.168.1.50" not in wire, hid
+    assert r["ids"] == [["BR-ME", "d1"]] * 3
+
+
+def test_a_from_server_only_publish_sends_nothing_and_says_why(harness):
+    r = run(harness, "publish_only_from_server")
+    assert r["puts"] == [] and r["infoCalls"] == []
+    assert any("from-server hosts" in n and "Nothing to publish" in n
+               for n in r["notices"]), r["notices"]
