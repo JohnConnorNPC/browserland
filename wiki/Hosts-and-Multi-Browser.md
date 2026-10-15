@@ -107,7 +107,7 @@ Find it in **Control Panel → Browser → Broker registry**, just below the Hos
 
 ## Mods on a broker
 
-Which mods run is normally **your browser's** choice: **Control Panel → this broker → Mods** lists everything installed and you tick what you want. The pane also does more than tick boxes now: **Install a mod…** and **Uninstall**, a badge marking each row shipped or installed, and a preview of an install with its advisory warnings — see [[Installing-Mods]]. The enable choice itself and that choice stays in the browser you made it in. On a setup with several brokers that means the same decision has to be made again in every browser you sit at.
+Which mods run is normally **your browser's** choice: **Control Panel → this broker → Mods** lists everything installed and you tick what you want. The pane also does more than tick boxes now: **Install a mod…** and **Uninstall**, a badge marking each row shipped or installed, and a preview of an install with its advisory warnings — see [[Installing-Mods]]. The enable choice itself stays in the browser you made it in. On a setup with several brokers that means the same decision has to be made again in every browser you sit at.
 
 Each host tab therefore also has a **Mods on this broker** section — including the tab of a *remote* broker. It lists the mods **that** broker serves, each with three states:
 
@@ -170,7 +170,7 @@ The profile color sits between the per-window and per-host colors in the order o
 
 A quick-launch of the START (**+**) button — a plain left-click by default — launches a terminal on your **default host**, using that host's own default terminal profile. Pick which host that is in **Control Panel → Browser → Hosts** with the **Default** button on that host's row; the current default is marked with a **default** badge and its own button is disabled. The local **this broker** is selectable too and is the default when you have not chosen one — so leaving it unset behaves exactly as before. (The button's picker menu still lets you launch on any host regardless of this setting.)
 
-If the default host — or, with no default chosen, this broker — **hosts no terminals** (`terminals: false`), quick-launch never picks another host for you: it opens a dialog saying why, and you pick a host in the launch menu or set a default here. In the launch menu such a broker's row reads `terminals off — launches nothing here` instead of listing profiles, and its launch profiles cannot be edited from the Control Panel.
+If the default host — or, with no default chosen, this broker — **hosts no terminals** (`terminals: false`), quick-launch never picks another host for you: it opens a dialog saying why, and you pick a host in the launch menu or set a default here. In the launch menu such a broker's row reads `terminals off — launches nothing here` instead of listing profiles, and its launch profiles cannot be edited from the Control Panel. While START would launch nowhere, no row carries the **default** badge.
 
 If you delete the host that was your START default, it falls back to **this broker** automatically, so the button keeps working. When the chosen host needs a password, quick-launching START surfaces its login prompt just like opening the host directly. Note that remote host identities are specific to the browser where you added them, so a non-local START default is only meaningful in that browser; other browsers fall back to launching locally.
 
