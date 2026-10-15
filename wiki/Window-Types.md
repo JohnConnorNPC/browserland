@@ -97,6 +97,6 @@ How a window goes away depends on its type:
 
 - **Close** is soft, but what it preserves varies. A terminal's shell keeps running so you can reattach later. A non-empty sticky note is retained and reopens from **Closed notes** in the **+** menu (an empty note is discarded). A text editor's content lives in a file on the host, so closing it (after the save prompt) leaves your file intact. A file manager, the task manager, and the Control Panel/help are ephemeral — closing them just dismisses them.
 - **Terminate** (terminals only) hard-kills the shell process tree.
-- **Delete** (on note and editor windows — not the file manager, task manager, Control Panel, or help — shown as *Delete note* / *Delete file*) permanently discards that window and its stored document.
+- **Delete** (on sticky notes, the Scratchpad and the text editor, shown as *Delete note* / *Delete file*) asks to confirm. On a sticky note it discards the note's text, which lives in this browser; on the text editor it closes the editor and discards unsaved text; the file on disk is not touched; on the Scratchpad it only closes the window, and the notes stay on the broker, so reopening the Scratchpad brings them back.
 
 These actions live on the title-bar right-click menu. For the full semantics — plus minimize, pin, recolor, rename, and arrange-all — see [[Floating-Window-Controls]].
