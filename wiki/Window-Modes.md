@@ -43,7 +43,7 @@ For column widths, moving and focusing columns, and ejecting a window into its o
 
 You don't have to switch the whole desktop to move a single window between styles:
 
-- **Snap a floating window into the strip**, or **pop a tiled window out to a float**, using the hold-to-snap and pop-out drag gestures — see [[Snapping and Pop-out|Snapping-and-Pop-out]].
+- **Snap a floating window into the strip**, or **pop a tiled window out to a float**, using the hold-to-snap and pop-out drag gestures (with a mouse or pen; a touch drag on a title bar does nothing) — or, without dragging, with **Tile this window** / **Float this window** on the window's title-bar right-click menu (see [[Context-Menus]]) — see [[Snapping and Pop-out|Snapping-and-Pop-out]].
 - Inside tiling mode, organize windows into **tabs, splits, and rows** by dragging them onto each other — see [[Arranging Windows|Arranging-Windows]].
 
 ## Related pages
