@@ -268,7 +268,8 @@ every id-taking tool routes on the `"<host>:…"` prefix. The single
 **Scopes.** Several MCP clients can share one broker without seeing each other's
 windows: a server started with `--scope projA` (or `BROWSERLAND_MCP_SCOPE`, or a
 per-host `"scope"`) sees only the windows tagged `projA`, while a server with no
-scope keeps the admin view of everything. A window that server launches is
+scope sees every window that isn't `off`. The **admin credential** (below) goes
+further: every window, `off` and every scope included. A window that server launches is
 tagged for it and starts in `readwrite`; tag a hand-started one from its robot
 button or title-bar menu. **Control Panel → Access → MCP access → Copy
 .mcp.json** writes a ready-to-save client file for a scope. A scope is a
@@ -294,6 +295,13 @@ Access is layered and opt-in — nothing is reachable until you turn it on:
   survives broker restarts). `off` hides a window entirely; `read` allows
   observation; `readwrite` additionally allows `send_input`.
 - **`allow_launch`** is a separate gate for `launch_terminal`.
+- **`allow_desktop`** (default off) gates `get_desktop` / `arrange_window` /
+  `workspaces`, which are relayed to the browser holding the active lease.
+- An optional **MCP admin credential** (Control Panel → Access → MCP access →
+  admin token, or `WEB_TERMINAL_MCP_ADMIN_TOKEN`; the client passes it via
+  `--admin-token` / `BROWSERLAND_MCP_ADMIN_TOKEN`) lets one agent see and retag
+  every window and change the broker-wide knobs. Like scopes it separates
+  well-behaved agents; it is not a sandbox.
 - The **MCP token** is a bearer secret distinct from the browser `auth_token`
   (the UI password): the **broker** pins it with `WEB_TERMINAL_MCP_TOKEN` (or the
   `webterm_mcp.json` sidecar), and the **MCP client** passes the same secret via
@@ -422,7 +430,7 @@ too, behind **Include developer docs**.
 |---|---|
 | **Start here** | [Home](wiki/Home.md) · [Getting Started](wiki/Getting-Started.md) · [Keyboard Shortcuts](wiki/Keyboard-Shortcuts.md) |
 | **Building layouts** | [Window Modes](wiki/Window-Modes.md) · [Arranging Windows](wiki/Arranging-Windows.md) · [Columns & Widths](wiki/Columns-and-Widths.md) · [Snapping & Pop-out](wiki/Snapping-and-Pop-out.md) · [Floating Window Controls](wiki/Floating-Window-Controls.md) |
-| **The desktop** | [Workspaces](wiki/Workspaces.md) · [Taskbar](wiki/Taskbar.md) · [Context Menus](wiki/Context-Menus.md) · [Window Types](wiki/Window-Types.md) |
+| **The desktop** | [Workspaces](wiki/Workspaces.md) · [Taskbar](wiki/Taskbar.md) · [Context Menus](wiki/Context-Menus.md) · [Window Types](wiki/Window-Types.md) · [Themes & Appearance](wiki/Themes-and-Appearance.md) · [Installing Mods](wiki/Installing-Mods.md) |
 | **Multi-host & AI** | [Hosts & Multi-Browser](wiki/Hosts-and-Multi-Browser.md) · [MCP & AI Agents](wiki/MCP-and-AI-Agents.md) |
 | **For developers** | [Setup & Onboarding](wiki/Setup-and-Onboarding.md) · [Launch Profiles](wiki/Launch-Profiles.md) · [Writing a Mod](wiki/Writing-a-Mod.md) · [Technical Reference](wiki/Technical-Reference.md) · [Upgrading](wiki/Upgrading.md) |
 
@@ -435,9 +443,10 @@ or a coding agent.
 
 Upgrading an existing install? **[`wiki/Upgrading.md`](wiki/Upgrading.md)** is
 the breaking-change record — what changed, whether it affects you, and how to
-recover. Most recently: **a token is now required on every connection,
-including loopback (#142)**, which strands terminals launched by a previously
-tokenless broker.
+recover. Most recently: a broker that relays to peers needs `websockets` 15+
+(the `proxy` extra, #252), and broker roles add an opt-in `terminals: false`
+(#253). It also keeps the token-on-every-connection change (#142), which
+strands terminals launched by a previously tokenless broker.
 
 What changed in a release, and roughly what came before it, is in
 **[`CHANGELOG.md`](CHANGELOG.md)** — the most recent cycle itemized, earlier
