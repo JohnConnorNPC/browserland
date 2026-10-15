@@ -383,6 +383,7 @@ pip install -e ".[windows]"            # + pywinpty (Windows PTY backend)
 pip install -e ".[pyte]"               # + pyte (tier-2 snapshot rendering)
 pip install -e ".[procs]"              # + psutil (task manager, agent badge, live cwd)
 pip install -e ".[mcp]"                # + the stdio MCP server (Python ≥ 3.10)
+pip install -e ".[proxy]"              # + httpx, websockets 15 (the "from server" peer proxy, #252)
 pip install -e ".[dev]"                # + pytest for the test suite
 ```
 

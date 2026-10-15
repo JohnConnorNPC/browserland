@@ -436,7 +436,7 @@ operator names each peer in `broker_config.json`:
   peers **and** the proxy extra).
 * **The `proxy` extra.** The upstream clients are `httpx` and `websockets`
   15 or later (its asyncio client, for the [sockets](#sockets)), installed by
-  `pip install webterm[proxy]`; core stays `websockets` 12 or later +
+  `pip install -e ".[proxy]"` from the checkout; core stays `websockets` 12 or later +
   `sanic`. One check covers HTTP and sockets: a broker that names peers
   without both logs one line naming what is missing
   (`peer proxy unavailable: install webterm[proxy]: websockets 13.1 < 15; …`)
