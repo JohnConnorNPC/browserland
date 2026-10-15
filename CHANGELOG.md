@@ -16,6 +16,33 @@ story behind anything named below.
 
 ### Added
 
+- **Update check, apply and restart from the desktop** (#182, #183, #184,
+  #185, #187, #205). The **Update check** mod (off by default) adds a taskbar
+  chip and an **Update check** window that compares every configured broker
+  with upstream on GitHub, each broker by itself (one row per broker, with the
+  reason any broker could not be checked). Turning the mod on is the consent
+  for the serving broker to check, apply and restart, for each of those three
+  gates its `broker_config.json` does not already own (`update_check_enabled`,
+  `update_apply_enabled`, `restart_enabled`; a present key pins its gate);
+  the window's **Allow this broker to update itself** row grants or stops apply
+  and restart together. Every behind broker's row, remote ones included,
+  carries its own **Update…** button: a confirm naming that broker, its commit
+  range and what its restart costs its sessions, then `POST /update/apply`
+  (`git fetch` of the previewed commit + `git merge --ff-only`, hooks off) and
+  a restart. Manual only — no schedule, no auto-install. `python -m
+  webterm.broker` is now a supervisor that relaunches its worker on an
+  intentional exit 75 (sentinel-checked, crash-budgeted, rolled back to the
+  prior commit if the new code never comes up); `GET /info` reports
+  `restart.available`, `mechanism` and `bootId`. See
+  [`wiki/Technical-Reference.md`](wiki/Technical-Reference.md) → *Update
+  apply* and *Broker restart*.
+- **The Control Panel is an applet grid** (#181). The single long scroll became
+  a Browser tab plus one tab per host, each opening on a grid of applets —
+  Desktop, Windows, Input, Terminals, Startup, Access, Mods, Advanced — with a
+  filter box over every section and a **Show everything** switch back to one
+  flat list (remembered in this browser only). An applet only appears on a tab
+  where it has something to show. See
+  [`wiki/Getting-Started.md`](wiki/Getting-Started.md).
 - **MCP agents can read and arrange the desktop, and manage workspaces**
   (#244). A new `allow_desktop` switch (Control Panel → Access → MCP access, or an
   admin's `set_mcp_knobs`; default off, master switch for the whole relay,
@@ -143,6 +170,15 @@ story behind anything named below.
 
 ### Fixed
 
+- **Delete note / Delete file only appears where a window opts in** (#186).
+  The menu item used to be guarded by a denylist of the four window kinds that
+  existed when it was written, so newer ephemeral windows showed it too. A
+  window kind now opts in with a `deleteLabel` (sticky notes, the Scratchpad
+  and the text editor do); every other window's menu ends at Close.
+- **The Update window reflects a policy change at once** (#188). A grant or
+  stop that moved the restart gate re-reads that broker's `/info`, so the
+  Restart button stops lagging the switch, and an older write's answer can no
+  longer overwrite a newer one's view.
 - **The wiki now describes what ships.** An accuracy pass corrected roughly
   twenty claims, among them: the (+) menu's order (it is window-kind
   registration order) and its labels (SVG icons, not emoji); `Undo` being the
