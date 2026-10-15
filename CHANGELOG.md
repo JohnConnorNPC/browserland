@@ -239,7 +239,10 @@ story behind anything named below.
   a browser that pulled the list dialled that address itself and, on another
   network, could send the token to a different machine. Such hosts are now
   never published, whatever their tick, and the Publish dialog shows them
-  greyed out with *from server: not published*.
+  greyed out with *from server: not published*. A list published before this
+  fix may still hold such a host as a direct entry, with its token if *Include
+  passwords* was on: publish again to replace it, and rotate that token if the
+  host's address is an IP or LAN name.
 - **A phone taking over no longer leaves the desktop silently locked out**
   (#248, #249, #251). The desktop's lease socket now pings with a nonce and a
   10 s pong deadline and replaces a dead socket make-before-break, so a
