@@ -205,9 +205,11 @@ Its hidden-broker rule is the **opposite** of the host badge's, on purpose. Abov
 
 The **Update check** window shows an **Update…** button when the broker is behind upstream and update apply is available. Clicking it applies the previewed commit, then restarts the broker to run the new code. Applying an update is **manual-trigger only** — no schedule, no auto-install — and it requires three gates on the broker: checking, applying, and restarting.
 
+Since #205 **every behind broker's row** in the window carries its own **Update…** button, remote rows included. It drives *that* broker's own update: the confirm dialog names it and shows its own commit range, count and compare link and what *its* restart costs its sessions (or says the impact is unknown). A remote row's button is greyed with that broker's own gate words, and a broker too old to accept a remote update says so ("predates remote updates — update that broker by hand").
+
 Each gate is granted from one of two places, and only one at a time owns it. On the same window, two rows do the granting:
 
-- **Enable checking on this broker** grants `update_check_enabled` — turning the update mod on for the first time asks for this automatically, on the broker serving the page.
+- **Enable checking on this broker** grants `update_check_enabled` — turning the update mod on for the first time asks for this automatically on the broker serving the page, together with the two gates below, for each gate its config does not already own.
 - **Allow this broker to update itself** grants `update_apply_enabled` and `restart_enabled` **together**, since applying without being able to restart would just leave the old code running. **Stop** on this row gives back only those two — checking stays on, so the window keeps reporting what's available.
 
 Either row can instead go **dead and name a config key** — an operator who puts `update_check_enabled`, `update_apply_enabled`, or `restart_enabled` in that broker's `broker_config.json` (`true` or `false`, either way) takes that one gate out of the GUI's hands entirely; only editing the file changes it from then on, and nothing granted from the window can escalate past it. A gate the config hasn't named stays the window's to grant, so a fresh install with no config overrides leaves all three to a human click.

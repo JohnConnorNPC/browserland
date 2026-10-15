@@ -105,4 +105,4 @@ After an update applies and the broker restarts, the **last deploy** outcome is 
 
 ## What this does not claim
 
-The working tree is not inspected: build ids carry no dirty-tree marker, so uncommitted local changes are invisible and the report reflects your last commit only. The comparison is taken from the serving broker; each remote broker's own comparison would be the same repository read hours apart and is not particularly useful.
+The working tree is not inspected: build ids carry no dirty-tree marker, so uncommitted local changes are invisible and the report reflects your last commit only. Each broker is compared with upstream by that broker itself, so one row can be current while another is behind; the upstream build is shown once because it is the same for every row.

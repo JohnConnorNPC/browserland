@@ -42,7 +42,7 @@ A handful of shipped mods start disabled and have to be switched on yourself, un
 |---|---|
 | Clipboard | Clipboard history can carry secrets, so nothing is captured until you opt in |
 | AI status | Checking providers' status pages exposes the broker's egress IP to those hosts |
-| Update check | The broker also needs its own operator-set switch before it will reach GitHub at all |
+| Update check | It makes the broker contact GitHub; ticking it is your consent for the serving broker to check for updates and to apply one and restart itself, for each of those gates its config does not already own (a config key can pin any gate either way) |
 | Terminal font | An opt-in setting rather than something everyone needs on |
 
 Turning one on is the same as enabling any other mod — tick its checkbox in the Mods pane.
