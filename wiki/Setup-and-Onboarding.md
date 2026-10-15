@@ -139,8 +139,9 @@ Goal: one browser tab showing terminals from every machine.
    **from server · <id>** on the host's row in Control Panel → Browser → Hosts.
    See [[Hosts-and-Multi-Browser#reaching-a-broker-through-this-one]].
 
-Broker status lives in the taskbar: a single broker gets its own chip, always
-(green ok / red down / amber password-needed / blue lease-inactive; the chip
+Broker status lives in the taskbar: a single broker gets its own chip (shown
+always by default; Control Panel → Desktop → **Broker status chip** can limit
+it to "Only when a broker needs attention" or "Never") (green ok / red down / amber password-needed / blue lease-inactive; the chip
 doubles as its hide toggle), while two or more collapse into one aggregate
 badge — the worst state colors it, and clicking it opens the start (+) menu
 where every broker has a live status row carrying those same actions.
