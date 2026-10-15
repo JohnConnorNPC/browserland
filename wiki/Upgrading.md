@@ -46,13 +46,15 @@ launching agent change that window's scope and mode later (`set_window`,
 
 **Who is affected.** A broker with `allow_launch` on whose operator relied on
 `default_mode` (say `read`) to cap what agents can do in the terminals they
-launch: those terminals are now drivable by their launcher. With
+launch **unscoped and without a `mode`**: those terminals are now drivable by
+their launcher. Scoped launches already started in `readwrite`. With
 `allow_launch` off (the default) nothing changes.
 
 **What to do.** If launched windows must start read-only, have the agent pass
-`mode: "read"`, set the window's mode from its robot button (a browser edit
-also clears the launch handle, so the agent cannot change it back), or turn
-`allow_launch` off.
+`mode: "read"`, or turn `allow_launch` off. Setting the window's mode from its
+robot button only revokes write access after the launch (the window comes up
+drivable first); a browser edit also clears the launch handle, so the agent
+cannot change it back.
 
 ---
 
@@ -112,14 +114,17 @@ the layout. Keep a copy of `webterm_state.json` if you plan to roll back.
 `Authorization: Bearer <token>` on every HTTP call, never in the query string.
 Only WebSocket dials (a browser cannot set headers on them) and the first
 `?token=` deep link still carry it in a URL, and the deep link is scrubbed from
-the address bar on load. Cross-origin hosts now cost one `OPTIONS` preflight
-per host per day (`Access-Control-Max-Age: 86400`).
+the address bar on load. Cross-origin requests may now need `OPTIONS`
+preflights, which a browser caches; the broker advertises a maximum age of
+86400 seconds (`Access-Control-Max-Age`).
 
 **Who is affected.** Anyone fronting a broker with a reverse proxy that strips
 or rewrites the `Authorization` header, or that does not pass `OPTIONS`
 through: every host behind it then looks like a wrong password, and the login
-overlay keeps coming back. Scripts are unaffected — the broker still accepts
-`?token=` and `?auth=` as well as the header.
+overlay keeps coming back. Scripts calling a broker's own routes are
+unaffected — those still accept `?token=` and `?auth=` as well as the header —
+but the `/peer/<id>/…` relay (#252) takes the hub's token in the
+`Authorization` header only.
 
 **What to do.** Make the proxy forward the `Authorization` header unchanged and
 let `OPTIONS` requests through. See [[Technical-Reference#auth-model]].
