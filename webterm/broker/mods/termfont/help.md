@@ -1,6 +1,6 @@
 The Terminal font setting picks the font every terminal renders with, in place of the built-in monospace default.
 
-The mod ships **disabled by default** — turn it on first in **Control Panel → Mods**, which then adds the **Terminal font** setting to **Control Panel → Desktop**. The choice is browser-global, so it applies to every terminal on every host you drive from this browser.
+The mod ships **disabled by default** — turn it on first in **Control Panel → Mods**, which then adds the **Terminal font** setting to **Control Panel → Desktop**. The choice reaches every terminal on every host, and applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host.
 
 ## The choices
 

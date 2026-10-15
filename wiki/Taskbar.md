@@ -70,7 +70,7 @@ By default:
 
 ### Swapping the click gestures
 
-If you open the picker more often than you use the one-click default, turn on **Control Panel → Desktop → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches your default host's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
+If you open the picker more often than you use the one-click default, turn on **Control Panel → Desktop → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches your default host's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host.
 
 ### Open in folder…
 
@@ -102,4 +102,4 @@ The host-status area shows a chip for your broker (or one aggregate badge once y
 
 A broker **you hid yourself** never counts as needing attention, so parking one you don't want right now keeps the chip quiet in attention mode. Nothing becomes unreachable when the chip is gone: right-click the **+** button and every broker is listed with its state and its log-in / take-over / un-hide action, and the same hide toggle is a checkbox on each host's row under Control Panel → Browser → Hosts. Attention mode is also deliberately slow to fire — a broker has to miss two polls (about four seconds) before it counts as down, so a single dropped poll never makes the chip flicker into view.
 
-The setting follows the browser you are sitting at rather than any one host, and is shared with other browsers viewing the same broker. See [[Hosts-and-Multi-Browser]] for what each chip state means.
+The setting is shown on the local broker's tab and applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host. See [[Hosts-and-Multi-Browser]] for what each chip state means.

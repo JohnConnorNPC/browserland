@@ -1,6 +1,6 @@
 The Background pattern setting paints a subtle repeating texture on the desktop, behind the taskbar strip and every floating window. Its colors are drawn from the active color scheme, so switching Color scheme repaints the pattern to match rather than leaving it in stale colors.
 
-Find it in **Control Panel → Desktop → Background pattern**. Like Color scheme, the choice is browser-global — it applies to every host you drive from this browser.
+Find it in **Control Panel → Desktop → Background pattern**. Like Color scheme, the choice applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host.
 
 ## The six options
 

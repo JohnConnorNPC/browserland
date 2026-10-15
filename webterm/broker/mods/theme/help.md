@@ -1,6 +1,6 @@
 The Color scheme setting recolors the desktop's chrome — backgrounds, text, and the accent color used for focus and highlights — using one of five built-in schemes. It never touches how a terminal's own program colors its output; a terminal keeps rendering whatever the shell or the program running in it sets, regardless of which scheme is picked here.
 
-Find it in **Control Panel → Desktop → Color scheme**. The choice is browser-global, so it applies to every host you drive from this browser rather than being set per host.
+Find it in **Control Panel → Desktop → Color scheme**. The choice applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host.
 
 ## The five schemes
 

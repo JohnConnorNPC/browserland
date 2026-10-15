@@ -109,7 +109,7 @@ If you switch workspaces from the keyboard, **Hide the workspace pager from the 
 
 Everything the dots could do is still reachable: the workspace menu (right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar) switches, adds, renames, and removes workspaces, and the shortcuts above switch. Turn the setting back off and the pager returns with its workspaces unchanged.
 
-Like the other two, this setting follows the browser you set it from, and every browser viewing the same broker converges on it.
+Like the other two, this setting is shown on the local broker's tab and applies to every browser viewing this broker: it is saved with the broker that serves the page (its /state), not per host.
 
 ## Workspaces over MCP
 

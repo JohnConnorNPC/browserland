@@ -6,4 +6,4 @@ The chip aggregates the worst indicator across the providers you have enabled: g
 
 If the broker itself has status checks switched off, the chip and window say so plainly instead of showing four unreachable providers — that is a broker-side setting an operator flips, not something wrong with any provider. The window offers the switch right where the refusal is shown — "Switch on status checks on this broker" — and granting it repaints immediately, with no reload needed.
 
-The mod's Control Panel → Mods section has a checkbox per provider (so you can monitor only the ones you use) and a poll-interval selector (30 seconds to 5 minutes). Those settings are browser-global, shared across every host you drive from this browser.
+The mod's Control Panel → Mods section has a checkbox per provider (so you can monitor only the ones you use) and a poll-interval selector (30 seconds to 5 minutes). Those settings apply to every browser viewing this broker: they are saved with the broker that serves the page (its /state), not per host.

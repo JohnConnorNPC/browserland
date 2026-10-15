@@ -1,4 +1,4 @@
-Browserland's look comes from three independent mods: a **color scheme**, a **background pattern**, and the **terminal font**. All three are configured from the [[Control Panel|Getting-Started]]'s **Desktop** applet, and all three are browser-global — they follow the browser you are sitting at, not any one broker, so they stay the same across every host you connect to from here.
+Browserland's look comes from three independent mods: a **color scheme**, a **background pattern**, and the **terminal font**. All three are configured from the [[Control Panel|Getting-Started]]'s **Desktop** applet, and all three apply to every browser viewing this broker: they are saved with the broker that serves the page (its /state), not per host, so they stay the same across every host you connect to from here.
 
 ## Color scheme
 
