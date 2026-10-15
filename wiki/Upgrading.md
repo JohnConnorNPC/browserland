@@ -106,6 +106,26 @@ the layout. Keep a copy of `webterm_state.json` if you plan to roll back.
 
 ---
 
+## The token travels in an `Authorization` header (#144)
+
+**What changed.** The page sends the broker token as
+`Authorization: Bearer <token>` on every HTTP call, never in the query string.
+Only WebSocket dials (a browser cannot set headers on them) and the first
+`?token=` deep link still carry it in a URL, and the deep link is scrubbed from
+the address bar on load. Cross-origin hosts now cost one `OPTIONS` preflight
+per host per day (`Access-Control-Max-Age: 86400`).
+
+**Who is affected.** Anyone fronting a broker with a reverse proxy that strips
+or rewrites the `Authorization` header, or that does not pass `OPTIONS`
+through: every host behind it then looks like a wrong password, and the login
+overlay keeps coming back. Scripts are unaffected — the broker still accepts
+`?token=` and `?auth=` as well as the header.
+
+**What to do.** Make the proxy forward the `Authorization` header unchanged and
+let `OPTIONS` requests through. See [[Technical-Reference#auth-model]].
+
+---
+
 ## A token is required on every connection, including loopback (#142)
 
 **This breaks tokenless installs.** It cannot not break them — the whole point
@@ -138,8 +158,11 @@ There is no loopback exemption and no opt-out.
 The only unauthenticated responses are `GET /` (the token is typed *into* that
 page, and auth is query/header-only with no cookies — gating the document would
 401 every reload, bookmark and new tab forever), `GET /help-corpus.json`, and
-the `OPTIONS` preflights, which carry no credentials by design. `/mcp/*` keeps
-its own separate `mcp_token` realm.
+the `OPTIONS` preflights, which carry no credentials by design — plus two added
+later, `GET /vendor/*` (#143) and `GET /mods/<id>/<gen>/<name>` (#163), which a
+`<script src>` must load before any token exists. `/mcp/*` keeps its own
+separate `mcp_token` realm. See [[Technical-Reference#auth-model]] for the
+current table.
 
 **A fresh install still works with one command.** With nothing configured the
 broker mints its own token into `webterm_token.json` beside its state store and
