@@ -7,8 +7,8 @@ of them ships in the repo, under `webterm/broker/mods/` (the README lists them),
 and a broker can also be handed one at runtime through `POST /mods/install`.
 
 This document is the authoring contract. It is derived from
-`webterm/broker/86_js_mod_loader.js`, `86a_js_mod_settings_text.js`,
-`86b_js_mod_packages.js`, `ui.py`, `modinstall.py` and `help_corpus.py` — when
+`webterm/broker/86_js_mod_loader.js` and its `86a`–`86p` companion fragments,
+`ui.py`, `modinstall.py` and `help_corpus.py` — when
 this file and those disagree, **they are right and this is stale**; please fix
 it.
 
@@ -388,7 +388,8 @@ Consequences you will hit:
   declared. A new mod file that is not in `_MODS` fails CI; so does a stray
   scratch copy left in a mod directory.
 - The CSP is `script-src 'sha256-<hash of the inline script>' 'self';
-  frame-ancestors 'none'`. The hash is computed from the very bytes served, so
+  frame-ancestors 'none'` (a broader policy from #190 is also sent Report-Only
+  while it soaks; it is not enforced). The hash is computed from the very bytes served, so
   adding a mod moves it automatically — but it also means the page must have
   exactly **one** inline `<script>`, and `ui.inline_script_hash` raises when the
   app is built if that stops being true.
@@ -456,8 +457,8 @@ bumping it.
   <integer version>}`, of the `ctx` surface this build's loader actually hands
   you — e.g. `{file: 1, serverStore: 1, windows: 1, settings: 1, theme: 1, …}`.
   It exists so a mod can ask "does this build offer X" directly instead of
-  sniffing loader-private names the way `mod-sync` currently does (`typeof
-  _pin`, `typeof _modTextOk`). Additive on `ctxVersion` 1 like everything else
+  sniffing loader-private names the way `mod-sync` used to (`typeof
+  _pin`). Additive on `ctxVersion` 1 like everything else
   on this page — feature-detect it (`ctx.capabilities &&
   ctx.capabilities.theme`) before reading it on a build old enough to predate
   it. The map is built lazily on first read and then frozen: your copy cannot
@@ -602,16 +603,19 @@ All five are read-through accessors onto the **shared `/state` settings blob**
 (not namespaced localStorage), so a value syncs across your browsers, and all
 five return `{get, set, onChange}`. `opts` carries `label`, `title`, `def`
 (`boolean` takes its default as the second argument instead), `isBrowserGlobal`
-(default true — hidden on remote-host tabs) and `mount` (`'mods'`, the default
-per-host pane, or `'browser'`, beside the Hosts list). Reads are
+(default true — hidden on remote-host tabs) and `mount` — `'browser'` (beside the Hosts list), or a Control Panel
+applet id: `desktop`, `windows`, `input`, `terminals`, `startup`, `access`,
+`mods` or `advanced`. Absent or unrecognised → `mods`. An applet placement
+keeps a mod badge on the section so the source stays attributed. Reads are
 **non-destructive**: nothing writes the default back.
 
 **A malformed options list no longer kills the mod (#203).** `radio` /
 `select` / `combo` throwing on an empty, invalid or duplicate-valued options
 list used to disable init, and with it the *whole* mod — a single bad
 computed list nuking a mod's every other feature was disproportionate, and
-`mods/clock/clock.js` shipped its own defensive `zones` dedup for exactly
-this reason (still there today; not removed by this change). Instead the
+`mods/clock/clock.js` once carried its own defensive `zones` dedup for
+exactly this reason; it was removed under #209 once a malformed suggestions
+list stopped being fatal. Instead the
 accessor comes back **degraded**:
 
 ```js
@@ -784,7 +788,8 @@ Nine shipped mods used to hand-build the same ~30-field app-window scaffold: a
 iterated core state to find its own windows. Core now owns all of that; a mod
 supplies only what is specific to *its* window. `mods/clipboard/clipboard.js`
 is the worked example — it shipped as the reference migration alongside this
-API, and its old scaffold, `CLIP_WIN_ID` hack included, is gone.
+API, and its hand-built scaffold is gone (the `CLIP_WIN_ID` constant survives
+only as the default id for a create with no stored record).
 
 ```js
 const h = ctx.windows.createAppWindow({
@@ -848,7 +853,7 @@ past its window's death (or past a *later* window reusing the same id) is
 inert, not lethal.
 
 **`singleton: true`** formalizes the open-or-focus hack every windowed mod
-re-derived by hand (clipboard's old `CLIP_WIN_ID`). With it, `id` defaults to
+re-derived by hand (the hand-rolled open-or-focus id check). With it, `id` defaults to
 the stable `'app:' + kind`, and a create call **dedupes on `kind`** over
 every *live* window in the core `windows` Map — not just the windows this
 mod's own registry already knows about, because core's unknown-kind restore
@@ -2170,8 +2175,11 @@ ctx.settings.describe('branchStyle');          // own-mod shorthand
 ctx.helpCards.list();               // the sanitized typed-span card DATA
 ```
 
-These replace the `window.__mods` scraping that `mods/mod-sync` and `mods/help`
-do today. **`window.__mods` is a test fixture, not a contract** — it is the
+These replace the `window.__mods` scraping the shipped mods used to do:
+`mods/help` now reads cards through `ctx.helpCards.list()` (the raw registry
+only as a fallback) and `mods/mod-sync` reads pins through `ctx.mods.pinOf`;
+mod-sync still walks `__mods.registered` / `settingToggles` and is the
+remaining scraper. **`window.__mods` is a test fixture, not a contract** — it is the
 loader's own mutable bag, and it carries live records (unload arrays, control
 `read`/`reflect`/`onChange` closures, live DOM sections). Reading it reaches
 into core's internals and pins every field of them as a de-facto API.
@@ -2402,15 +2410,15 @@ here is install-only.
    assets. You edit a fragment, reload, see nothing change, and the instinct
    is to suspect the edit. It is almost always this.
 2. **`INDEX_HTML` is built once, at import** (`ui.py`'s `assemble()`, held at
-   module scope rather than per-request — `ui.py:619`, `INDEX_HTML =
-   assemble()`). A fragment edit on disk is invisible to an already-running
+   module scope rather than per-request — `INDEX_HTML = assemble()` in
+   `ui.py`). A fragment edit on disk is invisible to an already-running
    broker; it needs a restart. Before debugging anything else, `curl` the
    page you are testing against and `grep` for the string you just edited —
    if it is not there, you are looking at stale bytes, not a bug. This one
    check saves more time than everything after it combined.
 3. **Navigate with the auth token and `?nomods=1`.** The flag makes
    `loadMods()` return before it fetches or inits a single mod
-   (`86b_js_mod_packages.js:38-43`, `_nomodsRequested`) — zero catalog
+   (`_nomodsRequested` in `86b_js_mod_packages.js`) — zero catalog
    fetches, zero `registerMod` calls, a clean desktop with nothing riding on
    load order or another mod's side effects. Start every test page here, not
    on the real desktop with 19 shipped mods already up.
@@ -2423,7 +2431,7 @@ here is install-only.
        init(ctx) { /* … */ },
    });
    ```
-   `run` is a thin call onto `initMod` (`86_js_mod_loader.js:2432`) — the
+   `run` is a thin call onto `initMod` (`__test.run` in `86_js_mod_loader.js`) — the
    exact function real boot and a live install both call. There is no
    separate "test mode" `initMod` to drift out of sync with the real one; a
    fixture that passes here passes for the reason production code would
