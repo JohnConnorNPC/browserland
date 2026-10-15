@@ -204,10 +204,13 @@ browser that loads its page. The desktop ships with nineteen:
 | `aistatus` | AI-provider status chip + window | off |
 | `clipboard` | rolling history of copies/pastes made through the desktop | off |
 | `termfont` | terminal font picker | off |
+| `update` | taskbar update chip + **Update check** window: is each configured broker current with upstream, with a per-broker **Update…** button | off |
 
 `clipboard` and `aistatus` are off by default on principle — clipboards carry
 secrets, and status polling talks to third-party endpoints; `git` and
-`termfont` are simply opt-in preferences. Enabling any of them is one click
+`termfont` are simply opt-in preferences; `update` is off because turning it
+on is the consent for that broker to check, apply and restart (see the mod's
+help). Enabling any of them is one click
 in the Mods pane.
 
 ## MCP & AI agent access

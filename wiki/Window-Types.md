@@ -36,7 +36,8 @@ Each terminal title bar carries a per-window **robot button** that sets that win
 Two more chips can appear in a terminal's title bar, both ambient — neither is a button:
 
 - a **git branch badge** showing the branch that terminal's working directory is on, with a
-  marker when the tree is dirty (from the Git mod);
+  marker when the tree is dirty (from the **Git status** mod, which ships **off** — enable it
+  under Control Panel → Mods);
 - a **🖱 mouse-mode chip**, shown for exactly as long as a full-screen program owns the mouse
   (`lazygit`, `btop`, `mc`). Its tooltip carries the escape gesture. It comes from the Mouse mode
   chip mod, which ships **enabled** — see [[Keyboard-Shortcuts]].
