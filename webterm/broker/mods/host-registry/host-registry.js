@@ -4,11 +4,14 @@
         // opening the cockpit from another browser, or clearing local data, loses
         // it. This mod is a LAYER on top: it writes the list to a broker's server
         // store (ctx.serverStore -> /mod-store/host-registry) so another browser
-        // can PULL it back. The broker only STORES the list — it never proxies;
-        // every browser still connects DIRECTLY to each broker exactly as before.
+        // can PULL it back. The broker only STORES a copy of the list and relays
+        // nothing for the registry; how this browser reaches each broker
+        // (directly, or "from server" through the broker serving the page, #252)
+        // is not changed by it.
         //
         // Model:
-        //   publish  - write this browser's hosts to a broker's registry
+        //   publish  - write this browser's hosts to a broker's registry (never
+        //              a from-server host, #254)
         //   pull     - read a registry and merge per-entry, with a diff so a local
         //              url/token override is never silently clobbered
         //   publish-to-all - route the same snapshot to every configured broker
@@ -378,16 +381,22 @@
                 // origin, which this browser does not dial, so an entry would
                 // arrive in a pulling browser as a DIRECT host at that address --
                 // carrying its token, with Include passwords, to whatever that
-                // address is on the puller's network. The test is written inline
-                // (core hostIsProxied's exact rule) because the node harnesses
-                // run this range without core.
+                // address is on the puller's network.
+                //
+                // hostFromServer is the ONE rule for buildValue and the publish
+                // dialog. It restates core hostIsProxied (56) because the node
+                // harnesses run this range without core; a parity test holds the
+                // two to the same answer.
+                function hostFromServer(h) {
+                    return !!(h && h.via === 'server');
+                }
                 function buildValue(selected, includeTokens, localUrl) {
                     const hosts = [];
                     for (const sel of selected) {
                         if (!sel.checked) continue;
                         if (hosts.length >= REG_MAX_HOSTS) break;
                         const h = sel.host;
-                        if (h && h.via === 'server') continue;
+                        if (hostFromServer(h)) continue;
                         let e;
                         if (h.id === 'local') {
                             const origin = normalizeHostUrl(localUrl) || '';
@@ -1847,7 +1856,7 @@
                                 // unticked, so a missing host is explained rather
                                 // than silently absent. buildValue skips it
                                 // anyway; this only keeps the dialog honest.
-                                const off = !!(h && h.via === 'server');
+                                const off = hostFromServer(h);
                                 const r = mkRowCheck(h.id === 'local'
                                     ? 'this broker' : (h.label + ' — ' + h.url),
                                     !off);
@@ -2196,7 +2205,8 @@
                     desc.textContent = 'Share this browser\'s broker list through '
                         + 'the broker so you can recover it in another browser or '
                         + 'after clearing local data. The list stays browser-local; '
-                        + 'the broker only stores a copy and never proxies.';
+                        + 'the broker only stores a copy and relays nothing '
+                        + 'for the registry.';
                     wrap.appendChild(desc);
                     const row = document.createElement('div');
                     row.className = 'set-row hostreg-actions';

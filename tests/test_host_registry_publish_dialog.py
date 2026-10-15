@@ -9,7 +9,8 @@ passes on to the real ``buildValue``.
 
 The stub browser and the model range are imported from
 ``test_host_registry_crypto`` (module level there is constants and source
-text only), so there is no second copy of either to drift.
+text only), so there is no second copy of either to drift. Core's own
+``hostIsProxied`` is sliced from 56_js_hosts.js for the parity check.
 """
 
 import json
@@ -23,7 +24,14 @@ from tests.test_host_registry_crypto import (
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 CSS = MOD_JS.with_name("host-registry.css")
+MOD_JSON = MOD_JS.with_name("mod.json")
+HELP_MD = MOD_JS.with_name("help.md")
+CORE_HOSTS = MOD_JS.parents[2] / "56_js_hosts.js"
 NOTE = "from server: not published"
+# The FLEET rows (driver below) the dialog must grey out: via exactly 'server',
+# with a peer id, without one, and hidden. Every other row is a direct control.
+PROXIED = ["pp", "pn", "ph"]
+DIRECT = ["local", "d1", "dp", "dj", "dd", "ds"]
 
 
 def _between(src, start, end):
@@ -40,6 +48,15 @@ def _dialog_source():
                      "// A real type=password field")
             + _between(src, "async function openPublishDialog() {",
                        "async function openPullDialog() {"))
+
+
+def _core_predicate_source():
+    """Core's hostIsProxied, verbatim, renamed so it sits beside the mod's."""
+    fn = _between(CORE_HOSTS.read_text(encoding="utf-8"),
+                  "function hostIsProxied(h) {",
+                  "// The words every identity surface appends")
+    return fn.replace("function hostIsProxied(h) {",
+                      "function coreHostIsProxied(h) {") + "\n"
 
 
 _STUBS = _CRYPTO_HARNESS.split("__MODEL__")[0]
@@ -67,11 +84,21 @@ function el(tag) {
 globalThis.document = { createElement: el };
 
 const TOKEN_P = 'TOKEN-PPP-proxied-peer-secret';
+// The same edge rows as the crypto matrix, through the dialog this time.
 const FLEET = [
     { id: 'local', label: 'this broker', brokerId: 'BR-ME' },
     { id: 'd1', label: 'direct', url: 'https://one.example:4445', token: 'SECRET-D' },
     { id: 'pp', label: 'peer', url: 'http://192.168.1.50:4445', via: 'server',
       peerId: 'b', token: TOKEN_P },
+    { id: 'pn', label: 'no peer id', url: 'http://10.0.0.7:4445', via: 'server',
+      token: TOKEN_P },
+    { id: 'ph', label: 'hidden peer', url: 'http://10.0.0.8:4445', via: 'server',
+      peerId: 'c', hidden: true, token: TOKEN_P },
+    { id: 'dp', label: 'peer fields, no via', url: 'https://three.example:4445',
+      peerId: 'x', peerOrigin: 'https://three.example:4445' },
+    { id: 'dj', label: 'junk via', url: 'https://four.example:4445', via: 'SERVER' },
+    { id: 'dd', label: 'direct via', url: 'https://five.example:4445', via: 'direct' },
+    { id: 'ds', label: 'spaced via', url: 'https://six.example:4445', via: ' server' },
 ];
 globalThis.getHosts = () => FLEET;
 globalThis.encPublishHint = () => 'hint';
@@ -94,7 +121,8 @@ doPublish = async (...args) => { CAPTURED = args; };
 
 function rowsOf(c) {
     const list = c.children.find(n => n.className === 'hostreg-list');
-    return list.children.map(r => ({
+    return list.children.map((r, i) => ({
+        id: FLEET[i].id,
         text: r.children[1].textContent,
         checked: r.children[0].checked,
         disabled: r.children[0].disabled,
@@ -106,6 +134,17 @@ function rowsOf(c) {
 }
 
 (async () => {
+    if (process.argv[2] === 'parity') {
+        // The mod's rule against core's, row by row, and what buildValue
+        // actually leaves out of a fully ticked list.
+        const v = buildValue(FLEET.map(h => ({ host: h, checked: true })), false,
+                             'https://me.example:4445');
+        console.log(JSON.stringify({
+            rows: FLEET.map(h => [h.id, hostFromServer(h), coreHostIsProxied(h)]),
+            ids: v.hosts.map(h => h.id),
+        }));
+        return;
+    }
     FORCE = process.argv[2] === 'forced';
     await openPublishDialog();
     const sel = CAPTURED[0];
@@ -124,8 +163,8 @@ function rowsOf(c) {
 @pytest.fixture(scope="module")
 def harness(tmp_path_factory):
     path = tmp_path_factory.mktemp("hostreg-dialog") / "harness.js"
-    path.write_text(_STUBS + _model_source() + _dialog_source() + _DRIVER,
-                    encoding="utf-8")
+    path.write_text(_STUBS + _model_source() + _dialog_source()
+                    + _core_predicate_source() + _DRIVER, encoding="utf-8")
     return path
 
 
@@ -141,23 +180,45 @@ def run(harness, mode):
 
 def test_a_from_server_row_is_greyed_unticked_and_says_why(harness):
     r = run(harness, "plain")
-    pp = r["rows"][2]
-    assert pp["text"] == "peer — http://192.168.1.50:4445"
-    assert pp["checked"] is False and pp["disabled"] is True
-    assert pp["off"] is True
-    assert pp["tags"] == [NOTE]
-    assert "through this broker" in pp["title"]
+    rows = {row["id"]: row for row in r["rows"]}
+    assert rows["pp"]["text"] == "peer — http://192.168.1.50:4445"
+    for hid in PROXIED:
+        row = rows[hid]
+        assert row["checked"] is False and row["disabled"] is True, hid
+        assert row["off"] is True, hid
+        assert row["tags"] == [NOTE], hid
+        assert "through this broker" in row["title"], hid
     # ...and that is what the dialog hands on.
-    assert r["passed"] == [["local", True], ["d1", True], ["pp", False]]
+    assert r["passed"] == [[row["id"], row["id"] not in PROXIED]
+                           for row in r["rows"]]
 
 
 def test_direct_rows_are_untouched(harness):
     r = run(harness, "plain")
-    for row in r["rows"][:2]:
-        assert row["checked"] is True and row["disabled"] is False
-        assert row["off"] is False and row["tags"] == [] and row["title"] == ""
-    assert [row["text"] for row in r["rows"][:2]] == [
-        "this broker", "direct — https://one.example:4445"]
+    rows = {row["id"]: row for row in r["rows"]}
+    assert sorted(rows) == sorted(PROXIED + DIRECT)
+    for hid in DIRECT:
+        row = rows[hid]
+        assert row["checked"] is True and row["disabled"] is False, hid
+        assert row["off"] is False and row["tags"] == [], hid
+        assert row["title"] == "", hid
+    assert rows["local"]["text"] == "this broker"
+    assert rows["d1"]["text"] == "direct — https://one.example:4445"
+
+
+def test_the_mod_rule_matches_core_and_is_what_publish_leaves_out(harness):
+    """Parity: the mod's hostFromServer and core's hostIsProxied give the same
+    answer on every row, and buildValue leaves out exactly the rows core calls
+    proxied. A core change that diverges (say, a case-insensitive match) reds
+    here rather than letting the dialog and the publish disagree with the
+    Hosts row."""
+    r = run(harness, "parity")
+    for hid, mod, core in r["rows"]:
+        assert mod == core, f"{hid}: mod says {mod}, core says {core}"
+    core_proxied = [hid for hid, _mod, core in r["rows"] if core]
+    assert core_proxied == PROXIED
+    published = ["local" if i == "BR-ME" else i for i in r["ids"]]
+    assert published == [hid for hid, _mod, core in r["rows"] if not core]
 
 
 def test_the_intro_names_from_server_hosts_not_proxying(harness):
@@ -167,16 +228,34 @@ def test_the_intro_names_from_server_hosts_not_proxying(harness):
 
 
 def test_a_forced_tick_still_publishes_no_from_server_host(harness):
-    """Defence in depth: tick every box from script, the disabled one
-    included. The model rule (buildValue) still leaves it out."""
+    """Defence in depth: tick every box from script, the disabled ones
+    included. The model rule (buildValue) still leaves them out."""
     r = run(harness, "forced")
-    assert ["pp", True] in r["passed"], "the forced tick did not take"
-    assert r["ids"] == ["BR-ME", "d1"]
+    assert all(checked for _hid, checked in r["passed"]), \
+        "the forced tick did not take"
+    assert r["ids"] == ["BR-ME"] + DIRECT[1:]
     assert "TOKEN-PPP-proxied-peer-secret" not in r["wire"]
 
 
 def test_the_greyed_row_is_styled_dim():
+    """A SOURCE PIN, not rendered state: the fake DOM has no cascade, so this
+    only proves the rule exists with the dim colour."""
     css = CSS.read_text(encoding="utf-8")
     rule = css[css.index(".hostreg-off"):]
     rule = rule[:rule.index("}")]
     assert "color: var(--fg-dim)" in rule
+
+
+def test_no_registry_text_still_claims_it_never_proxies():
+    """A SOURCE PIN (#254 round 1). Since #252 a host can be reached through
+    the broker serving the page, so "never proxies -- every browser connects
+    directly" is false. The settings-pane hint says what is true: the broker
+    stores a copy and relays nothing for the registry."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    pane = _between(src, "function renderPane() {", "wrap.appendChild(desc);")
+    assert "the broker only stores a copy and relays nothing " in pane
+    assert "'for the registry.';" in pane
+    for path in (MOD_JS, MOD_JSON, HELP_MD):
+        text = path.read_text(encoding="utf-8")
+        assert "never proxies" not in text, path.name
+        assert "connects directly" not in text, path.name
