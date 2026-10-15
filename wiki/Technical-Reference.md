@@ -1021,7 +1021,7 @@ a scoped host it reads `/mcp/info`, and it refuses every call to that host with
 ### The MCP admin credential (`X-Browserland-Mcp-Admin`) — #245
 
 One designated agent can manage the whole MCP surface on the owner's behalf.
-Admin is **its own secret** — `mcp_admin_token`, minted in Control Panel → MCP
+Admin is **its own secret** — `mcp_admin_token`, minted in Control Panel → Access → MCP
 access (generate = mint/rotate, clear = remove), pinnable with env
 **`WEB_TERMINAL_MCP_ADMIN_TOKEN`** (same rules as the token pin: env wins, the
 value never reaches disk, UI edits are disabled) — and it is **unset by
