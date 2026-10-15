@@ -1,10 +1,11 @@
 # Terminal funnels: the write / input / resize enumeration (#201, A57)
 
-This is the **funnel-completeness precondition** for issue #201. Before
-recorder's `term.write` / `term.resize` patches (`mods/recorder/recorder.js:534-535`,
-`:636-641`) may be declared replaceable by `info.tapOutput` / `info.onResize`,
-the paths by which bytes reach a terminal — or leave it for the wire — have to be
-*enumerated from the shipped source*, not assumed. This document is that
+This was the **funnel-completeness precondition** for issue #201: before
+recorder's old `term.write` / `term.resize` patches could be replaced by
+`info.tapOutput` / `info.onResize` (they now are; recorder subscribes through
+`info.tapOutput`, `info.onResize` and `info.tapInput`), the paths by which bytes
+reach a terminal — or leave it for the wire — had to be *enumerated from the
+shipped source*, not assumed. This document is that
 enumeration; `tests/test_ui_assets.py` pins it mechanically (see "The gate",
 below), so it cannot rot into a stale hand-written list.
 
@@ -61,9 +62,11 @@ So an input tap placed on `sendChunked` sees **every** input byte core sends;
 a tap on `onData` alone would miss the hand-bracketed ConPTY path.
 
 Not terminal traffic, listed so the classification is exhaustive:
-`64_js_sessions_poll_control.js` sends `{type:'ping'}` and
-`{type:'become_active'}` control frames on session sockets. Those carry no
-terminal bytes and are not part of the input funnel.
+`64_js_sessions_poll_control.js` sends `{type:'become_active'}` (`rec.ws.send`)
+and, through `desktopWsSend` (`ws.send`), the nonce'd `{type:'ping', n}` (#248)
+and the `desktop_result` replies to relayed desktop ops (#244), all on the
+`/control` lease socket. None of these carry terminal bytes or go out on a
+terminal socket, so they are not part of the input funnel.
 
 ## Resize
 
