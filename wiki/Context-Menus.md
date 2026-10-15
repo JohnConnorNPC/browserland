@@ -74,7 +74,7 @@ Click any tab to switch to that window. Tabs and untabbing are explained on [[Ar
 
 Each open window has a taskbar button. Left-click focuses and raises it (or restores it if minimized). Right-click for per-window actions:
 
-- **Focus** — switch to the window's workspace, restore it if minimized, and raise it. This works even for a closed or parked window (it reopens it).
+- **Focus** — bring the window into view and raise it, restoring it if minimized: a tiled window takes you to its workspace, a floating one is brought to the workspace you are on (a closed window reopens on its own workspace). This works even for a closed or parked window (it reopens it).
 - **Restore** / **Minimize** — bring a minimized window back, or hide it.
 - **Close** — soft close, same as the title-bar menu.
 - **Terminate** (terminals only) — hard-kill the shell, even on a parked session (asks to confirm).

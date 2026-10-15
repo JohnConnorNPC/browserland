@@ -29,7 +29,7 @@ Each open window has a button on the taskbar — except sticky notes, which by d
 
 | Action | Effect |
 |---|---|
-| Focus | Switch to the window's workspace (if needed) and raise it, restoring it if minimized |
+| Focus | Bring the window into view and raise it, restoring it if minimized: a tiled window takes you to its workspace, a floating one is brought to the workspace you are on (a closed window reopens on its own workspace) |
 | Minimize / Restore | Hide the window to the taskbar, or bring it back |
 | Close | Soft-close the window (a terminal's shell keeps running; a non-empty sticky note reopens from the **+** menu; a text editor keeps its file on disk) |
 | Terminate | Terminals only — hard-kill the shell process tree |

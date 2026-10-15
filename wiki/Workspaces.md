@@ -60,7 +60,7 @@ The split is deliberate. A floating window can be picked up and moved anywhere, 
 
 This applies to every way of launching: the **+** menu, the keyboard shortcut, and the app's own button or chip.
 
-Clicking a window's **taskbar** item behaves the same way, with one addition — it also un-minimizes, and clicking the item of the window you are already focused on minimizes it.
+Clicking a window's **taskbar** item is different: it always takes you to the window's workspace, floating or tiled (a window on all workspaces stays where it is), then focuses it, un-minimizing it if needed. Clicking the item of the window you are already focused on minimizes it.
 
 **Closing a window forgets its workspace.** Reopen it later and it opens on whichever workspace you are on, like anything else newly opened. Reloading the page is different: nothing is closed, so every window comes back on the workspace it was on.
 
