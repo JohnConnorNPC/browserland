@@ -5,7 +5,7 @@ Browserland ships a set of default keyboard shortcuts for the actions you use mo
 All shortcuts are user-rebindable in **Control Panel → Input → Keybindings**. Open the [[Control Panel|Getting-Started]] (right-click the + button and choose **Control panel**, or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), find the action you want, and record a new combo for it.
 
 - To change a binding, press that action's **Set** button and then the combination you want; **Clear** removes the binding. Only **Ctrl / Alt / Meta** combinations are accepted, so ordinary typing still reaches the terminal.
-- Keyboard shortcuts are part of the per-host settings (a tab per broker), so a host can carry its own bindings.
+- Bindings are stored per host (a tab per broker), but the page only obeys the bindings of the broker it was loaded from (the local tab). Editing a remote host's tab changes what you get when you open that broker's own page.
 
 The in-app guide (the "?" chip at the bottom-right of the taskbar) also injects one **Keyboard shortcuts** entry per bindable action, showing its current combo or "Unbound" — handy for checking what is mapped right now.
 
@@ -17,7 +17,7 @@ A few keys inside a terminal are fixed rather than rebindable: `Ctrl+Shift+C` co
 
 **Copy and paste into a terminal.** Selecting text with the mouse copies it the moment you release the button — there is no copy key to press. `Ctrl+Shift+C` is the explicit chord for the same thing, and it exists because plain `Ctrl+C` is left alone so it can still interrupt whatever is running. To paste, use your browser's paste shortcut (`Ctrl+V`, or `Cmd+V` on macOS), `Ctrl+Shift+V`, or right-click. Right-click pastes directly on an https or `localhost` page, though a browser may ask you to confirm the first time; on a plain-http LAN origin (`http://192.168.1.10:4445`) the browser refuses to hand the page your clipboard at all, so right-click is left alone and opens the browser's own menu, with its **Paste** entry, instead. The keyboard paste works on both, because there the text arrives *with* the keypress rather than being read out of the clipboard — as does any other browser paste action, including paste-as-plain-text, since terminal input is plain text either way. A multi-line paste goes in as one block rather than as separate lines, so a pasted command is not submitted at its first newline.
 
-**Copying from inside a full-screen program.** A program with its own copy key — tmux copy-mode, Neovim, `lazygit`, a pager — cannot reach your laptop's clipboard directly, so it asks the terminal to do it for it. Browserland can honour that request, but it is **off by default** and you turn it on **per host**, under **Control Panel → that host's tab → Input → Clipboard (OSC 52)**. The reason it is off is that everything downstream of the terminal can send this request: not just the program you are using, but a `cat` of a hostile file, a dependency's build output, or an SSH session to a machine you don't own — and the clipboard it would write is on the computer you are sitting at, not on the remote host. Enabling it for your own broker is a small step; enabling it for a box you don't control is a real one, which is why each host is a separate switch. The switch is stored in **this browser only** and never travels to a broker, so a broker cannot turn it on for itself.
+**Copying from inside a full-screen program.** A program with its own copy key — tmux copy-mode, Neovim, `lazygit`, a pager — cannot reach your laptop's clipboard directly, so it asks the terminal to do it for it. Browserland can honour that request, but it is **off by default** and you turn it on **per host**, under **Control Panel → that host's tab → Input → Clipboard (OSC 52)**. The reason it is off is that everything downstream of the terminal can send this request: not just the program you are using, but a `cat` of a hostile file, a dependency's build output, or an SSH session to a machine you don't own — and the clipboard it would write is on the computer you are sitting at, not on the remote host. Enabling it for your own broker is a small step; enabling it for a box you don't control is a real one, which is why each host is a separate switch. Editing a host's URL turns the switch back off, and so does switching a host between **direct** and **from server**, or re-pairing it (see [[Hosts-and-Multi-Browser]]). The switch is stored in **this browser only** and never travels to a broker, so a broker cannot turn it on for itself.
 
 Once it is on, a copy still needs the page to be on https or `localhost`, the window focused, and the copy to have followed something you actually did in the front terminal — a copy request that arrives while you are in another tab is dropped. Every refusal says so, and so does every accepted copy, naming the terminal it came from. Copies are capped at 1 MiB and are refused whole rather than truncated. A few deliberate limits worth knowing: text that is not valid UTF-8, or that contains control characters, is refused rather than silently mangled; in Neovim `"+y` works but `"*y` does not, because the browser has one clipboard and no separate X11 primary selection to write; and a program can never *read* your clipboard this way — that request is refused outright and is not behind any setting. tmux emits the request out of the box; Neovim needs `set clipboard+=unnamedplus` with its OSC 52 provider, or an explicit `vim.g.clipboard` OSC 52 block.
 
@@ -61,7 +61,7 @@ The table below lists every bindable action and its **default** binding. Rebind 
 
 ## What the actions do
 
-The table above is authoritative. The notes below group the actions so you know where each one applies.
+The default bindings are listed above; in the in-app guide, the live **Keyboard shortcuts** entries show what each action is bound to right now. The notes below group the actions so you know where each one applies.
 
 ### Columns (tiling mode)
 
@@ -79,7 +79,7 @@ New terminal launches the **local broker's** default profile; on a broker with t
 
 ### App-wide
 
-Toggle tiling mode switches between floating and tiling (see [[Window Modes|Window-Modes]]). Toggle fullscreen, Open control panel, and Toggle help round out the global actions — Toggle help is unbound until you assign it a combo.
+Toggle tiling mode switches between floating and tiling (see [[Window Modes|Window-Modes]]). Toggle fullscreen, Open control panel, and Toggle help round out the global actions — Toggle help is unbound until you assign it a combo. Toggle help comes from the **Help** mod, so it leaves the list if you turn Help off.
 
 ## See also
 
