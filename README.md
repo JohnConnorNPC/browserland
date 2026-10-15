@@ -242,6 +242,11 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 | `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
 | `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` required when multiple hosts are configured |
+| `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | `POST /mcp/window` | retag or re-mode a window this server launched (its launch handle), or any window with the admin credential (#243/#245) |
+| `get_desktop(host?)` | `GET /mcp/desktop` | the lease-holding browser's desktop layout; needs `allow_desktop` (#244) |
+| `arrange_window(id, op, …)` | `POST /mcp/desktop` | focus / move column / set width / tile / float / set geometry / tab into / split, applied by the lease-holding browser; needs `allow_desktop` |
+| `workspaces(host, op, …)` *(admin)* | `POST /mcp/desktop` | list / add / rename / remove / switch / send-window; needs `allow_desktop` too |
+| `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` *(admin)* | `POST /mcp/knobs` | the broker-wide knobs; never the tokens or `enabled` |
 
 **Multi-host.** Pass `--hosts` (or `$BROWSERLAND_MCP_HOSTS`) a JSON array of
 `{name, url, token}` descriptors to serve N brokers from one server process;

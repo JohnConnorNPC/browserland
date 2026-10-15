@@ -1721,8 +1721,11 @@ curl -s -X POST $B/mcp/launch -H "Authorization: Bearer $TOK" \
 A ready-to-run MCP server lives in [`webterm/mcptool/`](../webterm/mcptool/) — a
 thin stdio wrapper that maps each endpoint above to an MCP tool (`mcp_info`,
 `list_terminals`, `list_profiles`, `read_screen`, `send_input`, `send_keys`,
-`set_pace`, `reset_terminal`, `flush_input`, `launch_terminal`). It connects to
-the broker over HTTP and authenticates with the MCP token.
+`set_pace`, `reset_terminal`, `flush_input`, `launch_terminal`, `set_window`
+(#243), `get_desktop` and `arrange_window` (#244), plus `set_mcp_knobs` and
+`workspaces`, which are registered only when a host's `/mcp/info` answers
+`admin: true` (#245)). It connects to the broker over HTTP and authenticates
+with the MCP token.
 
 ```bash
 pip install -e ".[mcp]"                      # needs Python >=3.10 (the mcp SDK)

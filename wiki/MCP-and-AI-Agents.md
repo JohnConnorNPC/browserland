@@ -115,6 +115,7 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `get_desktop(host?)` | Reads a browser desktop: every window's layout, the viewport, the workspaces when the mod is on. Needs `allow_desktop`; without `host`, one snapshot (or error entry) per configured host |
 | `arrange_window(id, op, …)` | Focus, move column, set width, tile/float, set floating geometry, tab into, split — on the lease-holding browser. Needs `allow_desktop`; a non-admin may arrange only windows it can see |
 | `workspaces(host, op, …)` | **Admin only.** List/add/rename/remove/switch/send-window over the desktop's workspaces. Needs `allow_desktop` too |
+| `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` | **Admin only.** Changes the broker-wide knobs (`POST /mcp/knobs`): the default window mode, the launch gate and the desktop relay switch. The MCP token, the admin token and `enabled` stay browser-only |
 
 ### Window ids
 
