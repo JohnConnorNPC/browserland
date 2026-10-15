@@ -72,6 +72,13 @@ Every save **applies immediately** — the live launcher swaps and the next laun
 (and the `+` picker) uses the new set, no broker restart. A profile whose
 `command[0]` isn't found on `PATH` is flagged **⚠ not found**.
 
+**A broker with `terminals: false`** (a hub started with `--no-terminals`)
+launches nothing: `POST /launch`, `POST /mcp/launch`, `POST /profiles/config`
+and `GET /profiles/detect` answer 403 `terminals_disabled`, and its Launch
+profiles section says *This broker hosts no terminals (terminals: false), so
+its launch profiles cannot be edited here.* `GET /profiles` and
+`GET /profiles/config` still answer, so other pages can see what it offers.
+
 ## Security model
 
 Editing profiles means defining commands the host will run, so the editor is
@@ -81,6 +88,9 @@ token, on every interface, no exceptions. The endpoints:
 - `GET /profiles/config` / `POST /profiles/config` — the **full** objects
   (commands included). Browser realm only.
 - `GET /profiles/detect` — the environment scan. Browser realm only.
+- On a `terminals: false` broker, `POST /profiles/config` and
+  `GET /profiles/detect` answer 403 `terminals_disabled` (after the token
+  check, before the body is read).
 - `GET /profiles` and `GET /mcp/profiles` — **names only**, unchanged. An MCP/AI
   agent can list profile *names* to launch, but can never read a command or
   define a new profile.

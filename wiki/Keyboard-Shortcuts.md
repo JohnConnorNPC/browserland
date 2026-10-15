@@ -75,7 +75,7 @@ These seven come from the **Workspaces** mod (enabled by default), so they leave
 
 ### Windows
 
-New terminal launches the **local broker's** default profile. Close focused window and Minimize focused window act on the front window. Open terminal in new window moves the front terminal into a browser window of its own (see [[Window-Types]]); it is unbound until you assign it a combo, because browsers only allow a popup from a key press or click. Fit focused window to this screen and Fit all windows to this screen give terminals this screen's size back (see [[Context-Menus]]); both are unbound by default.
+New terminal launches the **local broker's** default profile; on a broker with terminals off (`terminals: false`) it opens a *Cannot launch* notice (*hosts no terminals (terminals: false) — launch on another host*) instead. Close focused window and Minimize focused window act on the front window. Open terminal in new window moves the front terminal into a browser window of its own (see [[Window-Types]]); it is unbound until you assign it a combo, because browsers only allow a popup from a key press or click. Fit focused window to this screen and Fit all windows to this screen give terminals this screen's size back (see [[Context-Menus]]); both are unbound by default.
 
 ### App-wide
 

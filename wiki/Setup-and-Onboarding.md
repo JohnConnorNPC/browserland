@@ -22,10 +22,12 @@ follows.
 | **Browser** | The desktop UI. Renders windows, sends your keystrokes. Can attach to **several brokers at once**. | Wherever you point a browser. |
 
 A broker itself comes in two kinds. A **hub** (the default) serves the desktop
-page you open. A **node** (`--role node`, or `serve_ui: false`) serves no page:
+page you open. A **node** (`--role node` / `--headless`, or `serve_ui: false` /
+`"role": "node"` in the config) serves no page:
 it exists so that another Browserland can use its terminals over the API. A hub
 started with `--no-terminals` (`terminals: false`) launches nothing itself and
-is only the front door to its nodes. A node always hosts terminals.
+is only the front door to its nodes. A node always hosts terminals: a node
+with `terminals: false` is refused at startup (exit 2).
 
 The shape that trips people up:
 
@@ -163,7 +165,7 @@ editing the wrong thing. Rules of thumb:
   pre-approved profiles — it can never supply a raw command. The `agent.profiles`
   here are the **seed**; the easiest way to add a WSL/zsh/PowerShell profile is
   **Control Panel → (a host tab) → Terminals → Launch profiles** (add/edit/detect, applied live with no
-  restart), which persists to a `webterm_profiles.json` sidecar that then owns
+  restart; not on a broker with `terminals: false`, which refuses profile edits), which persists to a `webterm_profiles.json` sidecar that then owns
   the set. See **[[Launch-Profiles]]** for copyable recipes and the
   sidecar-vs-`broker_config` rule.
 - **Tokens/passwords for *remote* hosts live in the browser** (localStorage),

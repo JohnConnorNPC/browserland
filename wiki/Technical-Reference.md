@@ -125,8 +125,10 @@ see `broker_config.example.json`): `auth_token`, plus `agent.profiles` for
 `/launch`. **Profiles only** — `/launch` accepts
 `{"profile": "cmd", "cols": 120, "rows": 32, "title": "..."}` and never a
 client-supplied command/cwd/env. Responses: `200` registered, `202` spawned
-but no hello within 10 s, `400` unknown profile, `401`/`403` auth, `429`
-too many pending, `500` agent exited early.
+but no hello within 10 s, `400` unknown profile (or a bad body), `401`
+`auth_required`, `503` `restarting` while the broker quiesces, `403`
+`terminals_disabled` on a `terminals: false` broker (#253, checked before the
+body is parsed), `429` too many pending, `500` agent exited early.
 
 **`GET /update/check?refresh=1`** re-asks GitHub through the daily cache; the 30-minute poll never sets it, and only a literal `1` counts. Because a forced refresh bypasses the TTL it bypasses the quota strategy with it, so the broker floors it at one per 60 s and caps it at six per rolling hour, leaving most of GitHub's 60/hour-per-source-IP for everything else on that machine. An active rate-limit negative cache outranks the button entirely — the reset GitHub named in a header is honoured, not clicked through. Admission is decided and reserved **inside** the same lock the fetch holds (checking before the lock would let a queue of requests each pre-authorise themselves and then fetch in turn), and attempts are stamped before the request goes out, since a failed fetch spends the same quota as a successful one. A refresh that finds a newer publish than the one it queued behind **coalesces** rather than re-asking, tracked by a publish serial read before the lock. A refused refresh answers `200` with the cached result plus `refreshed: false` and `refresh_refused: {reason, retry_after_s}` — never an error, and never a bare `200` a client could render as "just checked".
 
