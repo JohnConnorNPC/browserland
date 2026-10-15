@@ -17,7 +17,7 @@ story behind anything named below.
 ### Added
 
 - **MCP agents can read and arrange the desktop, and manage workspaces**
-  (#244). A new `allow_desktop` switch (Control Panel → MCP access, or an
+  (#244). A new `allow_desktop` switch (Control Panel → Access → MCP access, or an
   admin's `set_mcp_knobs`; default off, master switch for the whole relay,
   admin included) gates `GET`/`POST /mcp/desktop`: the broker relays each op
   to the browser holding the control lease, which applies it through the
@@ -55,7 +55,7 @@ story behind anything named below.
   scoped or not (a launched worker its launcher cannot drive is useless).
 - **An MCP admin credential: one designated agent can manage every window and
   the broker-wide MCP knobs** (#245). A second, server-minted secret
-  (Control Panel → MCP access → admin token: generate/rotate/clear, or the
+  (Control Panel → Access → MCP access → admin token: generate/rotate/clear, or the
   `WEB_TERMINAL_MCP_ADMIN_TOKEN` env pin) sent as the
   `X-Browserland-Mcp-Admin` header **in addition to** the MCP token; a
   credential in the URL query string is refused outright. The refusal ladder
@@ -229,47 +229,18 @@ story behind anything named below.
   confirmation says so before you agree.
 
 - **The taskbar's broker status chip can be turned down or off** (#178).
-  **Control Panel → Broker status chip** takes **Always** (the default, and
+  **Control Panel → Desktop → Broker status chip** takes **Always** (the default, and
   unchanged from before), **Only when a broker needs attention** — drawn only
   while some broker is unreachable, wants a password, or is held by another
   browser, and gone again once nothing is wrong — or **Never**. The chip used to
   render unconditionally because it was the only home for the per-broker hide
   toggle; #149 gave every broker a live row in the start (+) menu carrying that
   toggle plus log-in and take-over, and a **hidden** checkbox under
-  Control Panel → Hosts, so the chip is now a pure indicator and nothing becomes
+  Control Panel → Browser → Hosts, so the chip is now a pure indicator and nothing becomes
   unreachable without it. Attention mode inherits the existing two-failure
   debounce, so a single dropped poll never flickers the chip into view, and a
   broker you hid yourself never triggers it. The setting follows your browser
   rather than a host tab, and syncs to other browsers viewing the same broker.
-
-### Removed
-
-- **The Agent-docs mod is retired** (#177). Each terminal title bar carried a
-  📋 button that opened that folder's `AGENTS.md` and `CLAUDE.md`. It had no way
-  to know which folder you meant: it used the terminal's *detected* working
-  directory, which is inferred by walking the OS process tree rather than
-  reported by the shell, so it can lag a `cd`, prefer a lingering agent's
-  directory over the shell's, fall back to a known-wrong parent for an
-  unrecognised tool, or go stale entirely when the process is unreadable. When
-  the guess was wrong the button opened a *different project's* `AGENTS.md`,
-  silently, with the same window it shows when it is right — and because that
-  window saves, a wrong guess did not just show the wrong file, it wrote to it.
-  Nothing else is lost: `AGENTS.md` and `CLAUDE.md` are ordinary files that the
-  text editor and file manager still open. Agent-docs windows you already have
-  keep working — they restore, tab, and save exactly as before; only the ability
-  to open a *new* one from a terminal is gone. A desktop that is already open
-  keeps its 📋 buttons until the page is reloaded, as every mod change does.
-  The same inferred directory still
-  feeds the git-status widget, the file manager's start folder and the task
-  manager, where being wrong is cosmetic or obvious rather than destructive.
-  The mod is not deleted. It moves verbatim to a new
-  `webterm/broker/mods-deprecated/` tree whose README says what would have to
-  change before it is worth bringing back — the working directory being
-  *reported* (shell integration / OSC 7) instead of inferred — and how to copy
-  it back. That tree is the reusable mechanism for future retirements; it is
-  repo-only and deliberately not shipped in the wheel.
-
-### Fixed
 
 - **Brokers you hid on purpose no longer count as needing attention** (#178).
   The aggregate badge computed both its `K need attention` count and its colour
@@ -318,6 +289,33 @@ story behind anything named below.
   tiled ones, which live inside the horizontally scrolling strip. Floating
   windows keep it (their drag is a captured-pointer gesture that a pan claim
   would cancel); tiled ones no longer do.
+
+### Removed
+
+- **The Agent-docs mod is retired** (#177). Each terminal title bar carried a
+  📋 button that opened that folder's `AGENTS.md` and `CLAUDE.md`. It had no way
+  to know which folder you meant: it used the terminal's *detected* working
+  directory, which is inferred by walking the OS process tree rather than
+  reported by the shell, so it can lag a `cd`, prefer a lingering agent's
+  directory over the shell's, fall back to a known-wrong parent for an
+  unrecognised tool, or go stale entirely when the process is unreadable. When
+  the guess was wrong the button opened a *different project's* `AGENTS.md`,
+  silently, with the same window it shows when it is right — and because that
+  window saves, a wrong guess did not just show the wrong file, it wrote to it.
+  Nothing else is lost: `AGENTS.md` and `CLAUDE.md` are ordinary files that the
+  text editor and file manager still open. Agent-docs windows you already have
+  keep working — they restore, tab, and save exactly as before; only the ability
+  to open a *new* one from a terminal is gone. A desktop that is already open
+  keeps its 📋 buttons until the page is reloaded, as every mod change does.
+  The same inferred directory still
+  feeds the git-status widget, the file manager's start folder and the task
+  manager, where being wrong is cosmetic or obvious rather than destructive.
+  The mod is not deleted. It moves verbatim to a new
+  `webterm/broker/mods-deprecated/` tree whose README says what would have to
+  change before it is worth bringing back — the working directory being
+  *reported* (shell integration / OSC 7) instead of inferred — and how to copy
+  it back. That tree is the reusable mechanism for future retirements; it is
+  repo-only and deliberately not shipped in the wheel.
 
 ## [0.8.0] - 2026-07-30
 
