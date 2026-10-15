@@ -196,7 +196,7 @@
                     const body = 'MCP is currently ' + (m.enabled ? 'ENABLED' : 'disabled')
                         + '; default mode for new windows: ' + (m.default_mode || 'off')
                         + '; launching via MCP is ' + (m.allow_launch ? 'allowed' : 'blocked')
-                        + '. Change these in Control Panel -> MCP.';
+                        + '. Change these in Control Panel -> Access -> MCP access.';
                     entries.push({
                         slug: 'mcp-and-ai-agents', section: 'MCP & AI Agents',
                         title: 'MCP status (this host)',
