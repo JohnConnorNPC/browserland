@@ -35,6 +35,27 @@ hub refuse new launches with `terminals_disabled`. A node with
 
 ---
 
+## MCP-launched windows start in `readwrite` (#243)
+
+**What changed.** A window an MCP client launches (`launch_terminal`,
+`POST /mcp/launch`) comes up in the launch's `mode`, or in `readwrite` when it
+passes none — scoped or unscoped alike. An unscoped launch used to inherit the
+broker's `default_mode`. Every launch also mints a launch handle that lets the
+launching agent change that window's scope and mode later (`set_window`,
+`POST /mcp/window`).
+
+**Who is affected.** A broker with `allow_launch` on whose operator relied on
+`default_mode` (say `read`) to cap what agents can do in the terminals they
+launch: those terminals are now drivable by their launcher. With
+`allow_launch` off (the default) nothing changes.
+
+**What to do.** If launched windows must start read-only, have the agent pass
+`mode: "read"`, set the window's mode from its robot button (a browser edit
+also clears the launch handle, so the agent cannot change it back), or turn
+`allow_launch` off.
+
+---
+
 ## Workspaces became a mod, and the layout blob changed shape (#148)
 
 **Nothing to do, and nothing is lost.** This is here because the persisted
