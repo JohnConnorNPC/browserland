@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"producer auth token, appended as ?token= to the WS URL "
-             f"(default: ${TOKEN_ENV} env; required only for non-loopback "
-             f"brokers)",
+             f"(default: ${TOKEN_ENV} env; required by every broker, "
+             f"loopback included, since #142)",
     )
     parser.add_argument("--cols", type=int, default=80)
     parser.add_argument("--rows", type=int, default=24)
