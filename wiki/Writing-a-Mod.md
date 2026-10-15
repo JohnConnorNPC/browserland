@@ -2700,6 +2700,16 @@ All four are browser-realm token-gated, `serve_ui`-gated (a node — a broker wi
 configuration, and the point is being able to administer a broker somebody else
 is using.
 
+**The admin token.** When the broker's config sets `admin_token`, the three
+POSTs above (and `POST /mods/policy`, `POST /update/policy`) also need that
+token in the `X-Webterm-Admin` header, on top of the page token; without it they
+answer `403 {"error":"admin_required"}`. `GET /mods/installed` is not
+admin-gated. The Control Panel asks for it in a dialog titled *Admin token
+required* and holds it in memory until the page reloads, never saved or synced.
+With no `admin_token` configured the page token alone suffices, and the broker
+logs one line at start saying so. (`admin_required` is not in the install
+refusal list below: it comes from the admin gate, before the install code runs.)
+
 **The payload is JSON with text files, deliberately not an archive.** No zip
 parser means no zip-slip, no zip bomb, no symlink entries. Mods are text; binary
 rides `data:` URIs. `mod.json` is **written by the broker** from the canonical

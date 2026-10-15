@@ -8,6 +8,8 @@ Open **Control Panel → Mods** on the broker's own tab (the broker this page is
 
 Click **Install a mod…** and pick a mod's folder (or a single `.js` file) from your computer. Before anything is sent, you get an **install preview** — the exact files and manifest that will be uploaded, plus any advisory warnings (a missing field, a file over the size limit, and the like) so you can back out before committing to something the broker would reject anyway.
 
+If the broker's operator has configured an **admin token**, installing and uninstalling ask for it in a dialog titled *Admin token required*. The page password is not enough. Type the token and press **Continue**; it is held in memory until you reload the page and is never saved or synced, so a reload asks again. If the token was wrong, the broker refuses with `admin_required` and the dialog reappears.
+
 ## Uninstalling a mod
 
 Every installed mod's row carries an **Uninstall** button. **Shipped mods have no Uninstall button at all** — they are part of the broker's own program and can't be removed this way; only a mod installed at runtime can be. Uninstalling gives you the option to also delete the mod's data stored on that broker; without it, the mod's code and pin are removed but the server-side data it left behind stays.
