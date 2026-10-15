@@ -4,7 +4,7 @@ These controls only apply in **tiling mode**. For an overview of floating vs. ti
 
 ## Column width presets
 
-A tiled column can be sized to one of four widths from the window context menu (right-click the title bar) or the width controls. The current width is marked with a check.
+A tiled column can be sized to one of four widths from the window's title-bar right-click menu (an MCP agent can set it too, with `arrange_window`). The current width is marked with a check.
 
 | Menu label | Width |
 |---|---|
@@ -49,3 +49,4 @@ When two or more windows share a column (stacked as rows), the window context me
 - [[Window Modes|Window-Modes]] — switching to tiling mode and scrolling the strip
 - [[Arranging Windows|Arranging-Windows]] — tabs, splits, stacking rows, and drop zones
 - [[Keyboard Shortcuts|Keyboard-Shortcuts]] — rebind the focus/move-column keys
+- [[MCP-and-AI-Agents]] — with **Allow MCP to arrange the desktop** on, an MCP agent can focus, move, size, tile, float, tab and split windows on the browser that holds the lease (`get_desktop` / `arrange_window`).

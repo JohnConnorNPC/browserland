@@ -64,3 +64,4 @@ Watch the overlay before you release: if the highlight doesn't show the layout y
 - [[Columns-and-Widths]] — width presets, moving and focusing columns
 - [[Context-Menus]] — the full right-click reference for tab / untab / split actions
 - [[Window-Modes]] — floating vs. tiling and the tiling strip
+- [[MCP-and-AI-Agents]] — with **Allow MCP to arrange the desktop** on, an MCP agent can focus, move, size, tile, float, tab and split windows on the browser that holds the lease (`get_desktop` / `arrange_window`).

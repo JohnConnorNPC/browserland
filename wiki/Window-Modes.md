@@ -52,3 +52,4 @@ You don't have to switch the whole desktop to move a single window between style
 - [[Arranging Windows|Arranging-Windows]] — tabs, splits, stacks/rows, and the drag drop-zone cheat sheet.
 - [[Snapping and Pop-out|Snapping-and-Pop-out]] — the gestures that move one window between floating and tiling.
 - [[Keyboard-Shortcuts]] — the full shortcut table and how to rebind keys.
+- [[MCP-and-AI-Agents]] — with **Allow MCP to arrange the desktop** on, an MCP agent can focus, move, size, tile, float, tab and split windows on the browser that holds the lease (`get_desktop` / `arrange_window`).
