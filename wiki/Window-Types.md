@@ -1,4 +1,4 @@
-Browserland's desktop holds several kinds of windows, all opened from the launch (**+**) button on the taskbar: a **terminal**, a **sticky note**, a **CodeMirror text editor**, a **file manager**, a **task manager**, a **Scratchpad**, and the **Control Panel**. (The in-app **help** guide opens the same way — see [[Getting-Started]].) This page explains what each one is for and how it behaves.
+Browserland's desktop holds several kinds of windows, all opened from the launch (**+**) button on the taskbar: a **terminal**, a **sticky note**, a **CodeMirror text editor**, a **file manager**, a **task manager**, a **Scratchpad**, the **Session recorder**, and the **Control Panel**. (The in-app **help** guide opens the same way — see [[Getting-Started]].) This page explains what each one is for and how it behaves.
 
 ## Opening windows from the + menu
 
