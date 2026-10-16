@@ -809,9 +809,10 @@
                             activeTab: win.activeTab || 0,
                         };
                     },
-                    // #186: opts into the window context menu's "Delete note" item
-                    // (78_js_keybindings.js reads this off the registry entry).
-                    deleteLabel: 'note',
+                    // #256: no Delete label here (the #186 opt-in). The notes
+                    // live on the broker and Close already drops the window's
+                    // record (no retainOnClose), so a "Delete note" item only
+                    // duplicated Close while promising to remove saved content.
                     menu: {
                         label: 'Scratchpad',
                         iconKey: 'scratchpad',   // #119 SVG notepad in the (+) menu

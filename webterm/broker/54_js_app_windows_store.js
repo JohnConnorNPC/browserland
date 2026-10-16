@@ -179,8 +179,9 @@
         //            closedItems?()->[menuItem] }
         //   deleteLabel (#186): opt-in string ('note'/'file'/...) naming what a
         //   window's context-menu "Delete <deleteLabel>" item discards. Its mere
-        //   presence is the opt-in — only scratchpad/sticky-note/text-editor set
-        //   it. Every other kind (task-manager, control-panel, help, file-
+        //   presence is the opt-in — only sticky-note/text-editor set it. The
+        //   Scratchpad does not (#256: its Delete only duplicated Close). Every
+        //   other kind (task-manager, control-panel, help, file-
         //   manager — persisted but not a discardable document — and any mod
         //   window) leaves it unset and gets NO Delete item; 78_js_keybindings.js
         //   reads this property instead of denylisting appKind values by name.

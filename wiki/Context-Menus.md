@@ -53,7 +53,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 - **Minimize** / **Restore** — hide the window to the taskbar, or bring it back.
 - **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with unsaved changes it asks **Save**, **Don't save** or **Cancel**: Cancel, Esc or a click outside keep the editor and its text, and only Don't save discards the unsaved text); a file manager / task manager just closes.
 - **Terminate** (terminals only) — hard-kill the shell process tree (asks to confirm).
-- **Delete note** / **Delete file** (sticky notes, the Scratchpad and the text editor) — asks to confirm. On a sticky note it discards the note's text, which lives in this browser; on the text editor it closes the editor and discards unsaved text; the file on disk is not touched; on the Scratchpad it only closes the window, and the notes stay on the broker, so reopening the Scratchpad brings them back.
+- **Delete note** / **Delete file** (sticky notes and the text editor) — asks to confirm. On a sticky note it discards the note's text, which lives in this browser; on the text editor it closes the editor and discards unsaved text; the file on disk is not touched. The Scratchpad has no Delete item: its notes are stored on the broker, closing its window does not delete them, and closing a tab removes that tab from the notes (an earlier History revision can restore it).
 
 **In a popped-out terminal window** (*Open in new window*) the title-bar menu is just **Return to desktop** and **Terminate** (with confirmation). See [[Window-Types]].
 

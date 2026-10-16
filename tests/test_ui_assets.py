@@ -4286,15 +4286,22 @@ def test_delete_menu_item_is_registry_opt_in_not_denylist():
         assert gone not in keys, f"old denylist clause survived: {gone!r}"
     assert "lookupWindowKind(win.appKind)" in keys
     assert "_deleteKind.deleteLabel" in keys
+    # The guard itself: Delete shows only for a kind that carries a label.
+    assert "if (_deleteKind && _deleteKind.deleteLabel)" in keys
 
     s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
     assert "deleteLabel: spec.deleteLabel || null," in s54
 
-    # Exactly the three persisted-doc kinds opt in.
+    # Exactly two persisted-doc kinds opt in: sticky notes and the text editor.
+    # #256: the Scratchpad does not. Its notes live on the broker and Close
+    # already drops its record, so a Delete item only duplicated Close.
     scratch = (BROKER_DIR / "mods/scratchpad/scratchpad.js").read_text(encoding="utf-8")
     sticky = (BROKER_DIR / "mods/sticky/sticky.js").read_text(encoding="utf-8")
     editor = (BROKER_DIR / "mods/editor/editor.js").read_text(encoding="utf-8")
-    assert "deleteLabel: 'note'," in scratch
+    # Arm: the subject must be the real Scratchpad spec, or "not in" passes on
+    # any file that merely lacks the token (a moved or emptied file).
+    assert "registerWindowKind" in scratch and "appKind: 'scratchpad'" in scratch
+    assert "deleteLabel" not in scratch
     assert "deleteLabel: 'note'," in sticky
     assert "deleteLabel: 'file'," in editor
 
@@ -4304,19 +4311,21 @@ def test_delete_menu_item_is_registry_opt_in_not_denylist():
     # every mod file, not a fixed list, so a kind added later cannot opt in
     # unnoticed (the inverse of the denylist bug this replaced).
     allowed = {
-        BROKER_DIR / "mods/scratchpad/scratchpad.js",
         BROKER_DIR / "mods/sticky/sticky.js",
         BROKER_DIR / "mods/editor/editor.js",
         BROKER_DIR / "54_js_app_windows_store.js",   # the registry itself
         BROKER_DIR / "78_js_keybindings.js",         # the guard that reads it
     }
     offenders = []
-    for path in sorted(BROKER_DIR.rglob("*.js")):
+    scanned = sorted(BROKER_DIR.rglob("*.js"))
+    assert BROKER_DIR / "mods/scratchpad/scratchpad.js" in scanned, \
+        "the sweep must scan the Scratchpad"
+    for path in scanned:
         if "deleteLabel" in path.read_text(encoding="utf-8") \
                 and path not in allowed:
             offenders.append(str(path.relative_to(BROKER_DIR)))
     assert offenders == [], (
-        "deleteLabel appears outside the three persisted-doc kinds and the "
+        "deleteLabel appears outside the two persisted-doc kinds and the "
         f"registry/guard: {offenders}")
     assert "deleteLabel: 'control-panel'" not in s54
     assert "appKind: 'control-panel'" in s54   # still the one core built-in

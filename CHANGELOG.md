@@ -233,6 +233,12 @@ story behind anything named below.
 
 ### Fixed
 
+- **The Scratchpad's window menu no longer offers Delete note** (#256). The
+  item only closed the window: the Scratchpad's notes live on the broker and
+  Close already drops the window's own record, yet the confirmation said the
+  saved content is removed. Closing the window does not delete the notes, and
+  closing a tab removes that tab (an earlier History revision can restore it).
+  Sticky notes and the text editor still have Delete.
 - **Cancelling the close prompt of an unsaved text editor no longer throws its
   text away** (#257). Closing an editor with unsaved changes offered only Save
   and Cancel, and Cancel (and Esc, and a click outside the box) closed the
@@ -295,8 +301,8 @@ story behind anything named below.
 - **Delete note / Delete file only appears where a window opts in** (#186).
   The menu item used to be guarded by a denylist of the four window kinds that
   existed when it was written, so newer ephemeral windows showed it too. A
-  window kind now opts in with a `deleteLabel` (sticky notes, the Scratchpad
-  and the text editor do); every other app window's menu ends at Close, and a
+  window kind now opts in with a `deleteLabel` (sticky notes and the text
+  editor do); every other app window's menu ends at Close, and a
   terminal's at Terminate.
 - **The Update window reflects a policy change at once** (#188). A grant or
   stop that moved the restart gate re-reads that broker's `/info`, so the
