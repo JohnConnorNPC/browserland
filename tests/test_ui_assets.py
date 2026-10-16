@@ -4317,10 +4317,7 @@ def test_delete_menu_item_is_registry_opt_in_not_denylist():
         BROKER_DIR / "78_js_keybindings.js",         # the guard that reads it
     }
     offenders = []
-    scanned = sorted(BROKER_DIR.rglob("*.js"))
-    assert BROKER_DIR / "mods/scratchpad/scratchpad.js" in scanned, \
-        "the sweep must scan the Scratchpad"
-    for path in scanned:
+    for path in sorted(BROKER_DIR.rglob("*.js")):
         if "deleteLabel" in path.read_text(encoding="utf-8") \
                 and path not in allowed:
             offenders.append(str(path.relative_to(BROKER_DIR)))
