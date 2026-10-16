@@ -233,6 +233,16 @@ story behind anything named below.
 
 ### Fixed
 
+- **A Control Panel host tab no longer shows or writes the previous host's
+  settings** (#255). Switching to a host that is reached through this broker,
+  still loading or unreachable left the previous host's profile list, label
+  order, MCP address and masked tokens, default profile, keybindings and other
+  fields on screen under the new tab's name, and the profile rows and label
+  toggles still on that list wrote to the previous host. Every host-specific
+  section is now emptied the moment a tab is selected (a Start path still
+  waiting to save goes to the host it was typed for first), an open profile
+  dialog is closed, and a profile or label-order change from a row that belongs
+  to a tab that is no longer open is refused.
 - **Publishing the broker list leaves "from server" hosts out** (#254). Host
   registry **Publish** used to write a from-server host as a plain direct entry
   at the peer's address, with its token when *Include passwords* was ticked, so
