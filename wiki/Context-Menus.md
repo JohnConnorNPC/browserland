@@ -51,7 +51,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 - **Open in new window** (terminals only) — move the terminal into a browser window of its own; see [[Window-Types]].
 - **Fit to this screen** (terminals only) — give the terminal this screen's size back, for example after another device such as a phone was active and left it phone-sized. A floating window is first reset to the default size. See [[Hosts-and-Multi-Browser]].
 - **Minimize** / **Restore** — hide the window to the taskbar, or bring it back.
-- **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with a save prompt for unsaved changes); a file manager / task manager just closes.
+- **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with unsaved changes it asks **Save**, **Don't save** or **Cancel**: Cancel, Esc or a click outside keep the editor and its text, and only Don't save discards the unsaved text); a file manager / task manager just closes.
 - **Terminate** (terminals only) — hard-kill the shell process tree (asks to confirm).
 - **Delete note** / **Delete file** (sticky notes, the Scratchpad and the text editor) — asks to confirm. On a sticky note it discards the note's text, which lives in this browser; on the text editor it closes the editor and discards unsaved text; the file on disk is not touched; on the Scratchpad it only closes the window, and the notes stay on the broker, so reopening the Scratchpad brings them back.
 

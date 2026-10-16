@@ -95,7 +95,7 @@ Like the file manager and the task manager, the Control Panel is **ephemeral**: 
 
 How a window goes away depends on its type:
 
-- **Close** is soft, but what it preserves varies. A terminal's shell keeps running so you can reattach later. A non-empty sticky note is retained and reopens from **Closed notes** in the **+** menu (an empty note is discarded). A text editor's content lives in a file on the host, so closing it (after the save prompt) leaves your file intact. A file manager, the task manager, and the Control Panel/help are ephemeral — closing them just dismisses them.
+- **Close** is soft, but what it preserves varies. A terminal's shell keeps running so you can reattach later. A non-empty sticky note is retained and reopens from **Closed notes** in the **+** menu (an empty note is discarded). A text editor's content lives in a file on the host, so closing it leaves your file as it was unless you choose Save. With unsaved changes it asks **Save**, **Don't save** or **Cancel**: Cancel, Esc or a click outside keep the editor and its text, and only Don't save discards the unsaved text. A file manager, the task manager, and the Control Panel/help are ephemeral — closing them just dismisses them.
 - **Terminate** (terminals only) hard-kills the shell process tree.
 - **Delete** (on sticky notes, the Scratchpad and the text editor, shown as *Delete note* / *Delete file*) asks to confirm. On a sticky note it discards the note's text, which lives in this browser; on the text editor it closes the editor and discards unsaved text; the file on disk is not touched; on the Scratchpad it only closes the window, and the notes stay on the broker, so reopening the Scratchpad brings them back.
 
