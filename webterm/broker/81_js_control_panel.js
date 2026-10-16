@@ -231,8 +231,15 @@
         // fresh /state GET (with a "loading…" placeholder) before its form is
         // populated and editable.
         async function selectSettingsTab(tabId) {
+            // #255: a Start path edit still waiting on its debounce belongs to the
+            // tab being left: land it there FIRST (the flushSettingsEdits idiom),
+            // before the blank below empties the field and the target changes. A
+            // throwing save must not stop the switch (or the blank) from happening.
+            try { if (_startPathTimer) commitStartPath(); } catch (_) {}
             currentSettingsTab = tabId;
             _kbRecording = null;
+            // #255: whatever the previous tab painted is not about THIS tab.
+            blankHostSections();
             renderSettingsTabs();
             showSettingsPane(tabId);
             // Whatever the previous tab left behind is not about THIS tab. The
@@ -868,6 +875,27 @@
             if (fin && typeof _dlgFinish === 'function' && _dlgFinish === fin) {
                 _dlgFinish(null);
             }
+        }
+        // #255: empty every per-host section whose rows were painted from the
+        // PREVIOUS tab's settingsTarget, synchronously on every tab switch and
+        // before any await. renderSettings repaints what the new tab owns; on a
+        // proxied, in-flight or failed tab it never runs, and on Browser the
+        // target is deliberately kept, so without this the previous host's rows
+        // stay on screen and their render-time-bound handlers (profile rows,
+        // label order) keep writing to that host. The success path must NOT
+        // call this after renderSettings.
+        function blankHostSections() {
+            // Backstop: selectSettingsTab has already committed a pending
+            // start-path edit, so there is normally nothing left to clear.
+            if (_startPathTimer) { clearTimeout(_startPathTimer); _startPathTimer = null; }
+            flushProfilePickers();
+            cancelProfileDialog();
+            if (setProfilesListEl) setProfilesListEl.textContent = '';
+            if (setProfileAddBtn) setProfileAddBtn.disabled = true;
+            if (setProfileDetectBtn) setProfileDetectBtn.disabled = true;
+            const order = document.getElementById('set-label-order');
+            if (order) order.textContent = '';
+            _labelDragKey = null;
         }
         // #115: set/clear one profile's default color. Mutates the cached (full)
         // profile set and re-POSTs it (REPLACE semantics, like the Default button),

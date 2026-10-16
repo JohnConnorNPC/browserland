@@ -91,7 +91,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 11
+EXPECTED_ASSERTS = 26
 
 _HARNESS = r"""
 'use strict';
@@ -288,6 +288,7 @@ function mkWorld() {
         // ---- the network, as recorders ---------------------------------------
         hostFetch: async (h, path, init) => {
             const method = (init && init.method) || 'GET';
+            if (w.hold && method === 'GET' && /^\/(profiles\/config|mcp\/config)$/.test(path)) await w.hold;
             w.fetches.push(h.id + ' ' + method + ' ' + path);
             const respond = (body, okv) => ({ ok: okv !== false, status: okv === false ? 404 : 200,
                                               json: async () => body });
@@ -318,7 +319,7 @@ function mkWorld() {
         fetchProfiles: (host) => {
             bump('names:' + host.id);
             const c = w.cfg[host.id];
-            return tick().then(() => {
+            return (w.hold || tick()).then(() => {
                 if (c) env.profilesCache.set(host.id, { profiles: Object.keys(c.profiles),
                                                         default: c.default_profile });
             });
@@ -331,6 +332,8 @@ function mkWorld() {
         attachColorPicker: (target, row, palette, onPick) => {
             const b = new El('button'); b.type = 'button';
             const rec = { target, onPick, cleaned: false };
+            // like the real picker: a late OS answer after disposal is a no-op
+            rec.pick = (sw) => { if (target.disposed) return false; onPick(sw); return true; };
             target.cleanups.push(() => { rec.cleaned = true; });
             w.pickers.push(rec);
             return b;
@@ -569,6 +572,204 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
            { armed, bDone: b.done, handleIsB: w.env._profileDlgFin === b.finish });
     }
 
+    // ---- atom 3: the blank on every switch -----------------------------------------
+    // The "previous host" is rx. armed(w) proves the subject exists BEFORE the
+    // switch, so a check can never pass because there was nothing to blank.
+    const paintRx = async (w) => { w.seed(['rx']); await w.visit('rx'); };
+    const armedRx = (w) => hasText(w.env.setProfilesListEl, 'rx-alpha')
+        && hasText(w.env.setProfilesListEl, 'rx-beta')
+        && w.env.labelOrderEl.children.length === 4
+        && w.env.setProfileAddBtn.disabled === false
+        && w.env.setProfileDetectBtn.disabled === false
+        && w.pickers.length >= 2 && w.env.profilePickerTargets.length >= 2;
+    const blankState = (w) => ({
+        profileText: w.env.setProfilesListEl.textContent,
+        labelRows: w.env.labelOrderEl.children.length,
+        add: w.env.setProfileAddBtn.disabled, detect: w.env.setProfileDetectBtn.disabled,
+        target: w.env.settingsTarget && w.env.settingsTarget.hostId,
+    });
+    const isBlank = (w) => w.env.setProfilesListEl.textContent === ''
+        && w.env.setProfilesListEl.children.length === 0
+        && w.env.labelOrderEl.children.length === 0 && w.env.labelOrderEl.textContent === ''
+        && w.env.setProfileAddBtn.disabled === true && w.env.setProfileDetectBtn.disabled === true;
+    {   // B1 proxied
+        const w = mkWorld(); await paintRx(w);
+        const armed = armedRx(w);
+        await w.visit('rb');
+        ok(armed && isBlank(w) && w.env.settingsTarget === null
+           && !hasText(w.env.setProfilesListEl, 'rx-'),
+           'B1 a proxied tab holds nothing of the previous host: lists empty, Add/Detect disabled, no target',
+           Object.assign({ armed }, blankState(w)));
+    }
+    {   // B2 in flight, asserted right after the synchronous part
+        const w = mkWorld(); await paintRx(w);
+        const armed = armedRx(w);
+        w.mode = 'gate';
+        w.fn.selectSettingsTab('rd');          // never answered
+        ok(armed && isBlank(w) && w.env.settingsTarget === null && w.gates.length === 1,
+           'B2 while /state is in flight the previous host\u2019s rows are already gone',
+           Object.assign({ armed, gates: w.gates.length }, blankState(w)));
+    }
+    {   // B3 failed
+        const w = mkWorld(); await paintRx(w);
+        const armed = armedRx(w);
+        await w.visit('rf');
+        ok(armed && isBlank(w) && w.env.settingsTarget === null,
+           'B3 a failed direct tab holds nothing of the previous host',
+           Object.assign({ armed }, blankState(w)));
+    }
+    {   // B4 the Browser tab keeps its target (ruling) but not the rows
+        const w = mkWorld(); await paintRx(w);
+        const armed = armedRx(w);
+        await w.visit('browser');
+        ok(armed && isBlank(w) && w.env.currentSettingsTab === 'browser'
+           && w.env.settingsTarget && w.env.settingsTarget.hostId === 'rx',
+           'B4 the Browser tab empties the rows but keeps settingsTarget (ruling: never nulled)',
+           Object.assign({ armed }, blankState(w)));
+    }
+    {   // H7 the blank is not applied after a successful repaint
+        const w = mkWorld(); w.seed(['rx', 'rd']);
+        await w.visit('rx'); const armed = armedRx(w);
+        await w.visit('rd');
+        ok(armed && hasText(w.env.setProfilesListEl, 'rd-one') && !hasText(w.env.setProfilesListEl, 'rx-')
+           && w.env.labelOrderEl.children.length === 4 && w.env.setProfileAddBtn.disabled === false
+           && w.env.settingsTarget && w.env.settingsTarget.hostId === 'rd',
+           'H7 a successful switch ends with the new host\u2019s rows (the blank is not applied after the repaint)',
+           Object.assign({ armed }, blankState(w)));
+    }
+
+    // ---- P: pickers -----------------------------------------------------------------
+    {
+        const w = mkWorld(); await paintRx(w);
+        const recs = w.pickers.slice();
+        const targets = w.env.profilePickerTargets.slice();
+        const armed = recs.length >= 2 && targets.length >= 2
+            && recs.every(r => r.cleaned === false) && targets.every(t => t.disposed === false)
+            && recs.some(r => r.target.color === '#ff0000');
+        await w.visit('rb');                         // a tab that does not re-render
+        const before = w.fetches.length;
+        const late = recs.map(r => r.pick({ color: '#00ff00' }));   // the OS dialog answering late
+        await settle();
+        ok(armed && targets.every(t => t.disposed === true) && recs.every(r => r.cleaned === true)
+           && late.every(v => v === false) && w.fetches.length === before
+           && w.env.profilePickerCleanups.length === 0,
+           'P every painted colour picker is disposed and its cleanup ran on the switch; a late pick does nothing',
+           { armed, disposed: targets.map(t => t.disposed), cleaned: recs.map(r => r.cleaned),
+             late, newFetches: w.fetches.slice(before) });
+    }
+
+    // ---- D: the open profile dialog is closed by a switch ---------------------------
+    {
+        const w = mkWorld(); await paintRx(w);
+        const dlg = openEdit(w, 'rx-alpha');
+        const armed = !!dlg && !dlg.done && w.env._profileDlgFin === dlg.finish;
+        await w.visit('rb');
+        ok(armed && dlg.done && dlg.result === null && w.env._profileDlgFin === null,
+           'D1 an open Edit dialog is closed by a tab switch', { armed, done: dlg && dlg.done });
+    }
+    {
+        const w = mkWorld(); await paintRx(w);
+        fire(w.env.setProfileDetectBtn, 'click'); await settle();
+        const dlg = w.dialogs[w.dialogs.length - 1];
+        const armed = !!dlg && dlg.spec.title === 'Detected shells' && !dlg.done;
+        await w.visit('browser');
+        ok(armed && dlg.done && dlg.result === null,
+           'D2 an open Detect list is closed by a tab switch', { armed, done: dlg && dlg.done });
+    }
+    {
+        const w = mkWorld(); await paintRx(w);
+        w.env.openDialog({ title: 'a mod dialog' });
+        const foreign = w.dialogs[w.dialogs.length - 1];
+        const armed = !foreign.done && w.env._dlgFinish === foreign.finish
+            && w.env._profileDlgFin === null;
+        await w.visit('rb');
+        ok(armed && !foreign.done && w.env._dlgFinish === foreign.finish,
+           'D3 a dialog that is not the panel\u2019s survives a tab switch', { armed, done: foreign.done });
+    }
+    {
+        const w = mkWorld(); await paintRx(w);
+        const dlg = openEdit(w, 'rx-alpha');
+        const armed = !!dlg && !dlg.done;
+        await w.visit('rx');                          // same tab again = retry
+        ok(armed && dlg.done && dlg.result === null,
+           'D4 re-selecting the same tab closes the profile dialog too', { armed, done: dlg && dlg.done });
+    }
+
+    // ---- S: the Start path debounce -------------------------------------------------
+    const typeStartPath = (w, v) => {
+        w.env.setStartPathEl.value = v;
+        fire(w.env.setStartPathEl, 'input');
+        return w.timers.filter(t => !t.cancelled && !t.ran).length === 1
+            && w.env._startPathTimer !== null;
+    };
+    const runLiveTimers = (w) => { for (const t of w.timers) {
+        if (!t.cancelled && !t.ran) { t.ran = true; t.fn(); } } };
+    {   // S1
+        const w = mkWorld(); await paintRx(w);
+        const armed = typeStartPath(w, 'C:/typed');
+        await w.visit('browser');
+        runLiveTimers(w);
+        const sp = w.entries.rx.settings.startPath;
+        ok(armed && sp === 'C:/typed' && w.saves.filter(s => s === 'rx').length === 1,
+           'S1 a Start path typed on rx lands on rx when the tab is left, and is never written as an empty string',
+           { armed, startPath: sp, saves: w.saves });
+    }
+    {   // S2 the helper clears a live timer by itself
+        const w = mkWorld(); await paintRx(w);
+        const armed = typeStartPath(w, 'C:/typed');
+        w.fn.blankHostSections();
+        ok(armed && w.timers.filter(t => !t.cancelled).length === 0 && w.env._startPathTimer === null,
+           'S2 blankHostSections cancels a pending Start path timer on its own (backstop)',
+           { armed, timers: w.timers.map(t => t.cancelled), handle: w.env._startPathTimer });
+    }
+    {   // S3 closing the panel after the Browser switch writes nothing blank
+        const w = mkWorld(); await paintRx(w);
+        const armed = typeStartPath(w, 'C:/typed');
+        await w.visit('browser');
+        w.fn.flushSettingsEdits();
+        runLiveTimers(w);
+        ok(armed && w.entries.rx.settings.startPath === 'C:/typed'
+           && w.saves.filter(s => s === 'rx').length === 1,
+           'S3 closing the panel after switching to Browser leaves rx\u2019s Start path as typed',
+           { armed, startPath: w.entries.rx.settings.startPath, saves: w.saves });
+    }
+    {   // S4 a throwing commit never blocks the switch
+        const a = mkWorld(); await paintRx(a);
+        const armedA = typeStartPath(a, 'C:/typed');
+        a.env.putHostState = (id) => { a.saves.push(id); throw new Error('save boom'); };
+        let rejA = false;
+        await a.fn.selectSettingsTab('browser').catch(() => { rejA = true; });
+        const b = mkWorld(); await paintRx(b);
+        const armedB = typeStartPath(b, 'C:/typed');
+        const st = b.entries.rx.settings;
+        Object.defineProperty(st, 'startPath', { get() { return 'C:/rx-start'; },
+                              set() { b.wrote = true; throw new Error('write boom'); } });
+        let rejB = false;
+        await b.fn.selectSettingsTab('browser').catch(() => { rejB = true; });
+        ok(armedA && armedB && !rejA && !rejB
+           && a.env.currentSettingsTab === 'browser' && isBlank(a)
+           && b.env.currentSettingsTab === 'browser' && isBlank(b)
+           && a.entries.rx.settings.startPath === 'C:/typed' && a.saves.length === 1
+           && b.entries.rx.settings.startPath === 'C:/rx-start' && b.wrote === true,
+           'S4 a throwing Start path commit never blocks the switch: the tab changes, the rows are gone, the value is never blank',
+           { armedA, armedB, rejA, rejB, tabA: a.env.currentSettingsTab, tabB: b.env.currentSettingsTab,
+             spA: a.entries.rx.settings.startPath, wroteB: b.wrote });
+    }
+
+    // ---- B5: sections still loading when the tab is left -----------------------------
+    {
+        const w = mkWorld();
+        let release; w.hold = new Promise((r) => { release = r; });
+        w.mode = 'auto';
+        await w.fn.selectSettingsTab('rx'); await settle();      // sections stay pending
+        const armed = hasText(w.env.setProfilesListEl, 'loading') && w.cfg.rx && !w.env.profilesConfigCache.has('rx');
+        await w.visit('browser');
+        release(); await settle(6);
+        ok(armed && isBlank(w),
+           'B5 a section fetch landing after the tab was left paints nothing',
+           { armed, text: w.env.setProfilesListEl.textContent, rows: w.env.labelOrderEl.children.length });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -640,6 +841,33 @@ def test_controls_and_reason_lines(run, label):
     "D5 an older dialog settling late does not drop the newer one’s handle",
 ])
 def test_profile_dialog_handle(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "B1 a proxied tab holds nothing of the previous host: lists empty, Add/Detect disabled, no target",
+    "B2 while /state is in flight the previous host’s rows are already gone",
+    "B3 a failed direct tab holds nothing of the previous host",
+    "B4 the Browser tab empties the rows but keeps settingsTarget (ruling: never nulled)",
+    "H7 a successful switch ends with the new host’s rows (the blank is not applied after the repaint)",
+    "P every painted colour picker is disposed and its cleanup ran on the switch; a late pick does nothing",
+    "D1 an open Edit dialog is closed by a tab switch",
+    "D2 an open Detect list is closed by a tab switch",
+    "D3 a dialog that is not the panel’s survives a tab switch",
+    "D4 re-selecting the same tab closes the profile dialog too",
+    "B5 a section fetch landing after the tab was left paints nothing",
+])
+def test_blank_on_every_switch(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "S1 a Start path typed on rx lands on rx when the tab is left, and is never written as an empty string",
+    "S2 blankHostSections cancels a pending Start path timer on its own (backstop)",
+    "S3 closing the panel after switching to Browser leaves rx’s Start path as typed",
+    "S4 a throwing Start path commit never blocks the switch: the tab changes, the rows are gone, the value is never blank",
+])
+def test_start_path_debounce(run, label):
     _ok(run, label)
 
 
