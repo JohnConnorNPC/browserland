@@ -2234,6 +2234,9 @@
                     // #186: opts into the window context menu's "Delete file" item
                     // (78_js_keybindings.js reads this off the registry entry).
                     deleteLabel: 'file',
+                    // #257: Delete closes the editor; it never touches the file.
+                    deleteMessage: 'Close this editor and discard any unsaved text? '
+                        + 'The file on disk is not touched.',
                     menu: {
                         label: 'Text editor',
                         iconKey: 'editor',   // #119: SVG pencil in the (+) menu

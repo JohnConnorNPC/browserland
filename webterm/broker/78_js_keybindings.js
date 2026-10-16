@@ -669,6 +669,13 @@
             showNotice('terminated ' + (sess.title || ('#' + sess.sid)));
         }
 
+        // What a window's "Delete <deleteLabel>" confirm says: the kind's own
+        // deleteMessage (#257), else the note sentence every kind had before.
+        function deleteConfirmMessage(kind) {
+            return kind.deleteMessage || ('Delete this ' + kind.deleteLabel
+                + ' permanently? Its saved content is removed.');
+        }
+
         function buildWindowMenu(win, x, y) {
             // #226: the detached surface has its own, much shorter menu.
             if (isDetachedSurface()) { buildDetachedWindowMenu(win, x, y); return; }
@@ -851,8 +858,7 @@
                     action: async () => {
                         if (await openConfirmDialog({
                                 title: 'Delete ' + what,
-                                message: 'Delete this ' + what + ' permanently? '
-                                    + 'Its saved content is removed.',
+                                message: deleteConfirmMessage(_deleteKind),
                                 okLabel: 'Delete', danger: true }))
                             destroyAppWindow(win.id);
                     },

@@ -10187,7 +10187,7 @@ CASES.kind_registration_is_transparent = function () {
     const spec = { appKind: 'plain', factory: function () { return null; },
                    serialize: function () { return null; },
                    menu: { label: 'Plain', launch: function () {} },
-                   deleteLabel: 'thing' };
+                   deleteLabel: 'thing', deleteMessage: 'msg' };
     const entry = m.ctx.registerWindowKind(spec);
     let dupe = null;
     try {
@@ -10204,7 +10204,8 @@ CASES.kind_registration_is_transparent = function () {
     return { sameFactory: entry.factory === spec.factory,
              sameSerialize: entry.serialize === spec.serialize,
              sameMenu: entry.menu === spec.menu,
-             deleteLabel: entry.deleteLabel, restore: entry.restore,
+             deleteLabel: entry.deleteLabel, deleteMessage: entry.deleteMessage,
+             restore: entry.restore,
              dupe: dupe, bad: bad,
              registered: lookupWindowKind('plain') === entry,
              torn: (function () {
@@ -11531,6 +11532,7 @@ def test_registering_a_kind_without_a_restore_is_untouched(winfac_harness):
     assert r["errors"] == []
     assert r["sameFactory"] is True and r["sameSerialize"] is True
     assert r["sameMenu"] is True and r["deleteLabel"] == "thing"
+    assert r["deleteMessage"] == "msg", "the wrapper must hand deleteMessage through"
     assert r["restore"] is None, "a kind with no hook must not gain one"
     assert r["registered"] is True
     # Core still owns every refusal, including a non-function restore.

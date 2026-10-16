@@ -44,7 +44,17 @@ SLICES = {
     "close": ("73_js_window_runtime.js",
               "        // User-initiated close for an app window",
               "        // Permanently discard an app document."),
+    # atom 4: the registry's validation + the Delete confirm's sentence. The
+    # registry slice stops BEFORE lookupWindowKind, so DM1 reads
+    # _windowKindRegistry() directly and claims no lookup coverage.
+    "registry": ("54_js_app_windows_store.js",
+                 "        function _windowKindRegistry() {",
+                 "        function lookupWindowKind(appKind) {"),
+    "delmsg": ("78_js_keybindings.js",
+               "        function deleteConfirmMessage(kind) {",
+               "        function buildWindowMenu(win, x, y) {"),
 }
+EDITOR_JS = "mods/editor/editor.js"
 
 # Declared in advance: the emitted labels must equal this list, exactly.
 EXPECTED_LABELS = [
@@ -70,6 +80,12 @@ EXPECTED_LABELS = [
     "R2b a second close request makes the first one Cancel",
     "X2 a window reaped during the prompt: Don't save writes nothing, Cancel closes nothing",
     "T2 a multi-tab editor honours Cancel, Escape and Don't save",
+    # atom 4: the kind's own Delete sentence
+    "DM1 a registered kind keeps its deleteMessage; one without it holds null",
+    "DM2 a non-string or empty deleteMessage is refused and registers nothing",
+    "DM3 a deleteMessage without a deleteLabel is refused and registers nothing",
+    "DM4 the Delete sentence is the kind's own, else the note sentence unchanged",
+    "DM5 the real editor.js declares the message once, and the registry takes it",
 ]
 
 EXPECTED_ASSERTS = len(EXPECTED_LABELS)
@@ -552,6 +568,79 @@ C("T2 a multi-tab editor honours Cancel, Escape and Don't save", async function 
     must(wc.saves().length === 0, 'something was written: ' + wc.saves());
 });
 
+const EDITOR_MSG = 'Close this editor and discard any unsaved text? '
+    + 'The file on disk is not touched.';
+function mkRegistry() {
+    const env = { registerBuiltinWindowKinds: function () {},
+                  ModConflictError: function (m) { return new Error(m); } };
+    const r = load(S.registry, env, ['_windowKindRegistry', 'registerWindowKind']);
+    must(typeof r.registerWindowKind === 'function', 'registerWindowKind is not in the slice');
+    return r;
+}
+function refused(fn) {
+    try { fn(); } catch (e) { return String(e.message); }
+    return null;
+}
+const fileKind = function (extra) {
+    return Object.assign({ appKind: 'ed', factory: function () { return null; },
+                           deleteLabel: 'file' }, extra);
+};
+
+C("DM1 a registered kind keeps its deleteMessage; one without it holds null", async function () {
+    const reg = mkRegistry();
+    const e = reg.registerWindowKind(fileKind({ deleteMessage: 'X' }));
+    must(e.deleteMessage === 'X', 'entry holds ' + JSON.stringify(e.deleteMessage));
+    must(reg._windowKindRegistry().get('ed') === e, 'the entry is not the registered one');
+    const n = reg.registerWindowKind(fileKind({ appKind: 'note', deleteLabel: 'note' }));
+    must(n.deleteMessage === null, 'an unset message holds ' + JSON.stringify(n.deleteMessage));
+    must(n.deleteLabel === 'note', 'deleteLabel was disturbed');
+});
+
+C("DM2 a non-string or empty deleteMessage is refused and registers nothing", async function () {
+    const reg = mkRegistry();
+    for (const bad of ['', 42, {}, true]) {
+        const m = refused(function () {
+            reg.registerWindowKind(fileKind({ deleteMessage: bad }));
+        });
+        must(m && m.indexOf('deleteMessage must be a non-empty string') >= 0,
+             'for ' + JSON.stringify(bad) + ': ' + m);
+    }
+    must(reg._windowKindRegistry().size === 0, 'a refused spec was registered');
+});
+
+C("DM3 a deleteMessage without a deleteLabel is refused and registers nothing", async function () {
+    const reg = mkRegistry();
+    const m = refused(function () {
+        reg.registerWindowKind({ appKind: 'x', factory: function () { return null; },
+                                 deleteMessage: 'X' });
+    });
+    must(m && m.indexOf('deleteMessage requires deleteLabel') >= 0, 'got: ' + m);
+    must(reg._windowKindRegistry().size === 0, 'a refused spec was registered');
+});
+
+C("DM4 the Delete sentence is the kind's own, else the note sentence unchanged", async function () {
+    const dm = load(S.delmsg, {}, ['deleteConfirmMessage']).deleteConfirmMessage;
+    must(typeof dm === 'function', 'deleteConfirmMessage is not in the slice');
+    const old = 'Delete this note permanently? Its saved content is removed.';
+    must(dm({ deleteLabel: 'note' }) === old, 'note: ' + dm({ deleteLabel: 'note' }));
+    must(dm({ deleteLabel: 'note', deleteMessage: null }) === old, 'a null message');
+    must(dm({ deleteLabel: 'file', deleteMessage: 'X' }) === 'X', 'a kind message');
+    must(dm({ deleteLabel: 'file', deleteMessage: EDITOR_MSG }) === EDITOR_MSG,
+         'the editor sentence');
+});
+
+C("DM5 the real editor.js declares the message once, and the registry takes it", async function () {
+    const src = S.editor_src;
+    must((src.match(/deleteMessage:/g) || []).length === 1, 'deleteMessage: is not declared once');
+    const m = /deleteMessage:\s*((?:'[^'\n]*'\s*\+\s*)*'[^'\n]*')\s*,/.exec(src);
+    must(m, 'the deleteMessage value is not a string literal expression');
+    const value = (new Function('return (' + m[1] + ');'))();
+    must(value === EDITOR_MSG, 'editor.js says ' + JSON.stringify(value));
+    const reg = mkRegistry();
+    const e = reg.registerWindowKind(fileKind({ deleteMessage: value }));
+    must(e.deleteMessage === EDITOR_MSG, 'the registry did not keep it');
+});
+
 (async function () {
     for (const [label, fn] of CASES) {
         try {
@@ -583,7 +672,9 @@ def _cut(name):
 def run(tmp_path_factory):
     d = tmp_path_factory.mktemp("editor-close-prompt")
     slices = d / "slices.json"
-    slices.write_text(json.dumps({n: _cut(n) for n in SLICES}), encoding="utf-8")
+    cuts = {n: _cut(n) for n in SLICES}
+    cuts["editor_src"] = (BROKER_DIR / EDITOR_JS).read_text(encoding="utf-8")
+    slices.write_text(json.dumps(cuts), encoding="utf-8")
     harness = d / "harness.js"
     harness.write_text(_HARNESS.replace("__SLICES_PATH__", json.dumps(str(slices))),
                        encoding="utf-8")
@@ -623,3 +714,20 @@ def test_every_declared_label_ran_and_node_exited_clean(run):
     assert run["passed"] == EXPECTED_ASSERTS, run["stdout"]
     assert run["rc"] == 0, run["stderr"]
     assert "HARNESS CRASH" not in run["stdout"], run["stdout"]
+
+
+def test_257_deleteMessage_owners_and_the_one_call():
+    """U1 (source shape): only the registry (54), the Delete item's helper (78)
+    and the editor kind name ``deleteMessage`` -- a second owner would be an
+    unreviewed way to word a destructive confirm -- and the Delete item hands
+    the helper the whole kind, exactly once, so the editor's sentence is the one
+    it shows."""
+    owners = sorted(
+        str(p.relative_to(BROKER_DIR)).replace("\\", "/")
+        for p in BROKER_DIR.rglob("*.js")
+        if "deleteMessage" in p.read_text(encoding="utf-8"))
+    assert owners == ["54_js_app_windows_store.js", "78_js_keybindings.js",
+                      EDITOR_JS], owners
+    keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    assert keys.count("deleteConfirmMessage(_deleteKind)") == 1
+    assert keys.count("function deleteConfirmMessage(kind) {") == 1
