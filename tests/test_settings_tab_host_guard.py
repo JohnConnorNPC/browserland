@@ -1447,7 +1447,7 @@ def test_the_writes_that_should_happen_still_do(run, label):
 # error there would take the whole panel down while every node cell passed).
 NEW_NAMES = ("blankHostSections", "blankInertHostFields", "mcpShowNeutral",
              "cancelProfileDialog", "profileHostIsCurrent",
-             "refuseStaleProfileHost", "_profileDlgFin")
+             "refuseStaleProfileHost", "_profileDlgFin", "_settingsTabGen")
 
 
 @pytest.mark.parametrize("name", NEW_NAMES)
