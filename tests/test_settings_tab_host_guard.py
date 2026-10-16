@@ -18,13 +18,22 @@ fragments at named boundaries and evaluated in one ``with (env)`` scope.
   OSC 52 box, the mod policy list, the browser-global sections, the tab strip
   and the host form (each paints itself or is covered elsewhere).
 
-Atom 1 (this commit) holds the checks that are true of the CURRENT behaviour:
+The checks, by label (each is one pytest param; several run the same scenario
+over four ways of leaving rx: a proxied tab, one in flight, a failed one, and
+Browser, which keeps ``settingsTarget``):
 
-* C6 / C7 -- controls: a direct host's rows render and write to THAT host; the
-  Local tab re-enables what a remote tab leaves off.
-* L1-L3 -- the reason line: loading / could not load / proxied wording.
-* G1 -- a tab switch during the /state await is still honoured.
-* H4 -- the re-render stubs settle: no section re-fetches in a loop.
+* C6-C11 / 4j -- controls: the writes that SHOULD happen still do (profile
+  Delete/Default/Edit Save, Detect suggestion, label up/down/drag, the Start
+  path debounce) and the Local tab re-enables what a remote tab leaves off.
+* L1-L3, G1, H4 -- the reason line, a mid-await switch, and no re-fetch loop.
+* D0a-c, D5 -- the dialog handle; D1-D4 -- a switch closes the profile dialog.
+* B1-B5, H7, P -- the blank on every switch (and not after a good repaint).
+* S1-S4 -- a Start path typed before a switch lands on the host it was typed
+  for, even when the commit throws.
+* Q1a-Q1f, K -- the display-only fields (MCP, default profile, statics,
+  keybindings) are blank; renderMcpConfig's own not-loaded path is neutral.
+* 4a-4i -- profile writers and dialogs refuse a host that is not the open tab;
+  5a-5c -- so do the label-order rows; U1 -- the new names are declared once.
 
 One PASS/FAIL line per assert plus a machine-readable tail; the fixture FAILS
 if a boundary vanishes. Skipped when node is absent.
