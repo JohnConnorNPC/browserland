@@ -147,6 +147,7 @@ class El {
 }
 // Like a browser, a disabled control dispatches no click/change.
 function fire(el, type, ev) {
+    if (!el) return false;
     if (el.disabled && (type === 'click' || type === 'change')) return false;
     const e = Object.assign({ preventDefault() {}, target: el }, ev || {});
     for (const f of (el.listeners[type] || []).slice()) f(e);
@@ -157,8 +158,8 @@ function findAll(el, pred, out) {
     for (const c of el.children) { if (pred(c)) out.push(c); findAll(c, pred, out); }
     return out;
 }
-const buttonsOf = (row, text) => findAll(row, c => c.tag === 'button' && c.textContent === text);
-const rowOf = (list, name) => list.children.find(r => r.textContent.indexOf(name) !== -1);
+const buttonsOf = (row, text) => findAll(row || new El('div'), c => c.tag === 'button' && c.textContent === text);
+const rowOf = (list, name) => list.children.find(r => r.textContent.indexOf(name) !== -1) || null;
 const hasText = (el, s) => el.textContent.indexOf(s) !== -1;
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -418,9 +419,10 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         buttonsOf(row, 'Delete').forEach(b => fire(b, 'click'));
         await settle();
         const posts = w.posts().slice(before);
-        const cb = w.env.labelOrderEl.children[0].children[0];
+        const row0 = w.env.labelOrderEl.children[0];
+        const cb = row0 ? row0.children[0] : null;
         const saves0 = w.saves.filter(s => s === 'rd').length;
-        cb.checked = false; fire(cb, 'change');
+        if (cb) { cb.checked = false; fire(cb, 'change'); }
         const saves1 = w.saves.filter(s => s === 'rd').length;
         ok(names.length === 2 && names[0].indexOf('rd-one') !== -1
            && posts.length === 1 && posts[0] === 'rd POST /profiles/config'
@@ -518,7 +520,9 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
     const openEdit = (w, name) => {
         const row = rowOf(w.env.setProfilesListEl, name);
         buttonsOf(row, 'Edit').forEach(b => fire(b, 'click'));
-        return w.dialogs[w.dialogs.length - 1];
+        // no dialog opened: a stand-in that is 'done', so the check's armed clause fails
+        return w.dialogs[w.dialogs.length - 1]
+            || { done: true, result: undefined, finish: null, spec: {}, body: new El('div') };
     };
     {
         const w = mkWorld(); w.seed(['rx']);
@@ -679,10 +683,11 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
     }
     {
         const w = mkWorld(); await paintRx(w);
-        w.env.openDialog({ title: 'a mod dialog' });
+        const mine = openEdit(w, 'rx-alpha');
+        w.env.openDialog({ title: 'a mod dialog' });     // replaces ours before anything settles
         const foreign = w.dialogs[w.dialogs.length - 1];
-        const armed = !foreign.done && w.env._dlgFinish === foreign.finish
-            && w.env._profileDlgFin === null;
+        const armed = foreign !== mine && !foreign.done && w.env._dlgFinish === foreign.finish
+            && w.env._profileDlgFin === mine.finish;      // our handle is still set, but stale
         await w.visit('rb');
         ok(armed && !foreign.done && w.env._dlgFinish === foreign.finish,
            'D3 a dialog that is not the panel\u2019s survives a tab switch', { armed, done: foreign.done });
