@@ -60,6 +60,16 @@ EXPECTED_LABELS = [
     "X1 a window reaped during the prompt is never saved",
     "T1 a multi-tab editor names the open documents and saves them all",
     "I1 a mousedown inside the box leaves the prompt open",
+    # atom 2: the three-way prompt (red before it)
+    "C1 Cancel keeps the editor and its text",
+    "C2 Escape keeps the editor and its text",
+    "C3 a click outside the box keeps the editor and its text",
+    "D1 Don't save closes without writing",
+    "P1b the buttons are Save, Don't save, Cancel; Save is primary, Don't save is danger and not primary",
+    "R2 a dialog opened over the prompt answers Cancel",
+    "R2b a second close request makes the first one Cancel",
+    "X2 a window reaped during the prompt: Don't save writes nothing, Cancel closes nothing",
+    "T2 a multi-tab editor honours Cancel, Escape and Don't save",
 ]
 
 EXPECTED_ASSERTS = len(EXPECTED_LABELS)
@@ -419,6 +429,127 @@ C("I1 a mousedown inside the box leaves the prompt open", async function (w) {
     must(!call.settled, 'a click inside the box answered the prompt');
     must(w.overlays().length === 1, 'the dialog went away');
     await dismiss(w, call);
+});
+
+const THREE = ['Save', "Don't save", 'Cancel'];
+// Nothing was closed, written or discarded: the window and its dirty text stay.
+function mustKeep(w, win) {
+    must(w.closes().length === 0, 'closed: ' + JSON.stringify(w.closes()));
+    must(w.attempted.length === 0, 'closeWindow was called: ' + w.attempted);
+    must(w.windows.has(win.id), 'the window left the desktop');
+    must(w.windows.get(win.id) === win, 'the window was replaced');
+    must(w.saves().length === 0, 'something was written: ' + w.saves());
+    must(win.tabs ? win.tabs[0].dirty === true : win.dirty === true,
+         'the unsaved text lost its dirty mark');
+}
+
+C("C1 Cancel keeps the editor and its text", async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    await terminal(w, call, function () { w.click('Cancel'); });
+    mustKeep(w, win);
+});
+
+C("C2 Escape keeps the editor and its text", async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    await terminal(w, call, function () { w.key('Escape'); });
+    mustKeep(w, win);
+});
+
+C("C3 a click outside the box keeps the editor and its text", async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    await terminal(w, call, function () { w.backdrop(); });
+    mustKeep(w, win);
+});
+
+C("D1 Don't save closes without writing", async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    await terminal(w, call, function () { w.click("Don't save"); });
+    must(w.closes().join() === win.id, 'closes: ' + JSON.stringify(w.closes()));
+    must(w.saves().length === 0, 'something was written: ' + w.saves());
+    must(!w.windows.has(win.id), 'the window is still open');
+});
+
+C("P1b the buttons are Save, Don't save, Cancel; Save is primary, Don't save is danger and not primary",
+  async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    const by = {};
+    w.buttons().forEach(function (b) { by[b.label] = b.classes; });
+    const has = function (label, cls) { return by[label].indexOf(cls) >= 0; };
+    must(has('Save', 'primary') && !has('Save', 'danger'), 'Save: ' + by['Save']);
+    must(has("Don't save", 'danger') && !has("Don't save", 'primary'),
+         "Don't save: " + by["Don't save"]);
+    must(!has('Cancel', 'primary') && !has('Cancel', 'danger'), 'Cancel: ' + by['Cancel']);
+    await dismiss(w, call);
+});
+
+C("R2 a dialog opened over the prompt answers Cancel", async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    w.openDialog({ title: 'Other', buttons: [{ label: 'Fine', value: 1, primary: true }] });
+    await tick();
+    must(call.settled && call.threw === null, 'the prompt did not settle cleanly');
+    mustKeep(w, win);
+    must(w.overlays().length === 1 && w.title() === 'Other',
+         'the replacing dialog is not the one on screen');
+    w.key('Escape');
+    await tick();
+    must(w.overlays().length === 0, 'the replacing dialog would not close');
+});
+
+C("R2b a second close request makes the first one Cancel", async function (w) {
+    const win = w.editor();
+    const first = await prompt(w, win, THREE);
+    const second = await prompt(w, win, THREE);
+    must(first.settled && first.threw === null, 'the first request is still pending');
+    mustKeep(w, win);
+    await terminal(w, second, function () { w.click("Don't save"); });
+    must(w.closes().join() === win.id, 'closes: ' + JSON.stringify(w.closes()));
+});
+
+C("X2 a window reaped during the prompt: Don't save writes nothing, Cancel closes nothing",
+  async function (w) {
+    const win = w.editor();
+    const call = await prompt(w, win, THREE);
+    win.disposed = true;
+    w.windows.delete(win.id);
+    await terminal(w, call, function () { w.click("Don't save"); });
+    must(w.saves().length === 0, 'saved a dead window: ' + w.saves());
+    must(w.attempted.join() === win.id, 'attempted: ' + w.attempted);
+    must(w.closes().length === 0, 'a dead window was recorded as closed');
+
+    const w2 = mkWorld();
+    const win2 = w2.editor();
+    const call2 = await prompt(w2, win2, THREE);
+    win2.disposed = true;
+    w2.windows.delete(win2.id);
+    await terminal(w2, call2, function () { w2.click('Cancel'); });
+    must(w2.attempted.length === 0 && w2.saves().length === 0,
+         'Cancel touched a dead window: ' + w2.attempted + ' / ' + w2.saves());
+});
+
+C("T2 a multi-tab editor honours Cancel, Escape and Don't save", async function (w) {
+    const win = w.editor({ tabs: true });
+    const call = await prompt(w, win, THREE);
+    await terminal(w, call, function () { w.click('Cancel'); });
+    mustKeep(w, win);
+
+    const wb = mkWorld();
+    const winb = wb.editor({ tabs: true });
+    const callb = await prompt(wb, winb, THREE);
+    await terminal(wb, callb, function () { wb.key('Escape'); });
+    mustKeep(wb, winb);
+
+    const wc = mkWorld();
+    const winc = wc.editor({ tabs: true });
+    const callc = await prompt(wc, winc, THREE);
+    await terminal(wc, callc, function () { wc.click("Don't save"); });
+    must(wc.closes().join() === winc.id, 'closes: ' + JSON.stringify(wc.closes()));
+    must(wc.saves().length === 0, 'something was written: ' + wc.saves());
 });
 
 (async function () {

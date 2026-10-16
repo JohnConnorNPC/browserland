@@ -768,9 +768,12 @@
         // User-initiated close for an app window — the one place a save prompt
         // belongs (closeWindow itself stays non-blocking: the /sessions poll
         // reaper calls it in a loop, so it can never await/confirm). For a dirty
-        // text-editor, offer to flush the SERVER file first; the buffer already
-        // autosaves to appStore, so declining only skips the server-file write.
-        // Then tear down via the normal closeWindow path.
+        // text-editor, ask Save / Don't save / Cancel. Save writes the SERVER
+        // file(s) first, then closes; Don't save closes without writing (the
+        // editor kind sets no retainOnClose, so closeWindow drops its store
+        // record and the unsaved text is gone); Cancel — and Escape, a click
+        // outside the box, and any later dialog that replaces this one — closes
+        // nothing. Then tear down via the normal closeWindow path.
         async function requestCloseAppWindow(id) {
             const win = windows.get(id);
             if (!win || win.type !== 'app') { closeWindow(id); return; }
@@ -788,17 +791,31 @@
                 ? win.tabs.some(d => d.kind === 'file' && d.dirty)
                 : win.dirty;
             if (win.appKind === 'text-editor' && anyDirty) {
-                // OK = save the server file(s) before closing; Cancel = close
-                // without writing them (the buffers still live in appStore, so
-                // nothing is lost — they reopen dirty). If the user asked to save
-                // but a write fails / Save As is cancelled, keep the window open
-                // rather than silently dropping the server save.
+                // Only an explicit Save or Don't save goes on to close. The dialog
+                // answers null for Escape, a backdrop click, or another dialog
+                // opening over it (openDialog is a singleton); that, like Cancel,
+                // keeps the window and its text. If the user asked to save but a
+                // write fails / Save As is cancelled, keep the window open rather
+                // than silently dropping the server save.
                 const what = win.tabs ? 'the open documents'
                     : (win.filePath || 'this file');
-                if (await openConfirmDialog({
-                        title: 'Unsaved changes',
-                        message: 'Save changes to ' + what + ' before closing?',
-                        okLabel: 'Save' })) {
+                const r = await openDialog({
+                    title: 'Unsaved changes',
+                    body: function (c) {
+                        const p = document.createElement('div');
+                        p.className = 'app-dialog-msg';
+                        p.textContent = 'Save changes to ' + what + ' before closing?';
+                        c.appendChild(p);
+                    },
+                    buttons: [
+                        { label: 'Save', value: 'save', primary: true },
+                        { label: "Don't save", value: 'discard', danger: true },
+                        { label: 'Cancel', value: 'cancel' },
+                    ],
+                });
+                const choice = r && r.value;
+                if (choice !== 'save' && choice !== 'discard') return;
+                if (choice === 'save') {
                     // The /sessions reaper can call closeWindow during the dialog,
                     // tearing the window down — don't try to save a dead window.
                     if (win.disposed) return;
