@@ -832,11 +832,12 @@
 
         // Permanently discard an app document. closeWindow already tears down
         // the window, drops _layout membership, and (for app docs) removes the
-        // chip + synthetic session and marks the store record open:false; this
-        // additionally deletes the store record so it's gone for good. The
-        // chip/session removal below is redundant-but-harmless belt-and-braces.
-        // This is the explicit "Delete note"/"Delete file" action — the × button
-        // keeps the doc (reopen from the launch menu); only this throws it away.
+        // chip + synthetic session and deletes the store record unless the
+        // kind's retainOnClose keeps it; this deletes the record whatever
+        // retainOnClose says, so it's gone for good. The chip/session removal
+        // below is redundant-but-harmless belt-and-braces. This is the explicit
+        // "Delete note"/"Delete file" action — the × button keeps only what the
+        // kind's retainOnClose keeps (see closeWindow); only this throws it away.
         function destroyAppWindow(id) {
             closeWindow(id);
             const tItem = document.querySelector(
