@@ -739,3 +739,50 @@ def test_257_deleteMessage_owners_and_the_one_call():
     keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
     assert keys.count("deleteConfirmMessage(_deleteKind)") == 1
     assert keys.count("function deleteConfirmMessage(kind) {") == 1
+
+
+# ---- the callers (source shape) ---------------------------------------------
+# The cases above prove requestCloseAppWindow. They cannot see WHO calls it: a
+# Close path that goes straight to closeWindow (wireAppChrome's fallback is
+# `onClose || closeWindow`) would bring the data loss back with every label
+# green. So each user Close path is pinned to its exact call, in CODE (full-line
+# comments are dropped before counting), read from the real source.
+
+def _code(rel):
+    src = (BROKER_DIR / rel).read_text(encoding="utf-8")
+    assert src.strip(), f"{rel} read empty"
+    return "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("//"))
+
+
+def _arm_close_items():
+    keys = _code("78_js_keybindings.js")
+    # both Close menu items and the shortcut's function exist to be pinned
+    assert keys.count("label: 'Close',") == 2, "the two Close menu items moved"
+    assert keys.count("function closeFrontWindow() {") == 1
+    return keys
+
+
+def test_257_pin_editor_x_button():
+    runtime = _code("73_js_window_runtime.js")
+    # the subject: wireAppChrome falls back to closeWindow when handed no close
+    assert runtime.count("function wireAppChrome(win, chrome, onClose) {") == 1
+    assert runtime.count("const close = onClose || closeWindow;") == 1
+    editor = _code(EDITOR_JS)
+    assert editor.count(
+        "wireAppChrome(win, chrome, requestCloseAppWindow);") == 1
+
+
+def test_257_pin_titlebar_close():
+    keys = _arm_close_items()
+    assert keys.count("? requestCloseAppWindow(win.id)") == 1
+
+
+def test_257_pin_taskbar_close():
+    keys = _arm_close_items()
+    assert keys.count("? requestCloseAppWindow(key) : closeWindow(key)") == 1
+
+
+def test_257_pin_close_shortcut():
+    keys = _arm_close_items()
+    assert keys.count("requestCloseAppWindow(frontId);") == 1
