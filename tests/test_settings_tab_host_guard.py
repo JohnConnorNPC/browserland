@@ -100,7 +100,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 52
+EXPECTED_ASSERTS = 53
 
 _HARNESS = r"""
 'use strict';
@@ -266,7 +266,7 @@ function mkWorld() {
         // ---- shared module state: OWN properties, never in a slice ----------
         settingsTarget: null, currentSettingsTab: 'local', settingsOpenHostId: null,
         _kbRecording: null, _labelDragKey: null, _startPathTimer: null,
-        _profileDlgFin: null, _dlgFinish: null,
+        _profileDlgFin: null, _dlgFinish: null, _settingsTabGen: 0,
         profilePickerCleanups: [], profilePickerTargets: [],
         LABEL_ORDER_NAMES: { id: 'window id', host: 'host', pid: 'pid', title: 'title' },
         PROFILES_TERMINALS_OFF_NOTE_UNUSED: null,
@@ -408,7 +408,7 @@ function mkWorld() {
     return w;
 }
 const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostId',
-    '_kbRecording', '_labelDragKey', '_startPathTimer', '_profileDlgFin', '_dlgFinish',
+    '_kbRecording', '_labelDragKey', '_startPathTimer', '_profileDlgFin', '_dlgFinish', '_settingsTabGen',
     'profilePickerCleanups', 'profilePickerTargets'];
 
 (async function () {
@@ -1180,6 +1180,32 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
            { sug: !!sug, title: add && add.spec && add.spec.title });
     }
 
+    // ---- G2: two live /state GETs for the SAME host (round 1) -------------------------
+    {
+        const w = mkWorld(); w.seed(['rx', 'rd']);
+        const entA = clone(w.entries.rx); entA.settings.startPath = 'C:/old-answer';
+        const entC = clone(w.entries.rx); entC.settings.startPath = 'C:/new-answer';
+        w.mode = 'gate';
+        const pA = w.fn.selectSettingsTab('rx');        // the older GET for rx
+        const pB = w.fn.selectSettingsTab('rd');
+        const pC = w.fn.selectSettingsTab('rx');        // the newer GET for rx
+        const rxGates = w.gates.filter(g => g.id === 'rx');
+        const rdGate = w.gates.find(g => g.id === 'rd');
+        const armed = rxGates.length === 2 && !!rdGate && entA.settings !== entC.settings
+            && w.env.currentSettingsTab === 'rx' && w.env.settingsTarget === null;
+        rxGates[1].res(entC); await settle();             // the newer answer lands first
+        const target = w.env.settingsTarget;
+        const newerFirst = !!target && target.s === entC.settings
+            && w.env.setStartPathEl.value === 'C:/new-answer';
+        rxGates[0].res(entA); await settle();             // the older one lands last
+        rdGate.res(w.entries.rd); await pA; await pB; await pC; await settle();
+        ok(armed && newerFirst && w.env.settingsTarget === target && target.s === entC.settings
+           && w.env.setStartPathEl.value === 'C:/new-answer',
+           'G2 an older /state answer for the same host landing last does not replace the newer target',
+           { armed, newerFirst, startPath: w.env.setStartPathEl.value,
+             isNewer: w.env.settingsTarget && w.env.settingsTarget.s === entC.settings });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -1238,6 +1264,7 @@ def _ok(run, label):
     "L2 a failed direct host shows \"could not load this broker’s settings\"",
     "L3 a proxied host says its settings are not available through this broker",
     "G1 an old /state answer landing after a switch to Local paints nothing of rx",
+    "G2 an older /state answer for the same host landing last does not replace the newer target",
     "H4 painting three tabs fetches each section at most twice per visit (no re-entry loop)",
 ])
 def test_controls_and_reason_lines(run, label):

@@ -237,6 +237,7 @@
             // throwing save must not stop the switch (or the blank) from happening.
             try { if (_startPathTimer) commitStartPath(); } catch (_) {}
             currentSettingsTab = tabId;
+            const myGen = ++_settingsTabGen;
             _kbRecording = null;
             // #255: whatever the previous tab painted is not about THIS tab.
             blankHostSections();
@@ -302,7 +303,7 @@
             setPaneHost.classList.add('loading');
             const entry = await fetchHostState(tabId);
             // The user may have switched tabs again while awaiting.
-            if (currentSettingsTab !== tabId) return;
+            if (currentSettingsTab !== tabId || myGen !== _settingsTabGen) return;
             setHostLoadingEl.style.display = 'none';
             setPaneHost.classList.remove('loading');
             if (!entry) {
@@ -413,6 +414,9 @@
         // list the Control Panel opened, so a tab switch can close it (its Save
         // is bound to the host it was opened for). Null when none is ours.
         let _profileDlgFin = null;
+        // #255 round 1: bumped on every selectSettingsTab, so an older /state answer
+        // for a tab that has since been re-opened cannot replace the newer target.
+        let _settingsTabGen = 0;
         function renderLabelOrder(t) {
             const host = document.getElementById('set-label-order');
             if (!host) return;
