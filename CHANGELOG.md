@@ -233,6 +233,14 @@ story behind anything named below.
 
 ### Fixed
 
+- **Cancelling the close prompt of an unsaved text editor no longer throws its
+  text away** (#257). Closing an editor with unsaved changes offered only Save
+  and Cancel, and Cancel (and Esc, and a click outside the box) closed the
+  editor and discarded the text. The prompt is now Save, Don't save and Cancel:
+  Cancel, Esc and a click outside keep the editor open with its text, and only
+  Don't save discards it. The editor's *Delete file* confirmation now says it
+  closes the editor and discards unsaved text, and that the file on disk is not
+  touched.
 - **A Control Panel host tab no longer shows or writes the previous host's
   settings** (#255). Switching to a host that is reached through this broker,
   still loading or unreachable left the previous host's profile list, label
