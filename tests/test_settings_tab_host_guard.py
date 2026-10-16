@@ -91,7 +91,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 34
+EXPECTED_ASSERTS = 45
 
 _HARNESS = r"""
 'use strict';
@@ -304,6 +304,7 @@ function mkWorld() {
                 return respond(w.mcp[h.id] || { ok: false }, !!w.mcp[h.id]);
             }
             if (path === '/profiles/detect') {
+                if (w.holdDetect) await w.holdDetect;
                 return respond({ ok: true, suggestions: [
                     { name: 'sug', title: 'Sug', command: ['sug.exe'] }] });
             }
@@ -925,6 +926,131 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         ok(allArms(r), 'K the keybinding rows of the previous host are gone on every arm, Browser included', r);
     }
 
+    // ---- atom 5: the profile writers refuse a host that is not the open tab ----------
+    // Rows are painted for rx; the tab is then left by each arm; the DETACHED
+    // row's handler is fired (a late answer, an Edit dialog's Save, a Detect scan).
+    // `capture` proves the subject exists before the switch ("armed").
+    const profilesEmpty = (w) => w.env.setProfilesListEl.children.length === 0
+        && w.env.setProfilesListEl.textContent === '';
+    const stale = async (capture, act, arms) => {
+        const out = { armed: true };
+        for (const arm of (arms || ARMS)) {
+            const w = mkWorld(); await paintRx(w);
+            const subj = capture(w);
+            if (!subj.armed) out.armed = false;
+            await leave(w, arm);
+            const f0 = w.fetches.length, d0 = w.dialogs.length;
+            let threw = null;
+            try { await act(w, subj); } catch (e) { threw = String(e); }
+            await settle();
+            const newFetches = w.fetches.slice(f0);
+            out[arm] = (threw === null && newFetches.length === 0 && w.dialogs.length === d0
+                        && profilesEmpty(w)) ? true : { threw, newFetches, dialogs: w.dialogs.length - d0,
+                                                        empty: profilesEmpty(w) };
+        }
+        return out;
+    };
+    const rowBtn = (text) => (w) => {
+        const row = rowOf(w.env.setProfilesListEl, 'rx-beta');
+        const b = row ? buttonsOf(row, text)[0] : null;
+        return { armed: !!b && !b.disabled, b };
+    };
+    const BROWSER = ['browser'];
+    {   // 4a Delete
+        const r = await stale(rowBtn('Delete'), (w, s) => fire(s.b, 'click'));
+        ok(allArms(r), '4a a stale Delete posts nothing and leaves the list empty on every arm', r);
+    }
+    {   // 4b Default (a NON-default row, or the click would never fire)
+        const r = await stale(rowBtn('Default'), (w, s) => fire(s.b, 'click'));
+        ok(allArms(r), '4b a stale Default posts nothing and leaves the list empty on every arm', r);
+    }
+    {   // 4c colour pick (the raw handler: the picker itself is already disposed)
+        const r = await stale((w) => {
+            const rec = w.pickers.find(p => p.target.color === '#ff0000');
+            return { armed: !!rec, rec };
+        }, (w, s) => s.rec.onPick({ color: '#00ff00' }));
+        ok(allArms(r), '4c a stale colour pick posts nothing, does not throw, and leaves the list empty', r);
+    }
+    {   // 4d colour clear (the coloured row has the x)
+        const r = await stale(rowBtn('✕'), (w, s) => fire(s.b, 'click'));
+        ok(allArms(r), '4d a stale colour clear posts nothing and leaves the list empty on every arm', r);
+    }
+    {   // 4e-open Edit on a stale row opens no dialog
+        const r = await stale(rowBtn('Edit'), (w, s) => fire(s.b, 'click'));
+        ok(allArms(r), '4e-open a stale Edit opens no dialog and posts nothing', r);
+    }
+    {   // 4e-save an Edit dialog's Save that resolves while the tab is being left
+        const out = { armed: true };
+        for (const arm of ARMS) {
+            const w = mkWorld(); await paintRx(w);
+            const dlg = openEdit(w, 'rx-beta');
+            if (!dlg || dlg.done) out.armed = false;
+            dlg.finish({ value: 'save' });             // resolved, its .then still queued
+            const p = leave(w, arm);                   // the switch runs before that .then
+            await p; await settle();
+            const posts = w.posts();
+            out[arm] = posts.length === 0 ? true : { posts };
+        }
+        ok(allArms(out), '4e-save a dialog Save that lands after the switch posts nothing', out);
+    }
+    {   // 4f a Detect answer after the switch opens no list
+        const out = { armed: true };
+        for (const arm of ARMS) {
+            const w = mkWorld(); await paintRx(w);
+            let release; w.holdDetect = new Promise((res) => { release = res; });
+            fire(w.env.setProfileDetectBtn, 'click'); await settle(2);
+            const d0 = w.dialogs.length;
+            if (w.env.setProfileDetectBtn.disabled || !w.fetches.some(f => /profiles\/detect/.test(f))) out.armed = false;
+            await leave(w, arm);
+            release(); await settle(4);
+            out[arm] = w.dialogs.length === d0 ? true : { dialogs: w.dialogs.length - d0 };
+        }
+        ok(allArms(out), '4f a Detect scan answering after the switch opens no list', out);
+    }
+    {   // 4g the Browser tab, where settingsTarget is still rx's
+        const r = await stale(rowBtn('Delete'), (w, s) => fire(s.b, 'click'), BROWSER);
+        const r2 = await stale(rowBtn('Default'), (w, s) => fire(s.b, 'click'), BROWSER);
+        ok(r.armed && r2.armed && r.browser === true && r2.browser === true,
+           '4g on the Browser tab a stale Delete or Default posts nothing (the guard follows the open tab, not settingsTarget)',
+           { delete: r, def: r2 });
+    }
+    {   // 4h the refusal on Browser repaints EMPTY and requests nothing
+        const w = mkWorld(); await paintRx(w);
+        const s = rowBtn('Delete')(w);
+        await w.visit('browser');
+        const f0 = w.fetches.length;
+        fire(s.b, 'click'); await settle();
+        const cfgReqs = w.fetches.slice(f0).filter(f => /profiles\/config/.test(f));
+        ok(s.armed && w.env.settingsTarget && w.env.settingsTarget.hostId === 'rx'
+           && profilesEmpty(w) && cfgReqs.length === 0 && w.fetches.length === f0,
+           '4h a refused write on Browser leaves the list empty and requests no /profiles/config',
+           { armed: s.armed, cfgReqs, empty: profilesEmpty(w), text: w.env.setProfilesListEl.textContent });
+    }
+    {   // 4i a Detect suggestion clicked after the switch opens no dialog
+        const out = { armed: true };
+        for (const arm of ARMS) {
+            const w = mkWorld(); await paintRx(w);
+            fire(w.env.setProfileDetectBtn, 'click'); await settle(2);
+            const list = w.dialogs[w.dialogs.length - 1];
+            const sug = list ? findAll(list.body, c => c.className === 'set-detect-item')[0] : null;
+            if (!sug) out.armed = false;
+            await leave(w, arm);
+            const d0 = w.dialogs.length;
+            if (sug) fire(sug, 'click'); await settle();
+            out[arm] = (sug && w.dialogs.length === d0) ? true : { dialogs: w.dialogs.length - d0, sug: !!sug };
+        }
+        ok(allArms(out), '4i a stale Detect suggestion opens no dialog', out);
+    }
+    {   // 4j control: the SAME host's writes still go through while its tab is open
+        const w = mkWorld(); await paintRx(w);
+        const row = rowOf(w.env.setProfilesListEl, 'rx-beta');
+        const f0 = w.posts().length;
+        buttonsOf(row, 'Default').forEach(b => fire(b, 'click')); await settle();
+        const posts = w.posts().slice(f0);
+        ok(posts.length === 1 && posts[0] === 'rx POST /profiles/config' && w.cfg.rx.default_profile === 'rx-beta',
+           '4j control: on rx\u2019s own open tab Default POSTs to rx exactly once', { posts });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -1037,6 +1163,23 @@ def test_start_path_debounce(run, label):
     "K the keybinding rows of the previous host are gone on every arm, Browser included",
 ])
 def test_inert_fields_are_blanked(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "4a a stale Delete posts nothing and leaves the list empty on every arm",
+    "4b a stale Default posts nothing and leaves the list empty on every arm",
+    "4c a stale colour pick posts nothing, does not throw, and leaves the list empty",
+    "4d a stale colour clear posts nothing and leaves the list empty on every arm",
+    "4e-open a stale Edit opens no dialog and posts nothing",
+    "4e-save a dialog Save that lands after the switch posts nothing",
+    "4f a Detect scan answering after the switch opens no list",
+    "4g on the Browser tab a stale Delete or Default posts nothing (the guard follows the open tab, not settingsTarget)",
+    "4h a refused write on Browser leaves the list empty and requests no /profiles/config",
+    "4i a stale Detect suggestion opens no dialog",
+    "4j control: on rx’s own open tab Default POSTs to rx exactly once",
+])
+def test_profile_writers_refuse_a_stale_host(run, label):
     _ok(run, label)
 
 

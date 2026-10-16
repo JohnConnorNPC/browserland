@@ -1587,8 +1587,36 @@
             const def = (cfg.default_profile === name) ? '' : cfg.default_profile;
             saveProfilesConfig(host, np, def);
         }
+        // #255: the profile rows bind their host when they are RENDERED, so a
+        // handler that outlives its render (a colour dialog answering late, an
+        // Edit dialog's Save, a Detect scan returning after a switch) would write
+        // the previous host's set to that host. Every profile write and dialog
+        // asks first whether `host` is the host of the tab that is open NOW --
+        // currentSettingsTab, as the mod-policy select does, never
+        // profilesEditorHost(): that follows settingsTarget, which Browser keeps.
+        function profileHostIsCurrent(host) {
+            const h = hostById(currentSettingsTab);
+            return !!h && !!host && h.id === host.id;
+        }
+        // A refused write repaints only when the editor is showing the current
+        // host; anywhere else the list is emptied, never repainted from a target
+        // that is not this tab's.
+        function refuseStaleProfileHost() {
+            const cur = profilesEditorHost();
+            if (cur && profileHostIsCurrent(cur)) {
+                renderProfilesEditor();
+            } else {
+                flushProfilePickers();
+                if (setProfilesListEl) setProfilesListEl.textContent = '';
+            }
+        }
         function saveProfilesConfig(host, profiles, defaultProfile) {
             if (!host) return;
+            // A settled promise, not undefined: applyProfileColor chains .then.
+            if (!profileHostIsCurrent(host)) {
+                refuseStaleProfileHost();
+                return Promise.resolve();
+            }
             return hostFetch(host, '/profiles/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1622,6 +1650,7 @@
         // textarea, ONE argv token per line — avoids fragile quote-splitting: the
         // array joins to lines and splits back on newlines.
         function openProfileDialog(host, editName, preset) {
+            if (!profileHostIsCurrent(host)) { refuseStaleProfileHost(); return; }
             // NEVER fall back to a phantom {profiles:{}}. saveProfilesConfig
             // POSTs the WHOLE set and the broker persists exactly what it is
             // sent (app.py _profiles_config_post writes `to_persist` verbatim),
@@ -1717,6 +1746,8 @@
             hostFetch(host, '/profiles/detect', { timeoutMs: 15000 })
                 .then(r => (r.ok ? r.json() : null))
                 .then(j => {
+                    // The scan can take 15 s: the tab it was started for may be gone.
+                    if (!profileHostIsCurrent(host)) { refuseStaleProfileHost(); return; }
                     const list = (j && j.ok && Array.isArray(j.suggestions))
                         ? j.suggestions : [];
                     openDialog({
