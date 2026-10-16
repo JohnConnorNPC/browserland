@@ -816,8 +816,9 @@
                 const choice = r && r.value;
                 if (choice !== 'save' && choice !== 'discard') return;
                 if (choice === 'save') {
-                    // The /sessions reaper can call closeWindow during the dialog,
-                    // tearing the window down — don't try to save a dead window.
+                    // The window can be torn down while the dialog is up (its file
+                    // host removed, or its mod unloaded: both call closeWindow) —
+                    // don't try to save a dead window.
                     if (win.disposed) return;
                     let ok = false;
                     const saver = win._saveAllDirty || win._saveToServer;
