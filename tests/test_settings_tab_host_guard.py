@@ -85,6 +85,9 @@ SLICES = {
     "startpath": ("81_js_control_panel.js",
                   "        const commitStartPath = () => {",
                   "        setStartPathEl.addEventListener('change', commitStartPath);"),
+    "mcpsave": ("81_js_control_panel.js",
+                "        // POST a patch to /mcp/config",
+                "        if (setMcpEnabled) {"),
     "keys": ("82_js_settings_keys_hosts.js",
              "        function renderKeybindings() {",
              "        // ---- settings: hosts"),
@@ -97,10 +100,10 @@ SLICES = {
 }
 # Source order, one string: cross-fragment siblings (flushSettingsEdits with
 # commitStartPath, the profile writers with each other) must share a scope.
-SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
+SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "mcpsave", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 53
+EXPECTED_ASSERTS = 57
 
 _HARNESS = r"""
 'use strict';
@@ -302,6 +305,12 @@ function mkWorld() {
             w.fetches.push(h.id + ' ' + method + ' ' + path);
             const respond = (body, okv) => ({ ok: okv !== false, status: okv === false ? 404 : 200,
                                               json: async () => body });
+            if (method === 'POST' && w.holdPost) await w.holdPost;
+            if (path === '/mcp/config' && method === 'POST') {
+                const nb = Object.assign({}, w.mcp[h.id] || {}, JSON.parse(init.body), { ok: true });
+                w.mcp[h.id] = nb;
+                return respond(nb);
+            }
             if (path === '/profiles/config' && method === 'POST') {
                 const b = JSON.parse(init.body);
                 const nb = { ok: true, profiles: b.profiles, default_profile: b.default_profile,
@@ -383,7 +392,7 @@ function mkWorld() {
         'renderMcpConfig', 'renderDefaultProfile', 'renderKeybindings', 'flushSettingsEdits',
         'makeLocalTarget', 'makeRemoteTarget', 'profilesEditorHost', 'flushProfilePickers',
         'applyProfileColor', 'deleteProfile', 'saveProfilesConfig', 'openProfileDialog',
-        'detectProfiles', 'hostSettingsLoadError', 'clearHostLoading', 'commitStartPath',
+        'detectProfiles', 'saveMcpConfig', 'hostSettingsLoadError', 'clearHostLoading', 'commitStartPath',
         'blankHostSections', 'blankInertHostFields', 'cancelProfileDialog', 'mcpShowNeutral',
         'profileHostIsCurrent', 'refuseStaleProfileHost']);
     w.fn = fns;
@@ -1206,6 +1215,68 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
              isNewer: w.env.settingsTarget && w.env.settingsTarget.s === entC.settings });
     }
 
+    // ---- B6: a save that lands after the switch (round 1) -----------------------------
+    // The POST is HELD at the stub, the tab is left, then the POST is released: its
+    // success continuation must not repaint the previous host into the blanked sections.
+    const holdPost = (w) => {
+        let release; w.holdPost = new Promise((r) => { release = r; });
+        return () => { w.holdPost = null; release(); };
+    };
+    const deleteBeta = async (w) => {
+        const row = rowOf(w.env.setProfilesListEl, 'rx-beta');
+        const b = buttonsOf(row, 'Delete')[0];
+        if (b) fire(b, 'click');
+        await settle(2);
+        return !!b && w.posts().length === 1 && hasText(w.env.setProfilesListEl, 'rx-beta');
+    };
+    {   // B6a the profile POST lands on Browser
+        const w = mkWorld(); await paintRx(w);
+        const release = holdPost(w);
+        const held = await deleteBeta(w);
+        await w.visit('browser');
+        release(); await settle(6);
+        const landed = !w.cfg.rx.profiles['rx-beta'] && !w.env.profilesConfigCache.get('rx').profiles['rx-beta'];
+        ok(held && landed && isBlank(w) && w.env.setDefaultProfile.children.length === 1,
+           'B6a a profile save landing after the switch to Browser repaints nothing of rx',
+           { held, landed, text: w.env.setProfilesListEl.textContent, opts: w.env.setDefaultProfile.children.length });
+    }
+    {   // B6a-ctl the same save with the tab left open still repaints
+        const w = mkWorld(); await paintRx(w);
+        const release = holdPost(w);
+        const held = await deleteBeta(w);
+        release(); await settle(6);
+        const landed = !w.cfg.rx.profiles['rx-beta'];
+        ok(held && landed && hasText(w.env.setProfilesListEl, 'rx-alpha') && !hasText(w.env.setProfilesListEl, 'rx-beta')
+           && w.env.setProfileAddBtn.disabled === false && w.env.setDefaultProfile.children.length >= 2,
+           'B6a-ctl control: the same save with rx\u2019s tab left open repaints the list and the default-profile select',
+           { held, landed, text: w.env.setProfilesListEl.textContent, opts: w.env.setDefaultProfile.children.length });
+    }
+    {   // B6b the MCP POST lands on Browser
+        const w = mkWorld(); await paintRx(w);
+        const armed = w.env.setMcpUrlEl.textContent === 'http://rx:1/mcp' && w.env.setMcpDefaultMode.value === 'rw';
+        const release = holdPost(w);
+        w.fn.saveMcpConfig({ default_mode: 'ro' }); await settle(2);
+        const held = w.posts().length === 1 && w.posts()[0] === 'rx POST /mcp/config';
+        await w.visit('browser');
+        release(); await settle(6);
+        const landed = w.mcp.rx.default_mode === 'ro' && w.env.mcpConfigCache.get('rx').default_mode === 'ro';
+        const e = w.env;
+        ok(armed && held && landed && e.setMcpUrlEl.textContent === '\u2014' && e.setMcpToken.value === ''
+           && e.setMcpDefaultMode.value === 'off' && e.setMcpCopyJson.disabled === true && e.setMcpToken.disabled === false,
+           'B6b an MCP save landing after the switch to Browser repaints nothing of rx',
+           { armed, held, landed, url: e.setMcpUrlEl.textContent, token: e.setMcpToken.value, mode: e.setMcpDefaultMode.value });
+    }
+    {   // B6b-ctl the same save with the tab left open still repaints
+        const w = mkWorld(); await paintRx(w);
+        const release = holdPost(w);
+        w.fn.saveMcpConfig({ default_mode: 'ro' }); await settle(2);
+        const held = w.posts().length === 1 && w.posts()[0] === 'rx POST /mcp/config';
+        release(); await settle(6);
+        ok(held && w.env.setMcpDefaultMode.value === 'ro' && w.env.setMcpUrlEl.textContent === 'http://rx:1/mcp',
+           'B6b-ctl control: the same save with rx\u2019s tab left open repaints the MCP section',
+           { held, mode: w.env.setMcpDefaultMode.value, url: w.env.setMcpUrlEl.textContent });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -1345,6 +1416,16 @@ def test_profile_writers_refuse_a_stale_host(run, label):
     "5c re-selecting the same tab while it loads leaves the old label-order rows unable to save",
 ])
 def test_label_order_refuses_a_stale_target(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "B6a a profile save landing after the switch to Browser repaints nothing of rx",
+    "B6a-ctl control: the same save with rx’s tab left open repaints the list and the default-profile select",
+    "B6b an MCP save landing after the switch to Browser repaints nothing of rx",
+    "B6b-ctl control: the same save with rx’s tab left open repaints the MCP section",
+])
+def test_a_save_landing_after_the_switch(run, label):
     _ok(run, label)
 
 

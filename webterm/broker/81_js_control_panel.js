@@ -734,7 +734,7 @@
             }).then(r => (r.ok ? r.json() : null)).then(j => {
                 if (j && j.ok) {
                     mcpConfigCache.set(host.id, j);
-                    if (settingsTarget === t) renderMcpConfig();
+                    if (settingsTarget === t && currentSettingsTab === t.hostId) renderMcpConfig();
                 }
             }).catch(() => {});
         }
@@ -1661,7 +1661,10 @@
                     // Default-profile <select> refetch the live set — no restart.
                     profilesCache.delete(host.id);
                     const cur = profilesEditorHost();
-                    if (cur && cur.id === host.id) {
+                    // #255 round 1: also the OPEN tab's host -- Browser keeps the
+                    // target, and a save landing there must not repaint the sections
+                    // the switch blanked.
+                    if (cur && cur.id === host.id && profileHostIsCurrent(cur)) {
                         renderProfilesEditor();
                         renderDefaultProfile();
                     }
