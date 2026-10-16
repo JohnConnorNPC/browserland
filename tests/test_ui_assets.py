@@ -31692,7 +31692,11 @@ def test_the_copy_mcp_json_row_is_wired():
     assert "if (setMcpCopyJson && setMcpScopeEl && setMcpCopyErr) {" in cp
     assert "document.getElementById('set-mcp-copy-json')" in cp
     render = _fn237("81_js_control_panel.js", "function renderMcpConfig()")
-    assert "if (setMcpCopyJson) setMcpCopyJson.disabled = true;" in render
+    # #255 moved the not-loaded defaults into mcpShowNeutral (also used by the
+    # tab-switch blank); the Copy button must still start disabled there.
+    neutral = _fn237("81_js_control_panel.js", "function mcpShowNeutral()")
+    assert "if (setMcpCopyJson) setMcpCopyJson.disabled = true;" in neutral
+    assert "mcpShowNeutral();" in render
     assert re.search(r"const canCopy = !!cfg\.token\s*&& typeof cfg\.python "
                      r"=== 'string' && !!cfg\.python;\s*"
                      r"setMcpCopyJson\.disabled = !canCopy;", render)

@@ -91,7 +91,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 26
+EXPECTED_ASSERTS = 34
 
 _HARNESS = r"""
 'use strict';
@@ -765,9 +765,164 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         const armed = hasText(w.env.setProfilesListEl, 'loading') && w.cfg.rx && !w.env.profilesConfigCache.has('rx');
         await w.visit('browser');
         release(); await settle(6);
-        ok(armed && isBlank(w),
+        ok(armed && isBlank(w) && w.env.setDefaultProfile.children.length === 1
+           && w.env.setMcpUrlEl.textContent === '—',
            'B5 a section fetch landing after the tab was left paints nothing',
            { armed, text: w.env.setProfilesListEl.textContent, rows: w.env.labelOrderEl.children.length });
+    }
+
+    // ---- atom 4: the inert fields ---------------------------------------------------
+    // Four entries that leave rx's rows without repainting: a proxied tab, one in
+    // flight, a failed one, and Browser (which keeps settingsTarget).
+    const ARMS = ['rb', 'gate', 'rf', 'browser'];
+    const leave = async (w, arm) => {
+        if (arm === 'gate') { w.mode = 'gate'; w.fn.selectSettingsTab('rd'); await settle(2); }
+        else await w.visit(arm);
+    };
+    // Paint rx (with `prep` applied first), prove the subject is armed, leave by
+    // each arm, and return {armed, <arm>: check(w)} .
+    const overArms = async (prep, armedFn, checkFn) => {
+        const out = { armed: true };
+        for (const arm of ARMS) {
+            const w = mkWorld(); if (prep) prep(w);
+            await paintRx(w);
+            if (!armedFn(w)) out.armed = false;
+            await leave(w, arm);
+            out[arm] = checkFn(w);
+        }
+        return out;
+    };
+    const allArms = (r) => r.armed && ARMS.every(a => r[a] === true);
+
+    {   // Q1a the MCP URL
+        const r = await overArms(null,
+            (w) => w.env.setMcpUrlEl.textContent === 'http://rx:1/mcp',
+            (w) => w.env.setMcpUrlEl.textContent === '—');
+        ok(allArms(r), 'Q1a the MCP URL no longer names the previous host after a switch', r);
+    }
+    {   // Q1a-ctl renderMcpConfig on an uncached host still shows ITS url
+        const w = mkWorld(); await paintRx(w);
+        w.env.currentSettingsTab = 'rd';
+        w.env.settingsTarget = w.fn.makeRemoteTarget('rd', w.entries.rd);
+        w.fn.renderMcpConfig();                       // no blank on this entry
+        ok(w.env.setMcpUrlEl.textContent === 'http://rd:1/mcp' && !w.env.mcpConfigCache.has('rd'),
+           'Q1a-ctl an uncached host\u2019s MCP section shows its own connect URL, not a dash',
+           { url: w.env.setMcpUrlEl.textContent });
+    }
+    {   // Q1b the default-profile select
+        const names = (w) => w.env.setDefaultProfile.children.map(o => o.value);
+        const r = await overArms(null,
+            (w) => names(w).join() === ',rx-alpha,rx-beta' && w.env.setDefaultProfile.value === 'rx-alpha',
+            (w) => names(w).join() === '' && w.env.setDefaultProfile.children.length === 1
+                && w.env.setDefaultProfile.children[0].textContent === '(broker default)'
+                && w.env.setDefaultProfile.value === '');
+        ok(allArms(r), 'Q1b the default-profile select is back to the lone "(broker default)" option', r);
+    }
+    {   // Q1c the neutral MCP set, from a pinned/loaded/ticked/errored mirror state
+        const E = (w) => w.env;
+        const prep = (w) => { w.mcp.rx.admin_token = 'rx-admin'; };
+        const armedFn = (w) => {
+            // user ticks Admin, and the copy row has shown an error
+            E(w).setMcpCopyAdmin.checked = true;
+            E(w).setMcpCopyErr.textContent = 'not a scope name';
+            E(w).setMcpCopyErr.classList.add('show');
+            return E(w).setMcpEnabled.checked === true && E(w).setMcpToken.value === 'rx-token'
+                && E(w).setMcpAdminToken.value === 'rx-admin' && E(w).setMcpDefaultMode.value === 'rw'
+                && E(w).setMcpAllowLaunch.checked === true && E(w).setMcpAllowDesktop.checked === true
+                && E(w).setMcpToken.disabled === true && E(w).setMcpGenerate.disabled === true
+                && E(w).setMcpAdminToken.disabled === true && E(w).setMcpAdminGenerate.disabled === true
+                && E(w).setMcpAdminClear.disabled === true
+                && E(w).setMcpToken.placeholder === 'set by WEB_TERMINAL_MCP_TOKEN (env)'
+                && E(w).setMcpAdminToken.placeholder === 'set by WEB_TERMINAL_MCP_ADMIN_TOKEN (env)'
+                && E(w).setMcpCopyJson.disabled === false && E(w).setMcpCopyAdmin.disabled === false
+                && E(w).setMcpCopyAdmin.checked === true;
+        };
+        const checkFn = (w) => {
+            const e = E(w);
+            const parts = {
+                values: e.setMcpEnabled.checked === false && e.setMcpToken.value === ''
+                    && e.setMcpAdminToken.value === '' && e.setMcpDefaultMode.value === 'off'
+                    && e.setMcpAllowLaunch.checked === false && e.setMcpAllowDesktop.checked === false,
+                unpinned: e.setMcpToken.disabled === false && e.setMcpGenerate.disabled === false
+                    && e.setMcpAdminToken.disabled === false && e.setMcpAdminGenerate.disabled === false
+                    && e.setMcpAdminClear.disabled === false,
+                placeholders: e.setMcpToken.placeholder === '(none — MCP disabled)'
+                    && e.setMcpAdminToken.placeholder === '(none — no MCP admin)',
+                copyJson: e.setMcpCopyJson.disabled === true,
+                copyAdmin: e.setMcpCopyAdmin.disabled === true && e.setMcpCopyAdmin.checked === false,
+                copyErr: e.setMcpCopyErr.textContent === '' && !e.setMcpCopyErr.classList.contains('show'),
+            };
+            return Object.values(parts).every(Boolean) ? true : parts;
+        };
+        const r = await overArms(prep, armedFn, checkFn);
+        ok(allArms(r), 'Q1c the MCP section is back to its neutral state: values, pins, placeholders and the copy row', r);
+    }
+    {   // Q1d the static inputs
+        const armedFn = (w) => {
+            const e = w.env;
+            return e.setColsEl.value === 111 && e.setRowsEl.value === 33 && e.setSnapHold.value === 1111
+                && e.setSlideMs.value === 222 && e.setStartPathEl.value === 'C:/rx-start'
+                && e.setTiling.checked === true && e.setStripScrollbar.checked === true
+                && e.setCloseTerminates.checked === true && e.setConfirmTerminate.checked === true
+                && e.setConfirmTerminate.disabled === false;
+        };
+        const checkFn = (w) => {
+            const e = w.env;
+            return e.setColsEl.value === '' && e.setRowsEl.value === '' && e.setSnapHold.value === ''
+                && e.setSlideMs.value === '' && e.setStartPathEl.value === ''
+                && e.setTiling.checked === false && e.setStripScrollbar.checked === false
+                && e.setCloseTerminates.checked === false && e.setConfirmTerminate.checked === false
+                && e.setConfirmTerminate.disabled === true;
+        };
+        const r = await overArms(null, armedFn, checkFn);
+        ok(allArms(r), 'Q1d the static inputs (size, snap, slide, Start path, toggles, Confirm) are blank', r);
+    }
+    {   // Q1e renderMcpConfig's own not-loaded path resets the pinned state too
+        const w = mkWorld();
+        await paintRx(w);
+        w.env.setMcpCopyAdmin.checked = true;
+        w.env.setMcpCopyErr.textContent = 'not a scope name';
+        w.env.setMcpCopyErr.classList.add('show');
+        const armed = w.env.setMcpToken.disabled === true && w.env.setMcpCopyAdmin.checked === true
+            && w.env.setMcpCopyErr.classList.contains('show');
+        w.env.currentSettingsTab = 'rd';
+        w.env.settingsTarget = w.fn.makeRemoteTarget('rd', w.entries.rd);
+        w.fn.renderMcpConfig();                       // the no-blank entry, as openControlPanelWindow / the host fallback reach it
+        const e = w.env;
+        ok(armed && e.setMcpToken.disabled === false && e.setMcpToken.value === ''
+           && e.setMcpToken.placeholder === '(none — MCP disabled)'
+           && e.setMcpAdminToken.disabled === false && e.setMcpCopyAdmin.checked === false
+           && e.setMcpCopyAdmin.disabled === true && e.setMcpCopyErr.textContent === ''
+           && !e.setMcpCopyErr.classList.contains('show') && e.setMcpUrlEl.textContent === 'http://rd:1/mcp',
+           'Q1e the not-loaded path of renderMcpConfig itself drops the previous host\u2019s pins, ticks and error line',
+           { armed, tokenDisabled: e.setMcpToken.disabled, ph: e.setMcpToken.placeholder,
+             copyAdmin: e.setMcpCopyAdmin.checked, err: e.setMcpCopyErr.textContent });
+    }
+    {   // Q1f success controls: rx -> rd repaints rd's own values
+        const w = mkWorld();
+        w.mcp.rd = { ok: true, enabled: false, token: 'rd-token', admin_token: '', default_mode: 'off',
+                     allow_launch: false, allow_desktop: false, python: 'py', local_url: 'http://rd:1/mcp' };
+        w.entries.rd.settings.terminalCloseTerminates = true;
+        w.entries.rd.settings.snapHoldMs = 4444;
+        w.seed(['rx', 'rd']);
+        await w.visit('rx');
+        const armed = armedRx(w);
+        await w.visit('rd');
+        const e = w.env;
+        ok(armed && e.setMcpUrlEl.textContent === 'http://rd:1/mcp' && e.setMcpToken.value === 'rd-token'
+           && e.setMcpToken.disabled === false && e.setMcpCopyJson.disabled === false
+           && e.setDefaultProfile.children.map(o => o.value).join() === ',rd-one,rd-two'
+           && e.setSnapHold.value === 4444 && e.setStartPathEl.value === 'C:/rd-start'
+           && e.setConfirmTerminate.disabled === false && e.setTiling.checked === true,
+           'Q1f a successful switch repaints the new host\u2019s MCP section, default profile and static inputs',
+           { url: e.setMcpUrlEl.textContent, token: e.setMcpToken.value, snap: e.setSnapHold.value,
+             opts: e.setDefaultProfile.children.map(o => o.value) });
+    }
+    {   // K keybindings are emptied on every arm, Browser included
+        const r = await overArms(null,
+            (w) => w.env.setKeybindingsEl.children.length === 2 && w.env.setKeybindingsEl.textContent.indexOf('Ctrl+X') !== -1,
+            (w) => w.env.setKeybindingsEl.children.length === 0 && w.env.setKeybindingsEl.textContent === '');
+        ok(allArms(r), 'K the keybinding rows of the previous host are gone on every arm, Browser included', r);
     }
 
     console.log(pass + ' passed, ' + fail + ' failed');
@@ -868,6 +1023,20 @@ def test_blank_on_every_switch(run, label):
     "S4 a throwing Start path commit never blocks the switch: the tab changes, the rows are gone, the value is never blank",
 ])
 def test_start_path_debounce(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "Q1a the MCP URL no longer names the previous host after a switch",
+    "Q1a-ctl an uncached host’s MCP section shows its own connect URL, not a dash",
+    "Q1b the default-profile select is back to the lone \"(broker default)\" option",
+    "Q1c the MCP section is back to its neutral state: values, pins, placeholders and the copy row",
+    "Q1d the static inputs (size, snap, slide, Start path, toggles, Confirm) are blank",
+    "Q1e the not-loaded path of renderMcpConfig itself drops the previous host’s pins, ticks and error line",
+    "Q1f a successful switch repaints the new host’s MCP section, default profile and static inputs",
+    "K the keybinding rows of the previous host are gone on every arm, Browser included",
+])
+def test_inert_fields_are_blanked(run, label):
     _ok(run, label)
 
 

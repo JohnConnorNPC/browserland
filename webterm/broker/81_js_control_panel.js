@@ -583,6 +583,39 @@
                 .then(j => { if (j && j.ok) mcpConfigCache.set(host.id, j); })
                 .catch(() => {});
         }
+        // The MCP section's "nothing known about this broker" state. renderMcpConfig
+        // shows it while a /mcp/config GET is pending or failed, and (#255) a tab
+        // switch blanks the section to it. Everything here is a fact about ONE
+        // broker -- its tokens, whether the env pins them, what the copy row may
+        // do -- so none of it may outlive the host it came from. The URL is NOT
+        // part of it: renderMcpConfig has already set that from the target.
+        function mcpShowNeutral() {
+            if (!setMcpEnabled) return;
+            setMcpEnabled.checked = false;
+            setMcpToken.value = '';
+            setMcpDefaultMode.value = 'off';
+            setMcpAllowLaunch.checked = false;
+            setMcpAllowDesktop.checked = false;
+            setMcpAdminToken.value = '';
+            setMcpToken.disabled = false;
+            setMcpGenerate.disabled = false;
+            setMcpToken.placeholder = '(none — MCP disabled)';
+            setMcpAdminToken.disabled = false;
+            setMcpAdminGenerate.disabled = false;
+            setMcpAdminClear.disabled = false;
+            setMcpAdminToken.placeholder = '(none — no MCP admin)';
+            if (setMcpCopyJson) setMcpCopyJson.disabled = true;
+            if (setMcpCopyJson) setMcpCopyJson.title = '';
+            if (setMcpCopyAdmin) {
+                setMcpCopyAdmin.disabled = true;
+                setMcpCopyAdmin.checked = false;
+                setMcpCopyAdmin.title = '';
+            }
+            if (setMcpCopyErr) {
+                setMcpCopyErr.textContent = '';
+                setMcpCopyErr.classList.remove('show');
+            }
+        }
         // Populate the MCP section from the settings-target host's cached
         // /mcp/config (fetching it once if needed, like renderDefaultProfile).
         function renderMcpConfig() {
@@ -593,13 +626,7 @@
             const cfg = host ? mcpConfigCache.get(host.id) : null;
             if (!cfg) {
                 // Not loaded yet: show neutral defaults, fetch, then re-render.
-                setMcpEnabled.checked = false;
-                setMcpToken.value = '';
-                setMcpDefaultMode.value = 'off';
-                setMcpAllowLaunch.checked = false;
-                setMcpAllowDesktop.checked = false;
-                setMcpAdminToken.value = '';
-                if (setMcpCopyJson) setMcpCopyJson.disabled = true;
+                mcpShowNeutral();
                 // Re-render ONLY if the GET actually populated the cache. An
                 // unconditional re-render re-enters this branch and re-fetches,
                 // so a host that fast-fails (broker down, connection refused)
@@ -896,6 +923,36 @@
             const order = document.getElementById('set-label-order');
             if (order) order.textContent = '';
             _labelDragKey = null;
+            blankInertHostFields();
+        }
+        // #255: the sections that only DISPLAY the previous host's values (their
+        // own handlers resolve settingsTarget at event time, so they are inert on
+        // a tab with no target). Showing another broker's MCP URL, masked tokens
+        // or keybindings under this tab's name is wrong even so. Keybindings are
+        // emptied DIRECTLY: renderKeybindings() would repaint from settingsTarget,
+        // which Browser keeps.
+        function blankInertHostFields() {
+            if (setDefaultProfile) {
+                setDefaultProfile.innerHTML = '';
+                const blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = '(broker default)';
+                setDefaultProfile.appendChild(blank);
+                setDefaultProfile.value = '';
+            }
+            if (setMcpUrlEl) setMcpUrlEl.textContent = '—';
+            mcpShowNeutral();
+            if (setKeybindingsEl) setKeybindingsEl.textContent = '';
+            setColsEl.value = '';
+            setRowsEl.value = '';
+            setSnapHold.value = '';
+            setSlideMs.value = '';
+            setStartPathEl.value = '';
+            setTiling.checked = false;
+            setStripScrollbar.checked = false;
+            setCloseTerminates.checked = false;
+            setConfirmTerminate.checked = false;
+            setConfirmTerminate.disabled = true;
         }
         // #115: set/clear one profile's default color. Mutates the cached (full)
         // profile set and re-POSTs it (REPLACE semantics, like the Default button),
