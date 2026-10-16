@@ -414,6 +414,19 @@
             host.textContent = '';
             const order = normalizeLabelOrder(t.s.show.order);   // defensive
             const set = (fn) => {
+                // #255: these rows bind `t` when they are RENDERED. If the open tab
+                // is no longer t's, or t is no longer the live target (the same tab
+                // re-selected, so its /state is loading), refuse: t.save() would write
+                // to a host whose rows are not on screen. Repaint from the live
+                // target when it belongs to this tab, else leave the list empty.
+                if (currentSettingsTab !== t.hostId || settingsTarget !== t) {
+                    if (settingsTarget && settingsTarget.hostId === currentSettingsTab) {
+                        renderLabelOrder(settingsTarget);
+                    } else {
+                        host.textContent = '';
+                    }
+                    return;
+                }
                 fn();
                 t.save();
                 if (t.isLocal) applyDisplaySettings();

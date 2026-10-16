@@ -91,7 +91,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 45
+EXPECTED_ASSERTS = 48
 
 _HARNESS = r"""
 'use strict';
@@ -1051,6 +1051,63 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
            '4j control: on rx\u2019s own open tab Default POSTs to rx exactly once', { posts });
     }
 
+    // ---- atom 6: the label-order editor refuses a target that is not the open tab ----
+    const labelSubject = (w) => {
+        const rows = w.env.labelOrderEl.children.slice();
+        const sub = rows.length === 4 ? {
+            cb: rows[1].children[0], up: rows[1].children[2], down: rows[1].children[3],
+            dragFrom: rows[0], dropOn: rows[2],
+        } : null;
+        const t = w.env.settingsTarget;
+        return { armed: !!sub && !sub.up.disabled && !sub.down.disabled && !!t
+                 && w.env.labelOrderEl.children.length === 4, sub, show: clone(t && t.s.show) };
+    };
+    const fireLabelRows = (w, s) => {
+        s.sub.cb.checked = false; fire(s.sub.cb, 'change');
+        fire(s.sub.up, 'click');
+        fire(s.sub.down, 'click');
+        fire(s.sub.dragFrom, 'dragstart', { dataTransfer: null });
+        fire(s.sub.dropOn, 'drop', { clientY: 9 });
+    };
+    const labelUntouched = (w, s) => w.saves.length === 0
+        && JSON.stringify(w.entries.rx.settings.show) === JSON.stringify(s.show);
+    {   // 5a the four mechanisms after leaving by each arm
+        const out = { armed: true };
+        for (const arm of ARMS) {
+            const w = mkWorld(); await paintRx(w);
+            const s = labelSubject(w);
+            if (!s.armed) out.armed = false;
+            await leave(w, arm);
+            let threw = null;
+            try { fireLabelRows(w, s); } catch (e) { threw = String(e); }
+            await settle();
+            out[arm] = (threw === null && labelUntouched(w, s)) ? true
+                : { threw, saves: w.saves, show: w.entries.rx.settings.show };
+        }
+        ok(allArms(out), '5a stale label-order rows (checkbox, up, down, drop) save nothing and change nothing on every arm', out);
+    }
+    {   // 5b the Browser tab keeps settingsTarget: only the tab test refuses there
+        const w = mkWorld(); await paintRx(w);
+        const s = labelSubject(w);
+        await w.visit('browser');
+        const kept = w.env.settingsTarget && w.env.settingsTarget.hostId === 'rx';
+        fireLabelRows(w, s); await settle();
+        ok(s.armed && kept && labelUntouched(w, s),
+           '5b on the Browser tab (settingsTarget still rx\u2019s) a stale label-order row saves nothing',
+           { armed: s.armed, kept, saves: w.saves });
+    }
+    {   // 5c the same tab re-selected while its /state is in flight: an old row's target is gone
+        const w = mkWorld(); await paintRx(w);
+        const s = labelSubject(w);
+        w.mode = 'gate';
+        w.fn.selectSettingsTab('rx');                    // in flight: settingsTarget is null
+        const inflight = w.env.currentSettingsTab === 'rx' && w.env.settingsTarget === null;
+        fireLabelRows(w, s); await settle();
+        ok(s.armed && inflight && labelUntouched(w, s),
+           '5c re-selecting the same tab while it loads leaves the old label-order rows unable to save',
+           { armed: s.armed, inflight, saves: w.saves });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -1181,6 +1238,32 @@ def test_inert_fields_are_blanked(run, label):
 ])
 def test_profile_writers_refuse_a_stale_host(run, label):
     _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "5a stale label-order rows (checkbox, up, down, drop) save nothing and change nothing on every arm",
+    "5b on the Browser tab (settingsTarget still rx’s) a stale label-order row saves nothing",
+    "5c re-selecting the same tab while it loads leaves the old label-order rows unable to save",
+])
+def test_label_order_refuses_a_stale_target(run, label):
+    _ok(run, label)
+
+
+# U1 -- source-shape, and the only non-behavioural check here: a slice harness
+# cannot see a duplicate top-level declaration in the assembled page (a parse
+# error there would take the whole panel down while every node cell passed).
+NEW_NAMES = ("blankHostSections", "blankInertHostFields", "mcpShowNeutral",
+             "cancelProfileDialog", "profileHostIsCurrent",
+             "refuseStaleProfileHost", "_profileDlgFin")
+
+
+@pytest.mark.parametrize("name", NEW_NAMES)
+def test_u1_new_top_level_names_are_declared_exactly_once(name):
+    pat = re.compile(r"(?:\bfunction\s+|\b(?:let|const|var)\s+)" + re.escape(name) + r"\b")
+    hits = {p.name: len(pat.findall(p.read_text(encoding="utf-8")))
+            for p in sorted(BROKER_DIR.glob("*.js"))}
+    hits = {k: v for k, v in hits.items() if v}
+    assert sum(hits.values()) == 1, f"{name} is declared {hits}"
 
 
 def test_every_scenario_passed_and_node_exited_clean(run):
