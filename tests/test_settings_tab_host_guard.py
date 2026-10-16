@@ -91,7 +91,7 @@ SLICES = {
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
                "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 48
+EXPECTED_ASSERTS = 52
 
 _HARNESS = r"""
 'use strict';
@@ -511,7 +511,9 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         const w = mkWorld();
         await w.visit('rx'); await w.visit('rd'); await w.visit('rx');
         const worst = Math.max(...Object.values(w.fcount));
-        ok(worst <= 2 && w.fetches.filter(f => / GET \/profiles\/config/.test(f)).length <= 4,
+        ok(worst <= 2 && w.fetches.filter(f => / GET \/profiles\/config/.test(f)).length <= 4
+           && (w.fcount['cfg:rx'] || 0) >= 1 && (w.fcount['cfg:rd'] || 0) >= 1
+           && (w.fcount['names:rx'] || 0) >= 1,
            'H4 painting three tabs fetches each section at most twice per visit (no re-entry loop)',
            { fcount: w.fcount, fetches: w.fetches });
     }
@@ -522,7 +524,7 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         buttonsOf(row, 'Edit').forEach(b => fire(b, 'click'));
         // no dialog opened: a stand-in that is 'done', so the check's armed clause fails
         return w.dialogs[w.dialogs.length - 1]
-            || { done: true, result: undefined, finish: null, spec: {}, body: new El('div') };
+            || { done: true, result: undefined, finish: () => {}, spec: {}, body: new El('div') };
     };
     {
         const w = mkWorld(); w.seed(['rx']);
@@ -1113,6 +1115,62 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
            { armed: s.armed, inflight, saves: w.saves });
     }
 
+    // ---- controls the diff review asked for: the WRITES THAT SHOULD HAPPEN still do ---
+    {   // C8 label order, the three mechanisms, on the open host
+        const w = mkWorld(); w.seed(['rd']);
+        await w.visit('rd');
+        const order = () => w.entries.rd.settings.show.order.join();
+        const start = order();
+        const row = (i) => w.env.labelOrderEl.children[i];
+        fire(row(2).children[2], 'click');                       // pid up
+        const afterUp = order();
+        fire(row(0).children[3], 'click');                       // first row down
+        const afterDown = order();
+        fire(row(0), 'dragstart', { dataTransfer: null });       // drag the first row ...
+        fire(row(3), 'drop', { clientY: 9 });                    // ... to after the last
+        const afterDrop = order();
+        ok(start === 'id,host,pid,title' && afterUp === 'id,pid,host,title'
+           && afterDown === 'pid,id,host,title' && afterDrop === 'id,host,title,pid'
+           && w.saves.length === 3 && w.saves.every(s => s === 'rd'),
+           'C8 control: on the open host the label-order up, down and drag/drop each reorder and save once',
+           { start, afterUp, afterDown, afterDrop, saves: w.saves });
+    }
+    {   // C9 the Start path debounce on the open host
+        const w = mkWorld(); w.seed(['rd']);
+        await w.visit('rd');
+        const armed = typeStartPath(w, 'C:/typed-on-rd');
+        runLiveTimers(w);
+        ok(armed && w.entries.rd.settings.startPath === 'C:/typed-on-rd'
+           && w.saves.length === 1 && w.saves[0] === 'rd' && w.env._startPathTimer === null,
+           'C9 control: a Start path typed on the open host is saved to it once when the debounce fires',
+           { armed, startPath: w.entries.rd.settings.startPath, saves: w.saves });
+    }
+    {   // 4k an Edit dialog's Save on the open host
+        const w = mkWorld(); await paintRx(w);
+        const dlg = openEdit(w, 'rx-beta');
+        const name = findAll(dlg.body, c => c.tag === 'input' && /^name/.test(c.placeholder))[0];
+        if (name) name.value = 'rx-gamma';
+        const p0 = w.posts().length;
+        dlg.finish({ value: 'save' }); await settle();
+        const posts = w.posts().slice(p0);
+        ok(!!name && posts.length === 1 && posts[0] === 'rx POST /profiles/config'
+           && !!w.cfg.rx.profiles['rx-gamma'] && !w.cfg.rx.profiles['rx-beta'],
+           'C10 control: on the open host an Edit dialog Save POSTs the renamed set to it once',
+           { posts, keys: Object.keys(w.cfg.rx.profiles) });
+    }
+    {   // 4l a Detect suggestion on the open host
+        const w = mkWorld(); await paintRx(w);
+        fire(w.env.setProfileDetectBtn, 'click'); await settle(2);
+        const list = w.dialogs[w.dialogs.length - 1];
+        const sug = list ? findAll(list.body, c => c.className === 'set-detect-item')[0] : null;
+        const n0 = w.dialogs.length;
+        if (sug) fire(sug, 'click'); await settle();
+        const add = w.dialogs[w.dialogs.length - 1];
+        ok(!!sug && w.dialogs.length === n0 + 1 && add.spec.title === 'Add profile',
+           'C11 control: on the open host a Detect suggestion opens the Add dialog',
+           { sug: !!sug, title: add && add.spec && add.spec.title });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -1251,6 +1309,16 @@ def test_profile_writers_refuse_a_stale_host(run, label):
     "5c re-selecting the same tab while it loads leaves the old label-order rows unable to save",
 ])
 def test_label_order_refuses_a_stale_target(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "C8 control: on the open host the label-order up, down and drag/drop each reorder and save once",
+    "C9 control: a Start path typed on the open host is saved to it once when the debounce fires",
+    "C10 control: on the open host an Edit dialog Save POSTs the renamed set to it once",
+    "C11 control: on the open host a Detect suggestion opens the Add dialog",
+])
+def test_the_writes_that_should_happen_still_do(run, label):
     _ok(run, label)
 
 
