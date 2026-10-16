@@ -25,7 +25,10 @@ Browser, which keeps ``settingsTarget``):
 * C6-C11 / 4j -- controls: the writes that SHOULD happen still do (profile
   Delete/Default/Edit Save, Detect suggestion, label up/down/drag, the Start
   path debounce) and the Local tab re-enables what a remote tab leaves off.
-* L1-L3, G1, H4 -- the reason line, a mid-await switch, and no re-fetch loop.
+* L1-L3, G1, G2, H4 -- the reason line (L1 only proves the placeholder is
+  shown; the text is the default), a mid-await switch, an older answer for the
+  same host landing last, and no re-fetch loop.
+* B6a/B6b -- a save that lands after the switch repaints nothing.
 * D0a-c, D5 -- the dialog handle; D1-D4 -- a switch closes the profile dialog.
 * B1-B5, H7, P -- the blank on every switch (and not after a good repaint).
 * S1-S4 -- a Start path typed before a switch lands on the host it was typed
@@ -481,7 +484,7 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
         w.fn.selectSettingsTab('rd');      // not awaited: held in flight
         ok(w.env.setHostLoadingEl.textContent === 'loading settings…'
            && w.env.setHostLoadingEl.style.display === '',
-           'L1 in flight the reason line reads "loading settings…" and is shown',
+           'L1 while /state is in flight the loading placeholder line is shown (display on)',
            { text: w.env.setHostLoadingEl.textContent, display: w.env.setHostLoadingEl.style.display });
     }
     {
@@ -1331,7 +1334,7 @@ def _ok(run, label):
 @pytest.mark.parametrize("label", [
     "C6 control: rd renders its own rows, Delete POSTs /profiles/config to rd exactly once, a label checkbox saves rd once",
     "C7 control: the Local tab repaints its own rows, enables Add/Detect and Confirm, and Delete POSTs to local",
-    "L1 in flight the reason line reads \"loading settings…\" and is shown",
+    "L1 while /state is in flight the loading placeholder line is shown (display on)",
     "L2 a failed direct host shows \"could not load this broker’s settings\"",
     "L3 a proxied host says its settings are not available through this broker",
     "G1 an old /state answer landing after a switch to Local paints nothing of rx",
