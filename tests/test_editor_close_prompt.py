@@ -326,6 +326,16 @@ async function terminal(w, call, action) {
     must(call.threw === null, 'the request threw: ' + (call.threw && call.threw.message));
     must(w.overlays().length === 0, 'the dialog is still on screen');
 }
+// A close that must NOT prompt: it settles on its own, with no dialog up. A
+// request left waiting on a prompt is a failed case, not a hung run.
+async function closeNow(w, id) {
+    let settled = false;
+    const p = w.requestClose(id).then(function () { settled = true; });
+    await tick();
+    must(w.overlays().length === 0, 'a dialog was shown');
+    must(settled, 'the close request is waiting on something');
+    await p;
+}
 // Cleanup for a case that only LOOKED at the prompt.
 async function dismiss(w, call) {
     await terminal(w, call, function () { w.key('Escape'); });
@@ -337,26 +347,24 @@ function C(label, fn) { CASES.push([label, fn]); }
 C("H0 the closeWindow stub records only real windows", async function (w) {
     must(w.closes().length === 0 && w.attempted.length === 0, 'the log starts empty');
     const clean = w.editor({ dirty: false });
-    await w.requestClose(clean.id);
+    await closeNow(w, clean.id);
     must(w.closes().join() === clean.id, 'a real close is recorded once');
     must(!w.windows.has(clean.id), 'a real close removes the window');
-    await w.requestClose('app:nope');   // not a window: attempted, not effective
+    await closeNow(w, 'app:nope');   // not a window: attempted, not effective
     must(w.attempted.join() === clean.id + ',app:nope', 'attempted: ' + w.attempted);
     must(w.closes().length === 1, 'an id that is not a window was recorded as closed');
 });
 
 C("K0 a clean editor closes with no prompt", async function (w) {
     const win = w.editor({ dirty: false });
-    await w.requestClose(win.id);
-    must(w.overlays().length === 0, 'a dialog was shown for a clean editor');
+    await closeNow(w, win.id);
     must(w.closes().join() === win.id, 'closes: ' + JSON.stringify(w.closes()));
     must(!w.windows.has(win.id), 'the window is still open');
 });
 
 C("K1 a dirty non-editor app window closes with no prompt", async function (w) {
     const win = w.editor({ kind: 'file-manager' });
-    await w.requestClose(win.id);
-    must(w.overlays().length === 0, 'a dialog was shown for a non-editor');
+    await closeNow(w, win.id);
     must(w.closes().join() === win.id, 'closes: ' + JSON.stringify(w.closes()));
     must(w.saves().length === 0, 'a save ran for a non-editor');
 });
