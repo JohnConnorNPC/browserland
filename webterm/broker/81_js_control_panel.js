@@ -284,6 +284,9 @@
             // Remote host: fetch its state, then point the form at the cache.
             // Null the target while loading so a stray change handler during the
             // await early-returns instead of writing to the previous tab's blob.
+            // That covers the handlers that read settingsTarget when they FIRE;
+            // the rows bound at render time (profiles, label order) were blanked
+            // at the top of this function and refuse a stale host themselves (#255).
             settingsTarget = null;
             settingsOpenHostId = tabId;     // pause prefetch for this host
             applyBrowserGlobalVisibility(false);  // hide local-only controls now
@@ -396,11 +399,13 @@
         // in t.s.show.order (checkbox = t.s.show[key] visibility, ↑/↓ = swap
         // adjacent, drag = splice before/after a target). All three mechanisms
         // AND the toggle funnel through set(): mutate t.s, persist via t.save(),
-        // reapply live for the local target, then re-render. Reflects/persists
-        // through settingsTarget, so it drives both the local target (savePrefs →
+        // reapply live for the local target, then re-render. Renders from
+        // settingsTarget, so it drives both the local target (savePrefs →
         // localStorage + /state push) and a remote-host target (/state PUT); a
         // remote host's own viewers re-apply on their /state pull. Only the LAST
-        // remaining checked component can't be unchecked (≥1 stays on).
+        // remaining checked component can't be unchecked (≥1 stays on). The rows
+        // bind the target they were rendered for, so set() refuses (#255) once the
+        // open tab or the live target is no longer that one.
         const LABEL_ORDER_NAMES = { id: 'window id', host: 'host',
                                     pid: 'pid', title: 'title' };
         let _labelDragKey = null;
@@ -882,7 +887,9 @@
             return s.length > 80 ? s.slice(0, 79) + '…' : s;
         }
         // The host the editor acts on = the settings-target host (local or the
-        // open remote tab), so every write lands on the right broker.
+        // open remote tab): what it paints for and what Add / Detect use. It is
+        // not the write guard: every profile write and dialog additionally passes
+        // profileHostIsCurrent (#255), because Browser keeps the target.
         function profilesEditorHost() {
             return settingsTarget ? hostById(settingsTarget.hostId) : null;
         }
@@ -891,7 +898,8 @@
         // target.cleanups). renderProfilesEditor wipes + rebuilds its rows on every
         // render (tab open, poll refresh, a save, a color pick), so hold the live
         // pickers' cleanups + their shim targets module-side and flush them at the
-        // top of each render: mark stale targets disposed (a late OS color-dialog
+        // top of each render (and, #255, by blankHostSections on a tab switch): mark
+        // stale targets disposed (a late OS color-dialog
         // resolve then no-ops) and run every cleanup (removes the listeners + the
         // body inputs) BEFORE the fresh pickers register. Exact mirror of
         // flushHostPickers (#103, 83_js_broker_identity.js). Bounded to one input-
