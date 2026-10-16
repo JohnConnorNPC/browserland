@@ -397,6 +397,10 @@
         const LABEL_ORDER_NAMES = { id: 'window id', host: 'host',
                                     pid: 'pid', title: 'title' };
         let _labelDragKey = null;
+        // #255: the finish handle of the profile Add/Edit dialog or the Detect
+        // list the Control Panel opened, so a tab switch can close it (its Save
+        // is bound to the host it was opened for). Null when none is ours.
+        let _profileDlgFin = null;
         function renderLabelOrder(t) {
             const host = document.getElementById('set-label-order');
             if (!host) return;
@@ -852,6 +856,18 @@
             for (const fn of profilePickerCleanups) { try { fn(); } catch (_) {} }
             profilePickerCleanups = [];
             profilePickerTargets = [];
+        }
+        // #255: close the profile dialog / detect list this panel opened. The
+        // handle was captured right after the openDialog call, while
+        // `_dlgFinish` still named THIS dialog (the 86m idiom), and is acted on
+        // only while core still holds it: a dialog that is not ours (a mod's,
+        // or a later one that replaced ours) is never finished from here.
+        function cancelProfileDialog() {
+            const fin = _profileDlgFin;
+            _profileDlgFin = null;
+            if (fin && typeof _dlgFinish === 'function' && _dlgFinish === fin) {
+                _dlgFinish(null);
+            }
         }
         // #115: set/clear one profile's default color. Mutates the cached (full)
         // profile set and re-POSTs it (REPLACE semantics, like the Default button),
@@ -1535,7 +1551,7 @@
             const base = preset || (editName ? (cfg.profiles[editName] || {}) : {});
             const initName = preset ? (preset.name || '') : (editName || '');
             let nameInput, titleInput, cwdInput, cmdArea;
-            openDialog({
+            const dlg = openDialog({
                 title: editName ? 'Edit profile' : 'Add profile',
                 body: function (c) {
                     const mkRow = (labelText, el) => {
@@ -1574,7 +1590,13 @@
                     { label: 'Save', value: 'save', primary: true },
                     { label: 'Cancel', value: false },
                 ],
-            }).then(function (r) {
+            });
+            // Captured per call: the .then must clear the handle only while it
+            // is still THIS dialog's (a later dialog may have replaced it).
+            const fin = _dlgFinish;
+            _profileDlgFin = fin;
+            dlg.then(function (r) {
+                if (_profileDlgFin === fin) _profileDlgFin = null;
                 if (!r || r.value !== 'save') return;
                 const name = (nameInput.value || '').trim();
                 const title = (titleInput.value || '').trim();
@@ -1642,6 +1664,7 @@
                         },
                         buttons: [{ label: 'Close', value: false }],
                     });
+                    _profileDlgFin = _dlgFinish;
                 })
                 .catch(e => showNotice('detect failed: ' + e));
         }

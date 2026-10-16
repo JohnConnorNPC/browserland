@@ -70,6 +70,9 @@ SLICES = {
     "editor": ("81_js_control_panel.js",
                "        const PROFILES_TERMINALS_OFF_NOTE",
                "        if (setProfileAddBtn) {"),
+    "addbtns": ("81_js_control_panel.js",
+                "        if (setProfileAddBtn) {",
+                "        // The mode of a remote tab's cached layout"),
     "startpath": ("81_js_control_panel.js",
                   "        const commitStartPath = () => {",
                   "        setStartPathEl.addEventListener('change', commitStartPath);"),
@@ -86,9 +89,9 @@ SLICES = {
 # Source order, one string: cross-fragment siblings (flushSettingsEdits with
 # commitStartPath, the profile writers with each other) must share a scope.
 SLICE_ORDER = ["tab", "labels", "defprof", "mcp", "ped", "pickers", "editor",
-               "startpath", "keys", "targets", "flush"]
+               "addbtns", "startpath", "keys", "targets", "flush"]
 
-EXPECTED_ASSERTS = 7
+EXPECTED_ASSERTS = 11
 
 _HARNESS = r"""
 'use strict';
@@ -299,6 +302,10 @@ function mkWorld() {
             if (path === '/mcp/config' && method === 'GET') {
                 return respond(w.mcp[h.id] || { ok: false }, !!w.mcp[h.id]);
             }
+            if (path === '/profiles/detect') {
+                return respond({ ok: true, suggestions: [
+                    { name: 'sug', title: 'Sug', command: ['sug.exe'] }] });
+            }
             return respond({ ok: false }, false);
         },
         fetchProfilesConfig: (host) => {
@@ -503,6 +510,65 @@ const REQUIRED_ENV = ['settingsTarget', 'currentSettingsTab', 'settingsOpenHostI
            { fcount: w.fcount, fetches: w.fetches });
     }
 
+    // ---- D0: the profile dialog handle (atom 2) -----------------------------------
+    const openEdit = (w, name) => {
+        const row = rowOf(w.env.setProfilesListEl, name);
+        buttonsOf(row, 'Edit').forEach(b => fire(b, 'click'));
+        return w.dialogs[w.dialogs.length - 1];
+    };
+    {
+        const w = mkWorld(); w.seed(['rx']);
+        await w.visit('rx');
+        const dlg = openEdit(w, 'rx-alpha');
+        const armed = !!dlg && !dlg.done && w.env._dlgFinish === dlg.finish
+            && w.env._profileDlgFin === dlg.finish;
+        w.fn.cancelProfileDialog();
+        ok(armed && dlg.done && dlg.result === null && w.env._profileDlgFin === null
+           && w.env._dlgFinish === null,
+           'D0a cancelProfileDialog finishes an open Edit dialog with null and drops the handle',
+           { armed, done: dlg && dlg.done, result: dlg && dlg.result });
+    }
+    {
+        const w = mkWorld(); w.seed(['rx']);
+        await w.visit('rx');
+        fire(w.env.setProfileDetectBtn, 'click');
+        await settle();
+        const dlg = w.dialogs[w.dialogs.length - 1];
+        const armed = !!dlg && dlg.spec.title === 'Detected shells' && !dlg.done
+            && w.env._profileDlgFin === dlg.finish;
+        w.fn.cancelProfileDialog();
+        ok(armed && dlg.done && dlg.result === null && w.env._profileDlgFin === null,
+           'D0b cancelProfileDialog finishes an open Detect list too',
+           { armed, done: dlg && dlg.done, title: dlg && dlg.spec.title, hand: w.env._profileDlgFin === (dlg && dlg.finish), n: w.dialogs.length, f: w.fetches });
+    }
+    {
+        const w = mkWorld(); w.seed(['rx']);
+        await w.visit('rx');
+        const mine = openEdit(w, 'rx-alpha');
+        // a dialog that is not ours replaces ours before anything settles
+        w.env.openDialog({ title: 'a mod dialog' });
+        const foreign = w.dialogs[w.dialogs.length - 1];
+        const armed = foreign !== mine && !foreign.done && w.env._dlgFinish === foreign.finish
+            && w.env._profileDlgFin === mine.finish;
+        w.fn.cancelProfileDialog();
+        ok(armed && !foreign.done && w.env._dlgFinish === foreign.finish
+           && w.env._profileDlgFin === null,
+           'D0c a dialog that is not ours is never finished from here',
+           { armed, foreignDone: foreign.done });
+    }
+    {
+        const w = mkWorld(); w.seed(['rx']);
+        await w.visit('rx');
+        const a = openEdit(w, 'rx-alpha');
+        const b = openEdit(w, 'rx-beta');     // replaces (cancels) a
+        await settle();                        // a's .then runs now
+        const armed = a.done && !b.done && w.env._profileDlgFin === b.finish;
+        w.fn.cancelProfileDialog();
+        ok(armed && b.done && b.result === null,
+           'D5 an older dialog settling late does not drop the newer one’s handle',
+           { armed, bDone: b.done, handleIsB: w.env._profileDlgFin === b.finish });
+    }
+
     console.log(pass + ' passed, ' + fail + ' failed');
 })().catch(e => { console.log('HARNESS CRASH: ' + (e && e.stack || e)); });
 """
@@ -564,6 +630,16 @@ def _ok(run, label):
     "H4 painting three tabs fetches each section at most twice per visit (no re-entry loop)",
 ])
 def test_controls_and_reason_lines(run, label):
+    _ok(run, label)
+
+
+@pytest.mark.parametrize("label", [
+    "D0a cancelProfileDialog finishes an open Edit dialog with null and drops the handle",
+    "D0b cancelProfileDialog finishes an open Detect list too",
+    "D0c a dialog that is not ours is never finished from here",
+    "D5 an older dialog settling late does not drop the newer one’s handle",
+])
+def test_profile_dialog_handle(run, label):
     _ok(run, label)
 
 
