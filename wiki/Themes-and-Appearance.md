@@ -49,7 +49,7 @@ Picking a font applies immediately to every open terminal window, and to every t
 
 ## On a phone
 
-On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a running record button stay. On touch screens up to 900 px wide the title-bar buttons are larger.
+On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a record button that is recording or paused stay. On touch screens up to 900 px wide the title-bar buttons are larger.
 
 ## Related pages
 
