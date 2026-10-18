@@ -344,6 +344,19 @@ For the full HTTP contract, error table, and config sidecar, see
 **[`wiki/Technical-Reference.md`](wiki/Technical-Reference.md)** and
 **[`webterm/mcptool/README.md`](webterm/mcptool/README.md)**.
 
+## What 1.0 promises
+
+**1.0 supports** Windows and Linux, Python 3.10 or newer, and current Chrome,
+Edge and Firefox. **Within 1.x:**
+
+- **Mods:** the mod API stays at `ctxVersion: 1`, with additions only.
+- **Saved state:** `/state` blobs written by a 1.x release are read by every
+  later 1.x release.
+- **MCP tools:** tool names stay, and their arguments only gain optional fields.
+
+A change that would break one of these three waits for 2.0. Details, and what
+is not covered: **[`wiki/Upgrading.md`](wiki/Upgrading.md#what-10-promises)**.
+
 ## Quick start
 
 You need **Python ≥ 3.10**. Install from a checkout:
