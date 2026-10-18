@@ -83,7 +83,7 @@ To send a window to another workspace, use its **title-bar** menu (above). The t
 
 ## Pager dot
 
-Right-click a workspace dot at the bottom of the taskbar:
+Right-click a workspace dot at the bottom of the taskbar. The menu opens with a greyed header naming the workspace (`Workspace N`, plus its name if it has one), then:
 
 - **Rename…** — give the workspace a name.
 - **Remove workspace** — delete it (disabled when only one workspace remains).
@@ -93,7 +93,7 @@ Right-click a workspace dot at the bottom of the taskbar:
 - **Show names** / **Show numbers** — choose whether the dots display workspace names or numbers.
 - **New workspace** — append a fresh, empty workspace.
 
-A **stack**'s dot has its own menu: **Rename stack…**, **Colour…** and **Move left** / **Move right** for the whole stack. Right-click a row in a stack's list for that workspace's menu above.
+A **stack**'s dot has its own menu, headed `Stack N` (plus its name, if it has one) and its member count: **Rename stack…**, **Colour…** and **Move left** / **Move right** for the whole stack. Right-click a row in a stack's list for that workspace's menu above.
 
 Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click. Hiding the pager (Control Panel → Windows → Workspaces) removes the dots too, but rename and remove are on the empty desktop / taskbar menu below as well, so they survive that. Disabling the mod takes both menus away together.
 
