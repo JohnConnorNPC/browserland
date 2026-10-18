@@ -2044,7 +2044,7 @@
                         const c = wsPickColor(a.color);          // palette hex, or null = none
                         if (!t || c === undefined) return { refusal: 'bad_args' };
                         const done = t.ws ? setWorkspaceColorById(t.ws.id, c) : setStackColorById(t.sid, c);
-                        return done ? { color: c } : { refusal: 'unknown_window' };
+                        return done ? { color: c } : { refusal: 'bad_args' };   // gone: as its siblings
                     } });
                     const wsCmdIndex = (i) => Number.isInteger(i) && i >= 0 && i < wsList().length;
                     // Stack `index` with `target` (both flat): joins the

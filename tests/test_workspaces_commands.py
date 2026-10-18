@@ -631,6 +631,18 @@ def test_stack_unstack_rename_and_list(scenario_run):
     _ok(scenario_run, "MC14 list carries each workspace's colour and stack, the stacks and the palette")
 
 
+def test_color_refuses_a_vanished_target_as_bad_args():
+    # #258 round 1: like every sibling new op, color answers bad_args when its
+    # target is gone. The branch cannot be reached in one synchronous run (the
+    # target was resolved a line earlier), so this pins the source of the
+    # command body itself.
+    src = SRC_JS.read_text(encoding="utf-8")
+    start = src.index("ctx.commands.register('color', {")
+    body = src[start:src.index("const wsCmdIndex", start)]
+    assert "unknown_window" not in body
+    assert body.count("{ refusal: 'bad_args' }") == 2, body
+
+
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
     run = scenario_run
     assert run["failed"] == 0, (
