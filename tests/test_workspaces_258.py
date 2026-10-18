@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 58
+EXPECTED_ASSERTS = 62
 
 _PRELUDE = r"""
 'use strict';
@@ -917,6 +917,51 @@ async function stacking() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackMembers() {
+    // ---- SK8: last-used member; RS: removing a stack member -----------------
+    function ids(w) {
+        return w.st().list.map(function (x) { return x.id + (x.stack ? '@' + x.stack : ''); }).join(',');
+    }
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    function seed(stacked, active) {
+        return { activeId: active || 'W1', stacks: [{ id: 'S1' }], list: ['W1', 'W2', 'W3', 'W4'].map(function (id) {
+            const o = { id: id, focusedCol: 0 };
+            if (stacked.indexOf(id) !== -1) o.stack = 'S1';
+            return o; }) };
+    }
+    let w = buildWorld(seed(['W2', 'W3']));
+    const rows = w.desktopMenu ? w.desktopMenu({ tiling: true }) : [];
+    act(rows.filter(function (it) { return /Workspace 2\.2/.test(it.label || ''); })[0]);
+    const saved = JSON.parse(w.spies.saved || '{}');
+    const plain = rows.filter(function (it) { return /Workspace 3 /.test(it.label || ''); })[0];
+    act(plain);
+    ok(saved.activeId === 'W3' && saved.stacks && saved.stacks[0].lastId === 'W3'
+        && w.st().activeId === 'W4' && w.st().stacks[0].lastId === 'W3',
+        'SK8 switching to a stack member records it as the stack\'s last-used member, in the same save');
+
+    // RS: a member removed from the first / middle / last place.
+    w = buildWorld(seed(['W1', 'W2', 'W3'], 'W1'));
+    let m = w.openWsMenu('W1');
+    await act(w.item(m, /^Remove workspace$/));
+    ok(!!m && ids(w) === 'W2@S1,W3@S1,W4' && w.st().activeId === 'W2'
+        && w.L.columns[0].wsId === 'W2',
+        'RS1 removing the first of three members moves its windows to the next one and keeps the stack');
+    w = buildWorld(seed(['W2', 'W3', 'W4'], 'W1'));
+    m = w.openWsMenu('W3');
+    await act(w.item(m, /^Remove workspace$/));
+    ok(!!m && ids(w) === 'W1,W2@S1,W4@S1' && w.L.columns[2].wsId === 'W2',
+        'RS2 removing a middle member moves its windows to the member before it');
+    w = buildWorld(seed(['W2', 'W3'], 'W1'));          // a member that is NOT current
+    m = w.openWsMenu('W3');
+    await act(w.item(m, /^Remove workspace$/));
+    const sv = JSON.parse(w.spies.saved || '{}');
+    ok(!!m && ids(w) === 'W1,W2,W4' && w.st().activeId === 'W1'
+        && J(sv.stacks) === J([]) && sv.list && sv.list[1].stack === undefined,
+        'RS3 removing one of two members dissolves the stack in the saved state');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -929,6 +974,7 @@ _EPILOGUE = r"""
     await dragging();
     await colours();
     await stacking();
+    await stackMembers();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1090,6 +1136,16 @@ def test_stack_with_and_remove_from_stack(scenario_run):
     _ok(scenario_run, "SK4 Remove from stack puts the first of three just after the stack")
     _ok(scenario_run, "SK5 removing one of two dissolves the stack before it saves")
     _ok(scenario_run, "SM2 Remove from stack is offered only to a stacked workspace")
+
+
+def test_last_used_member(scenario_run):
+    _ok(scenario_run, "SK8 switching to a stack member records it as the stack's last-used member, in the same save")
+
+
+def test_remove_a_stack_member(scenario_run):
+    _ok(scenario_run, "RS1 removing the first of three members moves its windows to the next one and keeps the stack")
+    _ok(scenario_run, "RS2 removing a middle member moves its windows to the member before it")
+    _ok(scenario_run, "RS3 removing one of two members dissolves the stack in the saved state")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

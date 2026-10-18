@@ -694,6 +694,7 @@
                         return c && c.id === keepId; });
                     if (i >= 0) getLayout().focusedCol = i;
                 }
+                wsStore();        // #258: a stack this left with one member is saved dissolved
                 savePrefs();
                 renderWorkspaces();
                 relayoutStrip();
@@ -1426,6 +1427,10 @@
                 const cur = activeWorkspaceEntry();
                 if (cur) recordFocus(cur, getLayout().focusedCol, focusedColumnId());   // remember where we were
                 st.activeId = target.id;
+                // #258: a stack remembers its last-used member (synced; it
+                // rides this switch's save).
+                const srow = target.stack && (st.stacks || []).find(s => s.id === target.stack);
+                if (srow && srow.lastId !== target.id) srow.lastId = target.id;
                 applyWorkspaceView();
                 savePrefs();
                 renderWorkspaces();               // pager reflects the switch now
