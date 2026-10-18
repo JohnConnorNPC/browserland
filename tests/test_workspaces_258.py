@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 27
+EXPECTED_ASSERTS = 32
 
 _PRELUDE = r"""
 'use strict';
@@ -591,12 +591,63 @@ async function pagerNumbers() {
 }
 """
 
+_SCENARIOS += r"""
+async function signature() {
+    // ---- SG: every visible field rebuilds the pager; TN: the tint ----------
+    function seed() {
+        return { activeId: 'W3', list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0 }, { id: 'W3', focusedCol: 0 }] };
+    }
+    let w = buildWorld(seed());
+    let before = w.dots()[0];
+    const l = w.st().list;
+    const t = l[0]; l[0] = l[1]; l[1] = t;               // an adopt reordered W1/W2
+    w.render();
+    let after = w.dots()[0];
+    ok(!!before && !!after && before.dataset.wsId === 'W1' && after !== before
+        && after.dataset.wsId === 'W2' && after.textContent === '1',
+        'SG1 a reorder rebuilds the dots, each carrying its moved workspace');
+
+    w = buildWorld(seed());
+    before = w.dots()[1];
+    w.st().list[1].color = '#e96d6d';
+    w.render();
+    after = w.dots()[1];
+    ok(!!before && !before.classList.contains('tinted') && after !== before
+        && after.classList.contains('tinted')
+        && after.style.getPropertyValue('--ws-color') === '#e96d6d' && after.textContent === '2',
+        'SG2 a colour change rebuilds the dot with its tint, label kept');
+
+    // Only W3's membership changes: the stack row S1 already exists.
+    w = buildWorld({ activeId: 'W4', stacks: [{ id: 'S1' }], list: [
+        { id: 'W1', focusedCol: 0, stack: 'S1' }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0 }, { id: 'W4', focusedCol: 0 }] });
+    before = w.dots().filter(function (d) { return d.dataset.wsId === 'W3'; })[0];
+    w.st().list[2].stack = 'S1';
+    w.render();
+    after = w.dots();
+    ok(!!before && before.textContent === '2' && !before.isConnected && after.length > 0
+        && !after.some(function (d) { return d.dataset.wsId === 'W3' && d.textContent === '2'; }),
+        'SG3 joining a stack rebuilds the pager and relabels the member');
+
+    w = buildWorld({ list: [{ id: 'W1', focusedCol: 0, color: '#4aa3ff' },
+                            { id: 'W2', focusedCol: 0 }, { id: 'W3', focusedCol: 0 }] });
+    const d0 = w.dots()[0], d1 = w.dots()[1];
+    ok(!!d0 && d0.classList.contains('tinted') && d0.style.getPropertyValue('--ws-color') === '#4aa3ff'
+        && d0.textContent === '1' && d0.classList.contains('active'),
+        'TN1 a coloured workspace\'s dot is tinted with its colour and keeps its number');
+    ok(!!d1 && !d1.classList.contains('tinted') && d1.style.getPropertyValue('--ws-color') === '',
+        'TN2 an uncoloured dot carries no tint');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
     await heal();
     await minting();
     await pagerNumbers();
+    await signature();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -697,6 +748,17 @@ def test_pager_numbers_count_entries(scenario_run):
     _ok(scenario_run, "PM2 the desktop menu numbers rows by pager entry, members as N.k")
     _ok(scenario_run, "PM3 the taskbar badge names a stack member N.k")
     _ok(scenario_run, "PM4 the workspace after a stack is entry 3 on its dot, tooltip and preview")
+
+
+def test_pager_signature_covers_every_visible_field(scenario_run):
+    _ok(scenario_run, "SG1 a reorder rebuilds the dots, each carrying its moved workspace")
+    _ok(scenario_run, "SG2 a colour change rebuilds the dot with its tint, label kept")
+    _ok(scenario_run, "SG3 joining a stack rebuilds the pager and relabels the member")
+
+
+def test_tint(scenario_run):
+    _ok(scenario_run, "TN1 a coloured workspace's dot is tinted with its colour and keeps its number")
+    _ok(scenario_run, "TN2 an uncoloured dot carries no tint")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

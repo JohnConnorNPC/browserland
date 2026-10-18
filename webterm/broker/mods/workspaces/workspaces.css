@@ -36,6 +36,19 @@
         }
         .ws-dot.add { font-size: 16px; }
         .ws-dot.named { width: auto; min-width: 26px; padding: 0 9px; }
+        /* #258: a workspace's colour. The border and a bottom bar always; the
+           fill only where color-mix exists -- a var()-fed value an engine
+           cannot compute would be `unset` (transparent), the #173 trap. The
+           active dot keeps the accent fill, and the label is always there. */
+        .ws-dot.tinted {
+            border-color: var(--ws-color);
+            box-shadow: inset 0 -3px 0 var(--ws-color);
+        }
+        @supports (color: color-mix(in srgb, black 50%, white)) {
+            .ws-dot.tinted:not(.active) {
+                background: color-mix(in srgb, var(--ws-color) 28%, var(--bg-2));
+            }
+        }
         /* Workspace hover preview (task 19): a scaled schematic of the columns
            / rows in that workspace, like a Linux pager thumbnail. */
         .ws-preview {

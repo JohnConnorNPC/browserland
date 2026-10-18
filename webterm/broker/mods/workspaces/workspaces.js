@@ -527,13 +527,16 @@
                 const list = st.list;
                 const active = activeWorkspaceIndex();
                 const mode = wsLabelMode();
-                // Names + mode are part of the signature so a rename / mode toggle
-                // forces a rebuild (not just the active-class fast path).
-                // Length-prefix each name: a plain join lets ['ab','c'] and
-                // ['a','bc'] produce the same signature, so a real rename would
-                // hit the churn guard and leave a stale label on a live dot.
-                const sig = mode + '|' + active + '|' + list.length + '|'
-                    + list.map(w => (w.name || '').length + ':' + (w.name || '')).join('|');
+                // EVERY visible field is part of the signature, or an edit hits
+                // the churn guard and leaves a stale dot: the mode, the active
+                // index, and per workspace its id (order -- a dot carries its
+                // id), name, colour and stack; per stack its name and colour
+                // (#258). JSON, not a join: a plain join lets ['ab','c'] and
+                // ['a','bc'] produce the same signature.
+                const stacks = Array.isArray(st.stacks) ? st.stacks : [];
+                const sig = JSON.stringify([mode, active,
+                    list.map(w => [w.id, w.name || '', w.color || '', w.stack || '']),
+                    stacks.map(s => [s.id, s.name || '', s.color || ''])]);
                 if (container.dataset.sig === sig) {
                     container.querySelectorAll('.ws-dot:not(.add)').forEach((d, i) => {
                         d.classList.toggle('active', i === active);
@@ -552,6 +555,12 @@
                     d.className = 'ws-dot' + (i === active ? ' active' : '')
                         + (mode === 'name' ? ' named' : '');
                     d.textContent = wsLabel(ws, i);
+                    d.dataset.wsId = ws.id;
+                    // #258: the colour tints the dot; its number or name stays.
+                    if (ws.color) {
+                        d.classList.add('tinted');
+                        d.style.setProperty('--ws-color', ws.color);
+                    }
                     d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + wsNumber(ws.id)
                         + '  (right-click: rename / remove)';
                     d.addEventListener('click', () => switchWorkspace(i));
