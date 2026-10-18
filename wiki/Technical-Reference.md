@@ -733,7 +733,12 @@ deploying.
 Producer → broker: `hello` (required first frame; same `window_id`
 replaces), `title`, `resized` as JSON text; raw ANSI output **and**
 snapshots as unframed binary. Broker → producer: `input`, `resize` (reply
-`resized`), `snapshot_please` (reply one binary full redraw). Browser
+`resized`), `snapshot_please` (reply one binary full redraw). The full set
+lives in `webterm/protocol.py`: a producer also sends `agent` (the detected
+foreground agent), `cwd`, `mode` (DECCKM) and `exit`, and the broker's
+request/reply pairs are `procs_please`/`procs`, `kill`/`killed`,
+`git_status_please`/`git_status`, `screen_text_please`/`screen_text`,
+`reset_please`/`reset_done` and `flush_input_please`/`flush_input_done`. Browser
 attach: broker sends `resized` *before* requesting the snapshot. Snapshots
 start `ESC[0m ESC[2J ESC[H` — deliberately no `ESC c`/`ESC[3J`, since
 already-attached browsers receive them too — and end with a DEC-mode
@@ -874,7 +879,10 @@ masks that broker (remote), as a lost lease does.
 ### The /control lease channel (#248)
 
 `WS /control` carries the single-active-browser lease for one browser profile
-(`?clientId=<lease id>`). Frames the page sends: `{"type": "become_active"}`,
+(`?clientId=<lease id>`; without one the socket closes **4400**, without the
+token **4401**). The first socket to connect while nobody holds the lease takes
+it (a new `gen`); the lease is released only when the holder's last `/control`
+socket closes, and nobody else is promoted then. Frames the page sends: `{"type": "become_active"}`,
 `{"type": "ping", "n": <int>}` and `desktop_result` (the answers to a relayed desktop op). Frames it gets:
 
 * **`{"type": "status", "active": <bool>, "activeClientId": <str|null>, "gen":
@@ -949,7 +957,8 @@ UI and this API, not this document, so editing these docs needs no restart.
 ### Enabling MCP & the token
 
 MCP needs **both** the master `enabled` flag **and** a token. With either
-missing every `/mcp/*` request is **403 `{"error":"mcp_disabled"}`**.
+missing every MCP-token `/mcp/*` request is **403 `{"error":"mcp_disabled"}`**
+(the browser-realm `/mcp/config` below still answers, so you can turn it on).
 
 Get a token any of three ways (precedence **env > sidecar > config seed**):
 
@@ -1057,8 +1066,10 @@ only accepted channel. A **repeated** admin header is refused like a repeated
 scope header (**403 `admin_required`** — fail closed rather than silently
 picking one).
 The refusal ladder on every token route is fixed order:
-`mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 403 `admin_required`
-(the header is present but wrong) → the route's own checks. A header sent
+`mcp_disabled` → 401 `auth_required` → 400 `bad_scope` → 400
+`admin_token_in_url` (the credential in the query string) → 403
+`admin_required` (the header is present but wrong) → the route's own checks;
+the two admin steps exist only while an admin token is configured. A header sent
 while no admin token is configured is **ignored** (that caller is a plain
 non-admin, and `/mcp/info` answers `admin: false`); an admin-only operation
 called without admin also answers 403 `admin_required`. CORS: the header name
@@ -1107,9 +1118,9 @@ browser keys the answers it has given on host, run and rid (#250).
   `args.visible` — the int ids of the caller's visible windows on this broker
   (effective mode ≠ `off`, in scope), computed at relay time; an admin's frame
   carries `null`. The browser refuses `unknown_window` unless every window
-  the op **affects** — the named window, plus the whole column for
-  `move_column`/`set_width`, plus both windows' columns for `tab_into`/
-  `split` — is in that set, and the broker re-checks every **named** id
+  the op **affects** — the named window, plus its whole column while it is
+  tiled for every op except `focus`, plus both windows' columns for
+  `tab_into`/`split` — is in that set, and the broker re-checks every **named** id
   before relaying, answering the identical **404 `unknown_or_off`** bytes.
   `get` for a non-admin keeps only rows whose id is in the visible set (the
   broker re-filters rows against its own registry as a belt: identity and
@@ -1125,17 +1136,26 @@ browser keys the answers it has given on host, run and rid (#250).
   `move`/`color`/`stack`/`unstack` for order, colour and stacks) are
   forwarded to the mod's `ctx.commands`; the mod being off/absent answers
   **200 `{"ok": false, "reason": "inactive"|"absent"}`**, not an error.
+  `workspaces:list` answers the workspaces (each with its `color` and
+  `stack`), the active index, the `stacks` and the `palette` a colour must
+  come from. `rename`, `move` and `color` address a workspace by `index` or a
+  stack by `stack` (exactly one); `move` takes `direction` `left`/`right`;
+  `color` takes a `palette` colour, or `null`/`""`/`"none"` to clear
+  (anything else is `bad_args`); `stack` takes `index` and `target`;
+  `unstack` takes `index`. A desktop tab loaded before its broker gained an
+  op (opened before an update and not reloaded since) does not know that op
+  and answers it **400 `bad_op`**, the same bytes as the broker's own
+  allowlist refusal: reload that tab.
 
 **`GET /mcp/desktop`** — op `get`; answers `200 {"ok": true, …snapshot}`.
 The snapshot (as the lease-holding browser produces it, after the broker's
 registry re-identification) carries `viewport`, `mode`, `focused_column`,
 `workspaces` + `active_workspace` (`null` with the mod off), `home` (whether
-that browser's home is this broker), and one row per live window: `key`,
-`id` (an int for this broker's windows, `null` for app/foreign windows),
-`title`, `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
+that browser's home is this broker), and one row per live terminal of this broker (app windows and other hosts'
+windows are left out): `id` (an int), `title`, `kind`, `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
 for a custom width), `tabbed`/`split`, `minimized`, `workspace`, and
 `geometry` (`{x,y,w,h}` when floating — **per-browser pixel geometry, as that
-browser sees it**; never stored on the broker) or `null` when tiled.
+browser sees it**; never stored on the broker; absent when tiled).
 Every top-level field is rebuilt and type-checked broker-side — `viewport`
 ints, `mode` a short string, `focused_column`/`active_workspace` int or null,
 `home` a bool, `workspaces` a bounded list of small typed rows or null — so
@@ -1149,8 +1169,9 @@ sent one. A bad value drops that key, never the row, so an older page's
 snapshot keeps its exact shape.
 
 **`POST /mcp/desktop`** — body `{"op": …, "args": …}` with the op allowlist
-above (else **400 `bad_op`**); op-specific arg errors answer **400
-`bad_args`**. The browser's own error codes map as:
+above (else **400 `bad_op`**; a body that is not a JSON object is **400
+`bad_json`**); op-specific arg errors answer **400 `bad_args`**. Success is
+**200 `{"ok": true, "value": …}`** with the op's own answer as `value`. The browser's own error codes map as:
 
 | browser `error` | HTTP | body |
 |---|---|---|
