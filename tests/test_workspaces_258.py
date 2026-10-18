@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 100
+EXPECTED_ASSERTS = 101
 
 _PRELUDE = r"""
 'use strict';
@@ -1391,6 +1391,18 @@ async function modOff() {
 }
 """
 
+_SCENARIOS += r"""
+async function dotClickById() {
+    // ---- PD1: a pager dot switches to ITS workspace, by id at click --------
+    const w = buildWorld({ activeId: 'W3' });
+    const d1 = w.dots().filter(function (d) { return d.dataset.wsId === 'W1'; })[0];
+    const l = w.st().list; const t = l[0]; l[0] = l[1]; l[1] = t;     // a peer reorder, not yet rendered
+    if (d1) fire(d1, 'click');
+    ok(!!d1 && w.st().activeId === 'W1',
+        'PD1 a dot built before a reorder switches to its own workspace when clicked after it');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1414,6 +1426,7 @@ _EPILOGUE = r"""
     await parityMoveColour();
     await parityStack();
     await modOff();
+    await dotClickById();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1656,6 +1669,10 @@ def test_ui_and_commands_agree_on_stacks(scenario_run):
 def test_mod_off_and_on_keeps_order_colours_and_stacks(scenario_run):
     _ok(scenario_run, "OFF1 turning the mod off removes the pager and leaves the store byte-equal")
     _ok(scenario_run, "OFF2 turning it back on restores the same order, colours and stacks, saving nothing")
+
+
+def test_pager_dot_click_resolves_by_id(scenario_run):
+    _ok(scenario_run, "PD1 a dot built before a reorder switches to its own workspace when clicked after it")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

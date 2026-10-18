@@ -566,7 +566,12 @@
                     }
                     d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + wsNumber(ws.id)
                         + '  (right-click: rename / remove)';
-                    d.addEventListener('click', () => switchWorkspace(i));
+                    // By id at click, like every other surface: a click can
+                    // land between a peer's reorder and the rebuild it causes.
+                    d.addEventListener('click', () => {
+                        const j = workspaceIndexById(d.dataset.wsId);
+                        if (j >= 0) switchWorkspace(j);
+                    });
                     d.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -1815,9 +1820,8 @@
                         // By id, not the captured index: a context menu is a
                         // frozen snapshot that can sit open across a poll, and a
                         // peer removing a LOWER-indexed workspace would slide
-                        // this row's target onto its neighbour. The pager dots
-                        // can capture an index because renderWsDots rebuilds
-                        // them whenever the list changes; a menu never does.
+                        // this row's target onto its neighbour. (The pager
+                        // dots resolve by id at click too, #258.)
                         const wsId = ws.id;
                         items.push({
                             label: (wi === cur ? '\u2713 ' : '   ')
