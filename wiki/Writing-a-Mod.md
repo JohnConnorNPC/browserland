@@ -1452,9 +1452,9 @@ if (!ctx.signal.aborted) {             // `.aborted`, never bare `if (ctx.signal
 
 One `AbortSignal` per **activation**, aborted when that activation ends. It
 replaces the dead-flag pattern mods hand-rolled to stop an in-flight loop from
-touching a desktop it no longer belongs to (`mods/update/`'s `restartOpDead` /
-`applyOpDead` are the worked examples, and are still written by hand — the
-migrations are not part of this).
+touching a desktop it no longer belongs to. `mods/update/` is the worked
+example: its two hand-rolled flags, `restartOpDead` and `applyOpDead`, became
+one `opDead()` that reads `ctx.signal.aborted` (#224).
 
 - **Per activation, and freshness is structural.** The controller hangs off the
   per-mod record `initMod` builds, and it builds a new one every time a mod
@@ -1479,7 +1479,7 @@ migrations are not part of this).
   `statusNode.textContent = res.error` writes into a window that is gone. **A
   continuation that touches activation-owned state must check first** — the
   result's `aborted`, or `ctx.signal.aborted` — which is precisely the job
-  `mods/update/`'s `restartOpDead` / `applyOpDead` still do by hand. The signal
+  `mods/update/`'s `opDead()` does. The signal
   cancels the request for you; it does not return you to a live mod.
 - **`if (ctx.signal)` is a capability check, not a liveness check.** The ctx is
   not dismantled at teardown, so `ctx.signal` stays truthy forever — it is the
@@ -1569,7 +1569,8 @@ answers exactly one question ("did some fragment declaring that name
 evaluate?") and a top-level `function` outlives the mod that declared it, so it
 reads *true* for a mod switched off ten minutes ago and the call lands in a
 torn-down closure. The pattern/theme pair above is the shipped reference
-migration; the remaining consumers are not migrated yet.
+migration; `mods/scratchpad/` consumes `mods/editor/`'s `'codemirror'` service
+the same way.
 
 - **`consume` implies no dependency edge.** It returns `undefined` for a
   provider that is absent, not installed, installed but not loaded this page,
@@ -1629,7 +1630,7 @@ migration; the remaining consumers are not migrated yet.
   drop revocation — and `ctx.capabilities` reports both absent, so
   `needs: ['consume']` blocks with a reason. Note that a `needs` declaration
   **blocks** the mod on a build that lacks the seam, which is why
-  `mods/theme/mod.json` deliberately does *not* declare one: it degrades to "no
+  `mods/theme/theme.js` deliberately does *not* declare one: it degrades to "no
   pattern" instead. `ctxVersion` stays `1`.
 - **Keep the `typeof` guard even with the seam.** The theme example's
   `try/catch` is not the old `ReferenceError` guard: `ctx.consume` is *absent*
@@ -1653,11 +1654,13 @@ const r = await ctx.commands.execute('scratchpad:save', args);
 ```
 
 A **named, owned** dispatch target, replacing the duck-typed fields core pokes
-by name — scratchpad's Ctrl+S rides `win._saveToServer`, and help hoists
+by name — scratchpad's Ctrl+S rode `win._saveToServer`, and help hoisted
 functions to the top level on purpose because the mod system could not
-contribute a keybinding target at all. Both fail the same way: a typo'd id, a
+contribute a keybinding target at all. Both failed the same way: a typo'd id, a
 disabled mod's `undefined` field and a real failure are all "nothing happened".
-(Those call sites are not migrated by this; the surface is new.)
+Both have moved: scratchpad registers `save`, and help registers `toggle` and
+`refresh-corpus`. The editor's `win._saveToServer` is the field core still
+reads, from the unsaved-changes prompt.
 
 **The outcome vocabulary is the point, and it is closed and branchable:**
 
