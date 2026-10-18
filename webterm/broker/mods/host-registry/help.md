@@ -28,7 +28,7 @@ Each entry is classified against what you already have:
 
 - **new** — a broker you don't have yet (checked by default).
 - **differs** — a broker you already have, but with a different label, URL, or color (unchecked by default: your local copy wins unless you tick it). If the URL differs, applying it replaces your local URL **and clears that host's saved password**, so you may need to re-enter it — a saved password is never carried over to a different address. A list that carries a *different password* for a host you otherwise already have is also a **differs**, so a rotated password can be pulled back.
-- **already have** — identical to what you have (greyed out, nothing to do).
+- **have** — identical to what you have (greyed out, nothing to do).
 
 Matching is by the broker's **verified** identity first, then its address, so pulling an updated list **updates** the hosts you already have instead of duplicating them. The registry's own copy of a broker never replaces your **this broker** entry, and your default-host choice is left untouched. Nothing is matched by the id a list carries — that belongs to the browser that published it, and treating it as an identity would let whoever wrote the list choose which of your hosts an entry lands on.
 
