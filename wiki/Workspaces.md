@@ -8,7 +8,7 @@ You can move between workspaces a few ways:
 
 - **Pager dots** — Click a dot in the pager at the bottom of the taskbar. Each dot is one workspace — or one *stack* of workspaces (see *Stacks* below) — and the active one is highlighted.
 - **The workspace menu** — Right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar, and pick a workspace from the list. It works in both window modes, and because the taskbar is always on screen it stays reachable even when windows cover the desktop — so it still works with the pager hidden.
-- **Previous / Next shortcuts** — Step to the workspace before or after the current one.
+- **Previous / Next shortcuts** — Step to the workspace before or after the current one. They stop at the first and last workspace rather than wrapping around.
 - **Go to workspace 1–5** — Jump straight to a numbered pager entry. A stack counts as one entry, so the numbers always match the dots; a number that lands on a stack opens its list instead of switching.
 
 | Action | Default binding |
@@ -72,8 +72,8 @@ Right-click a **pager dot** for that workspace's options:
 
 | Menu item | What it does |
 |---|---|
-| `Rename…` | Give the workspace a custom name. |
-| `Remove workspace` | Delete that workspace (disabled when only one workspace remains). |
+| `Rename…` | Give the workspace a custom name. Naming one switches every dot to `Show names`. |
+| `Remove workspace` | Delete that workspace (disabled when only one workspace remains). Its windows move to the workspace before it (the next one, if it is first); you are asked to confirm only when it holds windows. |
 | `Colour…` | Give the workspace a colour from the palette, or `None` (see *Colours*). |
 | `Stack with…` | Put the workspace in a stack with another pager entry (see *Stacks*). |
 | `Remove from stack` | Take it out of its stack (shown only for a workspace in a stack). |
@@ -99,7 +99,7 @@ Workspaces stay in the order you put them:
 
 - **Drag** a pager dot to a new place: drop it on the left half of another dot to put it before that one, on the right half to put it after. A stack's dot drags as one, with all its workspaces.
 - **Move left / Move right** in a dot's right-click menu move it one place. A workspace jumps over a whole stack, never into it.
-- **Move workspace left / right** do the same from the keyboard for the workspace you are on (unbound by default — bind them under **Control Panel → Input → Keybindings**).
+- **Move workspace left / right** do the same from the keyboard for the workspace you are on; on a workspace in a stack they move it within its stack, never the stack itself (unbound by default — bind them under **Control Panel → Input → Keybindings**).
 
 The workspace you are on stays highlighted after the move. Moving a workspace never moves its windows: they stay where they are, and only the order of the pager changes. Moving windows *between* workspaces is still **Send to workspace** (above).
 
