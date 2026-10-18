@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 52
+EXPECTED_ASSERTS = 58
 
 _PRELUDE = r"""
 'use strict';
@@ -324,7 +324,7 @@ function buildWorld(seed) {
         registerMod: function (def) { registered = def; },
         document: w.document, prefs: w.prefs,
         getLayout: function () { return w.L; },
-        savePrefs: function () { w.spies.save++; },
+        savePrefs: function () { w.spies.save++; w.spies.saved = J(w.L.mods.workspaces); },
         savePrefsLocal: function () {},
         windows: w.windows, sessions: w.sessions, frontId: null,
         relayoutStrip: function () { w.spies.relayout++; },
@@ -364,6 +364,13 @@ function buildWorld(seed) {
     w.dots = function () { return w.pager().querySelectorAll('.ws-dot:not(.add)'); };
     w.render = function () { if (w.layoutRender) w.layoutRender(); };
     w.lastMenu = function () { return w.menus[w.menus.length - 1] || null; };
+    // A workspace's own menu, by id: right-click its pager dot.
+    w.openWsMenu = function (wsId) {
+        const d = w.dots().filter(function (x) { return x.dataset.wsId === wsId; })[0];
+        if (!d) return null;
+        fire(d, 'contextmenu', { clientX: 10, clientY: 20 });
+        return w.lastMenu();
+    };
     w.item = function (menu, re) {
         return (menu ? menu.items : []).filter(function (it) {
             return typeof it.label === 'string' && re.test(it.label); })[0] || null;
@@ -841,6 +848,75 @@ async function colours() {
 }
 """
 
+_SCENARIOS += r"""
+async function stacking() {
+    // ---- SK / SM: Stack with… and Remove from stack ------------------------
+    function ids(w) {
+        return w.st().list.map(function (x) { return x.id + (x.stack ? '@' + x.stack : ''); }).join(',');
+    }
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    function stackVia(w, wsId, re) {
+        const m = w.openWsMenu(wsId);
+        act(w.item(m, /^Stack with…$/));
+        const tm = w.lastMenu();
+        if (!m || tm === m) return null;
+        act(w.item(tm, re));
+        return tm;
+    }
+    function four(extra) {
+        return Object.assign({ list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0 },
+            { id: 'W3', focusedCol: 0 }, { id: 'W4', focusedCol: 0 }] }, extra || {});
+    }
+    let w = buildWorld(four());
+    const tm = stackVia(w, 'W1', /^Workspace 3$/);
+    const sid = w.st().list[1].stack;
+    ok(!!tm && J(tm.items.map(function (it) { return it.label; })) === J(['Workspace 2', 'Workspace 3', 'Workspace 4'])
+        && typeof sid === 'string' && ['L1', 'L2', 'L3', 'W1', 'W2', 'W3', 'W4'].indexOf(sid) === -1
+        && ids(w) === 'W2,W3@' + sid + ',W1@' + sid + ',W4'
+        && w.st().stacks.length === 1 && w.st().stacks[0].id === sid,
+        'SK1 Stack with a plain workspace forms a new stack at the target, the chosen one after it');
+
+    w = buildWorld(four({ stacks: [{ id: 'S1', name: 'dev' }], list: [
+        { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] }));
+    const tm2 = stackVia(w, 'W4', /^Stack dev \(2\)$/);
+    ok(!!tm2 && ids(w) === 'W1,W2@S1,W3@S1,W4@S1',
+        'SK2 Stack with a stack joins it at the end of its block');
+
+    w = buildWorld(four({ stacks: [{ id: 'S1' }, { id: 'S2' }], list: [
+        { id: 'W1', focusedCol: 0, stack: 'S1' }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0, stack: 'S2' }, { id: 'W4', focusedCol: 0, stack: 'S2' }] }));
+    const tm3 = stackVia(w, 'W1', /^Stack 2 \(2\)$/);
+    ok(!!tm3 && ids(w) === 'W2,W3@S2,W4@S2,W1@S2' && J(w.st().stacks) === J([{ id: 'S2' }])
+        && J(JSON.parse(w.spies.saved || '{}').stacks) === J([{ id: 'S2' }]),
+        'SK3 a workspace leaving a two-member stack for another dissolves the one it left, before the save');
+
+    w = buildWorld(four({ stacks: [{ id: 'S1' }], list: [
+        { id: 'W1', focusedCol: 0, stack: 'S1' }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] }));
+    let m = w.openWsMenu('W1');
+    act(w.item(m, /^Remove from stack$/));
+    ok(!!m && ids(w) === 'W2@S1,W3@S1,W1,W4',
+        'SK4 Remove from stack puts the first of three just after the stack');
+
+    w = buildWorld(four({ stacks: [{ id: 'S1' }], list: [
+        { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] }));
+    const s0 = w.spies.save;
+    m = w.openWsMenu('W2');
+    act(w.item(m, /^Remove from stack$/));
+    ok(!!m && ids(w) === 'W1,W3,W2,W4' && J(w.st().stacks) === J([]) && w.spies.save > s0
+        && J(JSON.parse(w.spies.saved || '{}').stacks) === J([]),
+        'SK5 removing one of two dissolves the stack before it saves');
+
+    w = buildWorld(four());
+    m = w.openWsMenu('W2');
+    ok(!!m && !!w.item(m, /^Stack with…$/) && !w.item(m, /^Remove from stack$/),
+        'SM2 Remove from stack is offered only to a stacked workspace');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -852,6 +928,7 @@ _EPILOGUE = r"""
     await wsMenu();
     await dragging();
     await colours();
+    await stacking();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1004,6 +1081,15 @@ def test_colour(scenario_run):
     _ok(scenario_run, "CL2 picking a colour stores it, saves once and tints the dot")
     _ok(scenario_run, "CL4 the palette menu checks the current colour")
     _ok(scenario_run, "CL3 None removes the colour")
+
+
+def test_stack_with_and_remove_from_stack(scenario_run):
+    _ok(scenario_run, "SK1 Stack with a plain workspace forms a new stack at the target, the chosen one after it")
+    _ok(scenario_run, "SK2 Stack with a stack joins it at the end of its block")
+    _ok(scenario_run, "SK3 a workspace leaving a two-member stack for another dissolves the one it left, before the save")
+    _ok(scenario_run, "SK4 Remove from stack puts the first of three just after the stack")
+    _ok(scenario_run, "SK5 removing one of two dissolves the stack before it saves")
+    _ok(scenario_run, "SM2 Remove from stack is offered only to a stacked workspace")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

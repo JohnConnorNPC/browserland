@@ -604,6 +604,10 @@
                     { label: 'Colour…', enabled: true,
                       action: () => openColorMenu((wsList().find(w => w.id === wsId) || {}).color,
                           x, y, (c) => setWorkspaceColorById(wsId, c)) },
+                    { label: 'Stack with…', enabled: wsPagerEntries().length > 1,
+                      action: () => openStackWithMenu(wsId, x, y) },
+                    ...(ws.stack ? [{ label: 'Remove from stack', enabled: true,
+                                      action: () => unstackById(wsId) }] : []),
                     { label: ws.stack ? 'Move up' : 'Move left', enabled: wsCanMove(key, -1),
                       action: () => moveEntry(key, -1) },
                     { label: ws.stack ? 'Move down' : 'Move right', enabled: wsCanMove(key, 1),
@@ -852,6 +856,65 @@
                 for (const c of wsPalette()) {
                     items.push({ label: (c === current ? '\u2713 ' : '   ') + c, enabled: true,
                                  swatch: { color: c }, action: () => pick(c) });
+                }
+                renderMenu(items, x, y);
+            }
+            // ---- stacks (#258) --------------------------------------------
+            // Stack workspace `id` with the pager entry `targetKey`: join the
+            // target's stack (at its end), or form a new stack at the TARGET's
+            // place. Leaving another stack first may dissolve that one (the
+            // heal). No wsStore() runs between the splices: its heal would see
+            // a half-built list (a missing active workspace, a memberless row).
+            function stackWith(id, targetKey) {
+                const st = wsStore();
+                const w = st.list.find(x => x.id === id);
+                const key = String(targetKey), tid = key.slice(2);
+                const t = key.indexOf('w:') === 0 ? st.list.find(x => x.id === tid) : null;
+                let sid = t ? (t.stack || null) : tid;
+                if (!w || (t ? t === w : !(st.stacks || []).some(s => s.id === sid))) return null;
+                if (w.stack && w.stack === sid) return sid;
+                const fresh = !sid;
+                if (fresh) sid = mintWsUniqueId();        // before any splice
+                st.list.splice(st.list.indexOf(w), 1);
+                if (fresh) {
+                    if (!Array.isArray(st.stacks)) st.stacks = [];
+                    st.stacks.push({ id: sid });
+                    t.stack = sid;
+                }
+                w.stack = sid;
+                let end = st.list.findIndex(x => x.stack === sid);
+                while (end < st.list.length && st.list[end].stack === sid) end++;
+                st.list.splice(end, 0, w);
+                wsStore();                                 // an old stack may dissolve
+                wsMoved();
+                return sid;
+            }
+            // Out of its stack, to just after the block: spliced out FIRST, so
+            // the block end is measured without it. A one-member remainder
+            // dissolves in the heal.
+            function unstackById(id) {
+                const st = wsStore();
+                const w = st.list.find(x => x.id === id);
+                if (!w || !w.stack) return false;
+                const sid = w.stack;
+                st.list.splice(st.list.indexOf(w), 1);
+                delete w.stack;
+                let end = st.list.findIndex(x => x.stack === sid);
+                while (end < st.list.length && st.list[end].stack === sid) end++;
+                st.list.splice(end, 0, w);
+                wsStore();
+                wsMoved();
+                return true;
+            }
+            // "Stack with…": every OTHER pager entry, resolved at click.
+            function openStackWithMenu(wsId, x, y) {
+                const items = [];
+                for (const e of wsPagerEntries()) {
+                    if (e.members.some(m => m.id === wsId)) continue;
+                    const k = e.key;
+                    items.push({ enabled: true, action: () => stackWith(wsId, k),
+                        label: e.stack ? 'Stack ' + (e.stack.name || e.num) + ' (' + e.members.length + ')'
+                                       : (e.ws.name || 'Workspace ' + e.num) });
                 }
                 renderMenu(items, x, y);
             }
