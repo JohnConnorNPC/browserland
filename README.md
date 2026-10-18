@@ -199,7 +199,7 @@ browser that loads its page. The desktop ships with nineteen:
 | `host-registry` | optional shared broker list — publish/pull your host list across browsers | on |
 | `mousemode` | title-bar chip while a full-screen app owns the mouse | on |
 | `mod-sync` | copy this broker's mod setup to your other brokers (all or selected) | on |
-| `workspaces` | vertical workspaces — taskbar pager, per-workspace names, **Send to workspace** | on |
+| `workspaces` | vertical workspaces — taskbar pager, per-workspace names, colours and stacks, **Send to workspace** | on |
 | `git` | per-terminal git branch + dirty-state widget | off |
 | `aistatus` | AI-provider status chip + window | off |
 | `clipboard` | rolling history of copies/pastes made through the desktop | off |
@@ -255,7 +255,7 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 | `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | `POST /mcp/window` | retag or re-mode a window this server launched (its launch handle), or any window with the admin credential (#243/#245) |
 | `get_desktop(host?)` | `GET /mcp/desktop` | the lease-holding browser's desktop layout; needs `allow_desktop` (#244) |
 | `arrange_window(id, op, …)` | `POST /mcp/desktop` | focus / move column / set width / tile / float / set geometry / tab into / split, applied by the lease-holding browser; needs `allow_desktop` |
-| `workspaces(host, op, …)` *(admin)* | `POST /mcp/desktop` | list / add / rename / remove / switch / send-window; needs `allow_desktop` too |
+| `workspaces(host, op, …)` *(admin)* | `POST /mcp/desktop` | list / add / rename / remove / switch / send-window / move / color / stack / unstack; needs `allow_desktop` too |
 | `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` *(admin)* | `POST /mcp/knobs` | the broker-wide knobs; never the tokens or `enabled` |
 
 **Multi-host.** Pass `--hosts` (or `$BROWSERLAND_MCP_HOSTS`) a JSON array of
@@ -428,7 +428,7 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 | `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, script(s), optional CSS + in-app help page (authoring guide: [wiki/Writing-a-Mod.md](wiki/Writing-a-Mod.md)) |
 | `webterm/mcptool/` | The shipped stdio MCP server wrapping the broker's `/mcp/*` API |
 | `webterm/protocol.py` | The single source of truth for the JSON frame shapes |
-| `launchers/` | venv-bootstrapping run scripts (and systemd units) for both OSes |
+| `launchers/` | run scripts for both OSes (the Linux ones bootstrap a venv) and systemd units |
 | `tests/` | pytest suite: protocol, snapshots, agent↔broker integration, real-PTY round trips |
 
 ## Documentation
@@ -455,9 +455,9 @@ or a coding agent.
 
 Upgrading an existing install? **[`wiki/Upgrading.md`](wiki/Upgrading.md)** is
 the breaking-change record — what changed, whether it affects you, and how to
-recover. Most recently: a broker that relays to peers needs `websockets` 15+
-(the `proxy` extra, #252), and broker roles add an opt-in `terminals: false`
-(#253). It also keeps the token-on-every-connection change (#142), which
+recover. Most recently: Python 3.10 is the minimum, a broker that relays to
+peers needs `websockets` 15+ (the `proxy` extra, #252), and broker roles add an
+opt-in `terminals: false` (#253). It also keeps the token-on-every-connection change (#142), which
 strands terminals launched by a previously tokenless broker.
 
 What changed in a release, and roughly what came before it, is in
