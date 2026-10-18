@@ -2703,6 +2703,32 @@ def test_rotated_admin_token_error_names_rotation():
     assert "'h'" in str(ei.value) and "rotated" in str(ei.value)
 
 
+def test_admin_required_message_says_when_every_call_fails():
+    """#260 review round 1: the client's own admin_required sentence, on a
+    plain (non-admin) call. While the broker HAS an admin token, a wrong header
+    (rotated or mistyped) is refused on every /mcp call (app.py
+    _mcp_admin_error); once the broker's token is cleared it ignores the header
+    and only the admin-only routes refuse (_mcp_knobs, the workspace ops). The
+    sentence must say both, and none of the earlier wordings may come back."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "admin_required"})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.flush_input(42)
+    msg = str(ei.value)
+    assert ei.value.code == "admin_required"
+    assert "While the broker has an admin token" in msg
+    assert "fails every call to this host" in msg
+    assert "if the broker's admin token was cleared, only admin-only " \
+           "operations fail" in msg
+    for gone in ("an unrotated credential never yields this",
+                 "for an admin-only operation",
+                 "not only admin-only ones, so if the token was rotated or "
+                 "cleared"):
+        assert gone not in msg, gone
+
+
 # ---- #244 D4: get_desktop / arrange_window / workspaces --------------------
 
 def test_get_desktop_fails_closed_without_allow_desktop():

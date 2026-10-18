@@ -73,11 +73,12 @@ _ERROR_MESSAGES = {
                          "call to this host is refused.",
     # #245: the admin credential's error surface.
     "admin_required": "The broker did not accept this server's admin "
-                      "credential. A wrong admin token fails every call to "
-                      "this host, not only admin-only ones, so if the token "
-                      "was rotated or cleared in the broker's Control Panel "
-                      "(MCP access), or entered wrong, refresh this server's "
-                      "config — the hosts entry's \"admin_token\", or "
+                      "credential. While the broker has an admin token, a "
+                      "wrong one (rotated in the broker's Control Panel, MCP "
+                      "access, or entered wrong) fails every call to this "
+                      "host; if the broker's admin token was cleared, only "
+                      "admin-only operations fail. Either way, refresh this "
+                      "server's config — the hosts entry's \"admin_token\", or "
                       "$BROWSERLAND_MCP_ADMIN_TOKEN — and restart it.",
     "admin_token_in_url": "The broker refused the request: an admin token must "
                           "travel in the X-Browserland-Mcp-Admin header, never "
