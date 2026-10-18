@@ -153,11 +153,11 @@ The git phase lives in `webterm/broker/update.py`'s marked mutation section: `gi
 
 Failures are reported **accumulating every reason** — the UI shows all unmet preconditions in one pass rather than trial-and-error. The response is `202` with a `last_deploy` section surfaced in the next `/update/check` so the UI can report the outcome.
 
-**The broker that was running the old code exits and is replaced.** A rollback is automatic: if the new broker never comes up (supervisor restarts it, but it exits again before a worker-ready timeout), the supervisor automatically reverts to the recorded prior commit sha (held in `deploy.journal` beside the checkout). The outcome (`rolled-back`, `deploy-failed`, etc.) rides in the next check response under `last_deploy.outcome`, visible to the operator.
+**The broker that was running the old code exits and is replaced.** Before it asks for the restart, the worker writes a deploy journal, `deploy.journal` (the sha before and the target sha), into the supervisor's run directory: a private temporary directory (`browserland-supervisor-…`) the supervisor creates when it starts and deletes when it exits, outside the checkout, so no git operation on the checkout can touch it. The supervisor judges the next worker generation against the journal: a fresh worker still up after 10 s on the target sha is `came-up-ready-on-target`; one up on any other sha is `came-up-on-wrong-sha` (never reverted — that worker is healthy); one that never comes up is `never-came-up`. A rollback is automatic only when `never-came-up` names a startup failure — the worker exited, could not bind its port, could not be started, or used up the restart budget: the supervisor runs `git reset --hard` to the journalled sha (hooks disabled, no network) and relaunches the old code with a fresh budget, recorded as `rolled-back`. `rollback-impossible` means the revert was refused before git ran (the journalled sha is not a full 40-hex sha, the checkout has no `.git`, or `HEAD` moved since the deploy); `rollback-failed` means git itself failed. Neither is retried. A stop signal, or an exit 75 without a matching sentinel, never reverts. An apply that fails before its restart (the merge failed, or the restart could not be armed) is closed by the worker itself as `cancelled-before-restart`. The outcome rides in every `/update/check` response under `last_deploy` (the string is `last_deploy.outcome`), read fresh per request.
 
 **Agents survive the restart** and reconnect to the new worker, but terminals do not re-execute: they keep running the old code they imported. The update window's **Last update** section offers a **New terminal** button to spawn a new one with the updated code. Agents (AI coding assistants) also survive, but any in-memory state (context, plan, accumulated tokens) is lost — the restart is opaque to them, so they reconnect to an empty board.
 
-The `deploy.journal` records every apply attempt (sha before, sha after, outcome, why it failed if it did) outside the checkout, so `git gc` cannot erase it. Rollback success is proved by a changed `bootId` (reported in `/info`); rollback failure is kept as `rollback-impossible` and requires manual repair.
+There is one current journal (pending) and one current outcome file, `deploy.outcome` (the journal record, the outcome, the sha observed, the reason and when it was finalized) — deliberately not a growing log: each deploy gets exactly one outcome, and the next deploy's replaces it. Both live in the run directory, so the outcome is gone once the supervisor itself exits, and an unsupervised broker never reports one. A journal this build cannot validate is moved aside to `deploy.journal.corrupt`, never guessed at. A rollback shows as `rolled-back` plus a changed `bootId` (reported in `/info`); `rollback-impossible` and `rollback-failed` leave the checkout for manual repair.
 
 ### Broker restart (#183)
 
@@ -1188,8 +1188,9 @@ mcptool reads as "not admin" and fails closed on. `window_edit` (#243) and
 `allow_desktop` (#244) advertise `POST /mcp/window` and the desktop relay the
 same way; a flag absent from an older broker reads as false.
 
-**`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
-omitted, and so are windows outside the caller's declared scope. `agent` is the
+**`GET /mcp/terminals`** → an array; for a non-admin caller, windows whose
+effective mode is `off` are omitted, and so are windows outside the caller's
+declared scope (an admin, #245, gets every window — see **Reach** above). `agent` is the
 detected foreground-agent name (`""` when none), `kind` the producer kind
 (`"agent"` vs a non-agent `"terminal"`), `mode` the effective access mode,
 `scope` the window's scope tag (`null` when untagged). `version` is the
@@ -1226,6 +1227,8 @@ map (fg/bg/reverse) so a color-only change is observable (#128).
 {"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n...","content_hash":"…","stable_hash":"…","idle_ms":0}
 ```
 
+Every read also carries `alt_screen` (the app is on the alternate screen),
+`app_cursor` (DECCKM) and `cursor` (the cursor position the agent reported).
 `content_hash` is a stable 128-bit digest of the rendered text (#26).
 `stable_hash` (#135) is the same digest with the HARDWARE-cursor cell masked to a
 sentinel, so a cursor BLINK in place (the cell toggling between the block glyph
@@ -1323,8 +1326,8 @@ broker has `terminals: false` (#253, checked first, whatever `allow_launch` says
 then requires `allow_launch` (else **403 `launch_disabled`**).
 Body reuses the `/launch` shape plus an MCP-only `mode`: `{"profile": <str>,
 "cols": 80, "rows": 24, "title": <str>, "cwd": <str>,
-"mode": "off"|"read"|"readwrite"}`, all optional (dims default 80×24, `profile`
-defaults to the broker default; `cwd` must be an existing dir; an invalid
+"mode": "off"|"read"|"readwrite"}`, all optional (dims default 80×24 and are clamped to
+1–1000, `title` is cut to 256 characters, `profile` defaults to the broker default; `cwd` must be an existing dir; an invalid
 `mode` is **400 `bad_mode`**, scoped or not, and `null` counts as absent).
 Response is the launcher's:
 
@@ -1360,7 +1363,8 @@ Only a row write that fails, or a retry whose fresh id collides again, is
 **`POST /mcp/window`** — body `{"id": <int>, "handle"?: <str>, "scope"?:
 <str>|null, "mode"?: "off"|"read"|"readwrite"|null}` (#243). Sets the scope
 and/or MCP mode of one window; an absent key leaves its field, an explicit
-`null` clears it (exactly `/session/mcp`'s body rules). Two paths, tried in
+`null` clears it (`/session/mcp`'s body rules, except that an empty `scope`
+string is **400 `bad_scope`** here: clear a scope with `null`). Two paths, tried in
 order:
 
 * **handle** (preferred, admin included): the row must carry an `owner`, the
@@ -1369,7 +1373,8 @@ order:
   off/out-of-scope filter — an owner can set its window to `off`, or to a
   scope it does not hold, and undo it. A matching-handle write **keeps** the
   owner.
-* **no handle**: requires the admin credential; the write targets any window
+* **no handle**: requires the admin credential (a non-admin call without a
+  handle gets the same 404 as a failed handle); the write targets any window
   with a live entry or a stored row, and **clears** the old owner (a stale
   agent handle cannot undo an admin decision) while stamping the window as
   admin-driven (the taskbar badge).
@@ -1393,15 +1398,18 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 |---|---|---|
 | 403 | `mcp_disabled` | feature disabled or no token configured |
 | 401 | `auth_required` | missing/invalid MCP token |
-| 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after mcp_disabled and the token. An empty value is not refused: it means unscoped, which sees every window its mode allows |
+| 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after mcp_disabled and the token. An empty value is not refused: it means unscoped, which sees every window its mode allows. Also `POST /mcp/window` with a body `scope` that is not a valid name or `null` |
 | 400 | `bad_json` | body is not a JSON object |
-| 400 | `bad_id` | `id` missing or not an integer |
+| 400 | `bad_request` | `/mcp/launch` body is valid JSON but not an object |
+| 400 | `bad_id` | `id` missing or not convertible to an integer (`int()`: `"12"` and `3.9` are accepted and converted) |
 | 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope; on `POST /mcp/window` (#243) every handle-path failure answers these same bytes, so ids cannot be probed |
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
 | 413 | `too_large` | `/mcp/input` payload > 256 KiB |
-| 400 | `bad_pace` | `/mcp/pace` `pace_ms` missing or not an integer |
-| 502 | `no_producer_rpc` | `/mcp/read` · `/mcp/reset` · `/mcp/flush` producer did not answer (non-agent / timeout) |
+| 400 | `bad_pace` | `/mcp/pace` `pace_ms` missing or not convertible to an integer |
+| 400 | `bad_regex` | `/mcp/read` `wait_for_regex` does not compile (the body carries `detail`) |
+| 400 | `conflicting_wait` | `/mcp/read` with more than one of `wait_for_change` / `wait_for_text` / `wait_for_regex` / `wait_for_idle` |
+| 502 | `no_producer_rpc` | `/mcp/read` · `/mcp/reset` · `/mcp/flush` producer did not answer (non-agent, timeout, too many requests already in flight on that window, or the producer disconnected) |
 | 502 | `reset_failed` | `/mcp/reset` agent could not clear its render buffer |
 | 502 | `flush_failed` | `/mcp/flush` agent could not flush its pending input |
 | 403 | `terminals_disabled` | `/mcp/launch` on a broker with `terminals: false` (#253); checked before `launch_disabled` |
@@ -1409,8 +1417,8 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 400 | `unknown_profile` | `/mcp/launch` profile not in config |
 | 400 | `bad_dims` / `bad_cwd` / `cwd_not_dir` | `/mcp/launch` bad `cols`/`rows`/`cwd` |
 | 429 | `too_many_pending_launches` | `/mcp/launch` backpressure |
-| 400 | `bad_mode` | `/mcp/launch` `mode` is not `off`/`read`/`readwrite` (or `null`) |
-| 500 | `spawn_failed` / `agent_exited_early` | `/mcp/launch` agent failed to start |
+| 400 | `bad_mode` | `/mcp/launch` `mode` is not `off`/`read`/`readwrite` (or `null`); `POST /mcp/window` with such a `mode`, or with neither `mode` nor `scope`; `POST /mcp/knobs` with such a `default_mode` |
+| 500 | `spawn_failed` / `agent_exited_early` | `/mcp/launch` agent failed to start (`spawn_failed: <reason>` carries the OS error after the colon; `agent_exited_early` adds the agent's `returncode`) |
 | 500 | `prespawn_failed` | `/mcp/launch`: the new window's row could not be written, or the one retry's fresh id also had a stored row; nothing was spawned |
 | 400 | `admin_token_in_url` | an MCP admin credential was sent in the URL query string (#245) — the header is the only accepted channel, and the refusal holds even when the header is also correct |
 | 403 | `admin_required` | the `X-Browserland-Mcp-Admin` header is present but wrong, or an admin-only operation was called without admin (#245) |
@@ -1423,6 +1431,8 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 409 | `lost_lease` | the browser lost the control lease mid-op. `dispatched: false`: the op was never sent, so nothing was applied; `dispatched: true`: it may have applied, so check before retrying (#250) |
 | 409 | `needs_confirm` | `workspaces:remove` of a non-empty workspace without `force: true` — the body carries the live window `count` |
 | 409 | `last_workspace` | the last workspace cannot be removed |
+| 404 | `unknown_peer` | through a broker's `/peer/<id>/mcp` prefix: no peer `<id>`, or it is not configured with `mcp: true` (#252) |
+| 503 | `proxy_unavailable` | through a broker's `/peer/<id>/mcp` prefix: that broker lacks the `proxy` extra (#252) |
 | 409 | `peer_origin_changed` | through a broker's `/peer/<id>/mcp` prefix: the mcptool host's `peer_origin` is not the address that broker now dials for the peer (#252) |
 | 502 | `desktop_op_failed` | the browser's desktop op raised |
 | 400 | `bad_op` / `bad_args` | `/mcp/desktop` op outside the allowlist / op arguments invalid |
@@ -1477,8 +1487,11 @@ knobs, validated before any write: an unknown key — in particular `token`,
 the booleans must be real JSON booleans (a string `"false"` is truthy junk →
 **400 `bad_value`**, not coerced: the browser realm's `/mcp/config` keeps its
 historical coercion as pinned wire). A non-admin call is **403
-`admin_required`** before any validation. The write shares `/mcp/config`'s
-locked sidecar writer, so the two routes never interleave.
+`admin_required`** before any validation; a body that is not a JSON object is
+**400 `bad_json`**, and a `default_mode` outside the three modes **400
+`bad_mode`**. The write shares `/mcp/config`'s locked sidecar writer, so the
+two routes never interleave; a failed sidecar write answers **500** with the
+OS error as `error`.
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
 "scope": <str>|null}`, both keys optional →
@@ -1545,8 +1558,10 @@ during the first 10 minutes after the broker starts (every window gets that
 long to reconnect). After that, each write drops rows whose window is not
 connected and that were not seen for 7 days, then, while more than 1000 rows
 remain, the oldest rows whose window is not connected (a connected window's
-row is never dropped). A missing, unreadable or wrong-shaped file starts the
-store empty and a malformed row is dropped, both logged; the next change
+row is never dropped). A missing, unreadable, wrong-shaped or over-8-MiB file
+starts the store empty and a row with a bad `scope`, `mode`, `pid`, `host` or
+`seen` is dropped, both logged (a bad `owner` or `admin_set` alone is reset to
+`null` and the row kept); the next change
 rewrites the file.
 
 **Precedence.** Token: env `WEB_TERMINAL_MCP_TOKEN` > sidecar `token` > config
@@ -1562,7 +1577,7 @@ only**, so an MCP/AI agent still can't read a command or define a profile.
 
 **`GET /profiles/config`** → the **full** objects for this host:
 `{"ok":true,"default_profile":"cmd","profiles":{"cmd":{"command":[...],"title":...,
-"cwd":...}},"os":"windows|posix","source":"config|sidecar","exists":{"cmd":true}}`.
+"cwd":...,"color":...}},"os":"windows|posix","source":"config|sidecar","exists":{"cmd":true}}`.
 `exists[name]` is `shutil.which(command[0]) is not None` (a red flag for a
 shell that isn't installed).
 
@@ -1575,20 +1590,23 @@ the live launcher is swapped — **no restart**. Returns the GET shape. Errors
 `too_many_profiles` (> 200), `bad_name` (empty / > 64 chars / control chars /
 outside `[A-Za-z0-9 ._+-]`), `bad_profile`, `bad_command` (not a non-empty list
 of non-empty control-char-free strings), `command_too_long`,
-`command_token_too_long`, `bad_title`/`title_too_long`, `bad_cwd`/`cwd_too_long`,
-`default_not_member`. An empty `default_profile` resolves to the first profile.
+`command_token_too_long`, `bad_title`/`title_too_long`, `bad_cwd`/`cwd_too_long`, `bad_color` (a `color`
+that is not `#rrggbb`, #115), `bad_default` (`default_profile` not a string),
+`default_not_member`, and **403 `terminals_disabled`** on a `terminals: false`
+broker (#253). An empty `default_profile` resolves to the first profile.
 
 **`GET /profiles/detect`** → read-only environment scan seeding the editor:
 `{"ok":true,"suggestions":[{"name","title","command","exists"}]}`. Windows lists
 WSL distros (`wsl.exe -l -q`); POSIX lists installed `bash`/`zsh`/`fish`/`sh`.
-Never errors on a missing tool — the list is just empty. Runs off the event loop.
+Never errors on a missing tool — the list is just empty; a `terminals: false`
+broker answers **403 `terminals_disabled`** (#253). Runs off the event loop.
 
 **Sidecar `webterm_profiles.json`** — the durable profile set, written atomically
 next to the `/state` store (default `<state_path dir>/webterm_profiles.json`;
 override with config `profiles_state_path`). Schema:
 
 ```json
-{"profiles": {"<name>": {"command": ["..."], "title": null, "cwd": null}},
+{"profiles": {"<name>": {"command": ["..."], "title": null, "cwd": null, "color": null}},
  "default_profile": "<name>"}
 ```
 
