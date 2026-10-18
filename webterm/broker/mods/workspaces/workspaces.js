@@ -431,6 +431,19 @@
                 return changed;
             }
             function wsList() { return wsStore().list; }
+            // #258: an id no column, workspace or stack already holds. 57
+            // seeds its counter from the stored COLUMN ids only, so after a
+            // reload mintLayoutId() can hand back an existing WORKSPACE id --
+            // and the dedupe heal then drops the workspace just added.
+            function mintWsUniqueId() {
+                const st = wsStore();
+                const used = new Set(st.list.map(function (w) { return w.id; }));
+                for (const s of (Array.isArray(st.stacks) ? st.stacks : [])) used.add(s.id);
+                for (const c of getLayout().columns) if (c) used.add(c.id);
+                let id = mintLayoutId();
+                while (used.has(id)) id = mintLayoutId();
+                return id;
+            }
             function activeWorkspaceId() { return wsStore().activeId; }
             function activeWorkspaceIndex() {
                 const st = wsStore();
@@ -586,7 +599,7 @@
             // neither path here has. Name must already be valid (or null).
             function addWorkspaceNamed(name) {
                 const st = wsStore();
-                const entry = { id: mintLayoutId(), focusedCol: 0 };
+                const entry = { id: mintWsUniqueId(), focusedCol: 0 };
                 if (typeof name === 'string' && name.trim()) {
                     entry.name = name.trim().slice(0, 40);
                 }
@@ -1226,7 +1239,7 @@
             // Send to a brand-new workspace (the title-bar menu's last entry).
             function sendWindowToNewWorkspace(win) {
                 const st = wsStore();
-                st.list.push({ id: mintLayoutId(), focusedCol: 0 });
+                st.list.push({ id: mintWsUniqueId(), focusedCol: 0 });
                 savePrefs();
                 sendWindowToWorkspace(win, st.list.length - 1);
             }

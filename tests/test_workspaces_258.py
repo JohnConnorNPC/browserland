@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 20
+EXPECTED_ASSERTS = 23
 
 _PRELUDE = r"""
 'use strict';
@@ -523,10 +523,38 @@ async function heal() {
 }
 """
 
+_SCENARIOS += r"""
+async function minting() {
+    // ---- ID: a new workspace never re-mints a stored workspace id ----------
+    // Columns L1..L3 seed 57's counter to 3, so its next mint is L4 -- which
+    // is ALREADY a workspace here (the state after a reload).
+    const seed = function () { return { list: [
+        { id: 'L4', focusedCol: 0 }, { id: 'W2', focusedCol: 0 }, { id: 'W3', focusedCol: 0 }] }; };
+    let w = buildWorld(seed());
+    ok(w.mint() === 'L4', "ID precondition: 57's next mint is the stored workspace id L4");
+    w = buildWorld(seed());
+    const plus = w.pager().querySelector('.add');
+    if (plus) fire(plus, 'click');
+    let l = w.st().list, nu = l[3];
+    ok(!!plus && l.length === 4 && nu && ['L1', 'L2', 'L3', 'L4', 'W2', 'W3'].indexOf(nu.id) === -1
+        && w.st().activeId === nu.id,
+        'ID1 + adds a workspace with a fresh id that survives the heal, and switches to it');
+    w = buildWorld(seed());
+    const items = w.windowMenu ? w.windowMenu(w.windows.get('local:21')) : [];
+    const toNew = items.filter(function (it) { return it.label === 'Send to new workspace'; })[0];
+    if (toNew) toNew.action();
+    l = w.st().list; nu = l[3];
+    ok(!!toNew && l.length === 4 && nu && ['L1', 'L2', 'L3', 'L4', 'W2', 'W3'].indexOf(nu.id) === -1
+        && w.L.columns.filter(function (c) { return c.id === 'L1'; })[0].wsId === nu.id,
+        "ID2 Send to new workspace mints a fresh id and the window's column moves onto it");
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
     await heal();
+    await minting();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -614,6 +642,12 @@ def test_heal_last_used_member(scenario_run):
 
 def test_heal_is_canonical_and_idempotent(scenario_run):
     _ok(scenario_run, "H7 a healed store heals to itself: a second pass changes nothing and saves nothing")
+
+
+def test_mint_never_reuses_a_workspace_id(scenario_run):
+    _ok(scenario_run, "ID precondition: 57's next mint is the stored workspace id L4")
+    _ok(scenario_run, "ID1 + adds a workspace with a fresh id that survives the heal, and switches to it")
+    _ok(scenario_run, "ID2 Send to new workspace mints a fresh id and the window's column moves onto it")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
