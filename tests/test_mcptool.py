@@ -3085,8 +3085,7 @@ def test_workspaces_258_refuses_locally_and_sends_nothing():
 
 
 def test_workspaces_258_ops_are_known():
-    """#258 MT5: the four new ops are in the tool's op list (an older tool
-    refuses them locally with bad_op)."""
+    """#258 MT5: the four new ops are in the tool's op list."""
     from webterm.mcptool import server as srv
     for op in ("move", "color", "stack", "unstack"):
         assert op in srv._WORKSPACE_OPS, op
