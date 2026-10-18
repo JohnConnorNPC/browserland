@@ -287,10 +287,10 @@ again, unless they change a dependency file too.
   Independently, any arrange op or `send-window` on a terminal that is only a
   chip opens its window first and then applies, including one you closed.
   Only `focus` moves keyboard focus: no other op, and no open, can pull your
-  typing into an agent's terminal. A refused op opens nothing, and an op on a terminal the browser has not seen
+  typing into an agent's terminal. An op refused for its arguments or scope opens nothing, and an op on a terminal the browser has not seen
   yet waits up to 2 s for it to appear. `get_desktop` lists chip-only
-  terminals with `open: false` and open windows with `open: true` (a new,
-  additive field).
+  terminals in a new, separate `chips` list (`id`, `title`); its `windows`
+  rows are unchanged.
 - **Two ½ columns no longer scroll the strip when focus moves between them**
   (#259). Each column's width was rounded on its own, so on a strip whose
   usable width is odd two ½ columns came out 1 px wider than the strip, and

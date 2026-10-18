@@ -905,7 +905,10 @@ socket closes, and nobody else is promoted then. Frames the page sends: `{"type"
   answer. The page parks the id the way its own launch does and opens it once
   `/sessions` lists it, but only if that page holds the lease at that `gen`
   and run, its view is fully up, and it has not seen this launch before. A
-  page that predates the frame ignores it.
+  page that predates the frame ignores it. Delivery is best-effort: a frame
+  that lands on a page that cannot open the window (a popped-out window or a
+  background tab of the same profile whose view is not up) is dropped, and
+  the window stays a chip, which any desktop op opens.
 * **A repeat `become_active` from the current holder is idempotent.** It bumps no
   generation, closes no socket (no 4409) and tells nobody else: only the sending
   socket gets the status again. A `become_active` from anyone else flips the
@@ -1163,7 +1166,7 @@ browser keys the answers it has given on host, run and rid (#250).
   `openWindow` a chip click runs, then applies. The open happens only
   after the op's arguments and the visibility gate pass (and, for
   `send-window`, the mod answers `workspaces:list` and the target is one of
-  its workspaces), so a refused op opens nothing; `tab_into`/`split` check
+  its workspaces), so an op refused there opens nothing; `tab_into`/`split` check
   that both windows can open before opening either. `move_column`/
   `set_width` on a chip that would open floating answer `bad_args`
   `not_tiled`, and `set_geometry` on one that would open tiled
@@ -1182,13 +1185,16 @@ browser keys the answers it has given on host, run and rid (#250).
 The snapshot (as the lease-holding browser produces it, after the broker's
 registry re-identification) carries `viewport`, `mode`, `focused_column`,
 `workspaces` + `active_workspace` (`null` with the mod off), `home` (whether
-that browser's home is this broker), and one row per terminal of this broker that the desktop shows, as a
-window or as a taskbar chip with no window yet (app windows and other hosts'
-windows are left out): `id` (an int), `title`, `kind`, `open` (`true` for a window, `false` for a chip, which
-carries no placement; absent from a page that predates #262), `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
+that browser's home is this broker), and one row per live terminal of this broker (app windows and other hosts'
+windows are left out): `id` (an int), `title`, `kind`, `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
 for a custom width), `tabbed`/`split`, `minimized`, `workspace`, and
 `geometry` (`{x,y,w,h}` when floating — **per-browser pixel geometry, as that
 browser sees it**; never stored on the broker; absent when tiled).
+**`chips`** (#262) lists, separately, the terminals of this broker that are only
+a taskbar chip on that desktop (no window yet: launched over MCP, or closed by
+the user), as `{id, title}` with the same identity and visibility rules as the
+rows; any arrange op opens one. The rows never hold them. A page or broker that
+predates #262 sends no `chips` (an older broker drops the unknown key whole).
 Every top-level field is rebuilt and type-checked broker-side — `viewport`
 ints, `mode` a short string, `focused_column`/`active_workspace` int or null,
 `home` a bool, `workspaces` a bounded list of small typed rows or null — so
