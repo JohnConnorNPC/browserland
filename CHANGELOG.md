@@ -234,6 +234,10 @@ story behind anything named below.
 
 ### Changed
 
+- **Python 3.10 is the minimum** (#260). `requires-python` is now `>=3.10` (it
+  was `>=3.9`), so `pip install` refuses a 3.9 interpreter; the launcher
+  scripts do not check the version. See
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#python-310-is-the-minimum-10).
 - **The Control Panel is an applet grid** (#181). The single long scroll became
   one tab per broker, each opening on a grid of applets — Desktop, Windows,
   Input, Terminals, Startup, Access, Mods, Advanced — with a filter box over
