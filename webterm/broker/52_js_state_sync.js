@@ -20,6 +20,10 @@
         let _deactivated = false;
         let _homeActive = false;
         let _booted = false;
+        // #262: the home view is fully up -- a boot or rebuild has restored
+        // it and no teardown has happened since. _booted and !_deactivated
+        // both turn true BEFORE a boot's first await, so they cannot say this.
+        let _viewReady = false;
         let _slowPollTimer = null;
         // Monotonic lifecycle token: bumped on every teardown / boot / rebuild
         // so a stale async rebuild (active->inactive->active flips race its

@@ -4,6 +4,13 @@
   op waits for when it names a window the page has not polled yet
   (``refreshSessionsFor``), together with the REAL ``refreshTaskbar`` whose
   mutex and run promise it waits on.
+* open on launch, end to end in one page: the shipped ``session_launched``
+  handler of ``64_js_sessions_poll_control.js`` (sliced with the relay
+  section above it, so the REAL ``desktopLeaseLost`` and ``_desktopRpcBoot``
+  judge the frame), the shipped id-directed auto-open pass of
+  ``refreshTaskbarInner`` (75) and the shipped ``seedRestoreQueue`` (84), so
+  frame -> park -> open-once -> close -> never again -> reload is observed
+  as the windows the page ends up with.
 
 Like ``tests/test_desktop_rpc.py`` this executes the SHIPPED source: each
 block is cut AT RUNTIME between its own markers -- never an embedded copy --
@@ -24,7 +31,9 @@ import pytest
 from webterm.broker import ui
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
+SRC_64 = BROKER_DIR / "64_js_sessions_poll_control.js"
 SRC_75 = BROKER_DIR / "75_js_taskbar_hosts.js"
+SRC_84 = BROKER_DIR / "84_js_active_view_lifecycle.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -32,10 +41,23 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 # The catch-up block: from refreshTaskbar's watchdog comment to its end marker.
 CATCHUP_START = "// Hard ceiling on how long ONE refresh run may hold refreshInFlight."
 CATCHUP_END = "// ---- end #262 session catch-up"
+# The launch handler, sliced from the desktop relay's marker so the relay's
+# lease helpers come with it.
+LAUNCH_START = "// ---- desktop relay (#244)"
+LAUNCH_END = "// ---- end #262 open on launch"
+# refreshTaskbarInner's id-directed auto-open pass.
+PASS_START = "// ---- id-directed auto-open ----"
+PASS_END = "if (!pendingOpens.size) stopFastPoll();"
+# Restore-on-refresh's seed (a page reload).
+RESTORE_START = "function seedRestoreQueue() {"
+RESTORE_END = "if (seeded) startFastPoll();\n        }"
+# 84's boot, teardown and rebuild, which own the _viewReady flag.
+LIFE_START = "async function bootActiveView() {"
+LIFE_END = "// Remote-host lease status."
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 12
+EXPECTED_ASSERTS = 29
 
 _HARNESS = r"""
 'use strict';
@@ -115,6 +137,110 @@ const cu = new Function('env',
     '  refreshSessionsFor: refreshSessionsFor,\n' +
     '  getRun: function () { return refreshRunPromise; } };\n' +
     '}\nreturn __exports;\n')(envCU);
+
+// ---- the open-on-launch world ------------------------------------------
+// One page: its pendingOpens/windows/openTerms, an openWindow that records,
+// the lease view (rec + the home flags) and the remote hosts' poll state.
+const sliceL = cut(fs.readFileSync(__SRC64__, 'utf8'), __LA_A__, __LA_Z__);
+const passSrc = cut(fs.readFileSync(__SRC75__, 'utf8'), __PS_A__, __PS_Z__);
+const restoreSrc = cut(fs.readFileSync(__SRC84__, 'utf8'), __RS_A__, __RS_Z__);
+const P = {};
+function resetPage() {
+    P.pendingOpens = new Map(); P.restoreKeys = new Set();
+    P.windows = new Map(); P.openTerms = [];
+    P.opened = []; P.notices = []; P.fast = 0; P.refreshes = 0;
+    P.viewReady = true; P.deactivated = false; P.homeActive = true;
+    P.detached = false; P.remote = {}; P.failFast = false;
+}
+resetPage();
+const envL = {
+    homeHostId: function () { return 'local'; },
+    pollStateFor: function (h) {
+        if (!P.remote[h]) P.remote[h] = { everOk: true, ok: true };
+        return P.remote[h];
+    },
+    isDetachedSurface: function () { return P.detached; },
+    AUTO_OPEN_TIMEOUT_MS: 15000,
+    startFastPoll: function () {
+        if (P.failFast) throw new Error('fast poll exploded');
+        P.fast++;
+    },
+    stopFastPoll: function () {},
+    refreshTaskbar: function () { P.refreshes++; return Promise.resolve(); },
+    openWindow: function (key, sess) {
+        P.opened.push(key);
+        P.windows.set(key, { id: key, disposed: false });
+        P.openTerms.push(key);                // addOpenTerm, as openWindow does
+    },
+    removeOpenTerm: function (key) {
+        const i = P.openTerms.indexOf(key);
+        if (i !== -1) P.openTerms.splice(i, 1);
+    },
+    addOpenTerm: function (key) {
+        if (P.openTerms.indexOf(key) === -1) P.openTerms.push(key);
+    },
+    getOpenTerms: function () { return P.openTerms; },
+    getSettings: function () { return { restoreOnRefresh: true }; },
+    showNotice: function (t) { P.notices.push(t); },
+    profilesCache: new Map(), profilesWarmAt: new Map(),
+    PROFILES_WARM_RETRY_MS: 1e9,
+    fetchProfiles: function () {}, applyWarmProfileColors: function () {},
+};
+['pendingOpens', 'restoreKeys', 'windows'].forEach(function (k) {
+    Object.defineProperty(envL, k, { get: function () { return P[k]; } });
+});
+[['_viewReady', 'viewReady'], ['_deactivated', 'deactivated'],
+ ['_homeActive', 'homeActive']].forEach(function (p) {
+    Object.defineProperty(envL, p[0], { get: function () { return P[p[1]]; } });
+});
+const pageL = new Function('env',
+    'with (env) {\n' + sliceL + '\n' +
+    'function autoOpenPass(merged, hosts) {\n' + passSrc + '\n}\n' +
+    restoreSrc + '\n' +
+    'var __exports = { noteSessionLaunched: noteSessionLaunched,\n' +
+    '  autoOpenPass: autoOpenPass, seedRestoreQueue: seedRestoreQueue };\n' +
+    '}\nreturn __exports;\n')(envL);
+const REC = { leaseBoot: 'b1', leaseGen: 3 };
+function frame(id, o) {
+    return Object.assign({ type: 'session_launched', id: id, gen: 3,
+                           bootId: 'b1' }, o || {});
+}
+function poll(keys) {
+    const merged = new Map();
+    for (const k of keys) merged.set(k, { key: k });
+    pageL.autoOpenPass(merged, []);
+}
+function openedCount(key) {
+    return P.opened.filter(function (k) { return k === key; }).length;
+}
+
+// ---- the view lifecycle (84) that owns _viewReady -----------------------
+const lifeSrc = cut(fs.readFileSync(__SRC84__, 'utf8'), __LF_A__, __LF_Z__);
+const V = {};
+const envV = {
+    _booted: false, _deactivated: true, _viewEpoch: 0, _viewReady: false,
+    _stateReady: false, _slowPollTimer: null, frontId: null,
+    _stateReadyPromise: null,
+    pendingOpens: new Map(), restoreKeys: new Set(),
+    windows: new Map(), sessions: new Map(),
+    params: { get: function () { return null; } },
+    document: { getElementById: function () { return null; } },
+    AUTO_OPEN_TIMEOUT_MS: 15000,
+    pullState: function () { return V.pull ? V.pull.p : Promise.resolve(); },
+    _stateFlushOwed: function () { return Promise.resolve(); },
+    isDetachedSurface: function () { return false; },
+};
+['hideBecomeActiveOverlay', 'showBecomeActiveOverlay', 'restoreAppWindows',
+ 'seedRestoreQueue', 'refreshTaskbar', 'startSlowPoll', 'startFastPoll',
+ 'stopFastPoll', 'pruneDetachedSet', '_stateParkPendingPush',
+ 'updateStripScrollbar', 'applyDisplaySettings', '_emitModEvent',
+ 'bootDetachedView', 'rebuildDetachedView', 'saveAppWindow'].forEach(
+    function (k) { envV[k] = function () {}; });
+const life = new Function('env',
+    'with (env) {\n' + lifeSrc + '\n' +
+    'var __exports = { bootActiveView: bootActiveView,\n' +
+    '  teardownView: teardownView, rebuildView: rebuildView };\n' +
+    '}\nreturn __exports;\n')(envV);
 
 (async function () {
     // ---- H: the catch-up ---------------------------------------------------
@@ -221,6 +347,140 @@ const cu = new Function('env',
     ok(W.polls === 0 && W.inners === 0,
         'H11 a torn-down view polls nothing');
 
+    // ---- L: open on launch, one page ----------------------------------------
+    resetPage();
+    let t1 = Date.now();
+    pageL.noteSessionLaunched('local', REC, {}, frame(77));
+    const dl = P.pendingOpens.get('local:77');
+    ok(typeof dl === 'number' && dl >= t1 + 14000 && P.fast === 1
+        && P.refreshes === 1 && P.opened.length === 0,
+        'L1 a launch frame parks the id with a deadline and the fast poll, opening nothing yet');
+    poll([]);
+    const stillParked = P.pendingOpens.has('local:77') && P.opened.length === 0;
+    poll(['local:77']);
+    ok(stillParked && openedCount('local:77') === 1
+        && !P.pendingOpens.has('local:77'),
+        'L2 it opens exactly once when /sessions lists it, and is unparked');
+    P.windows.delete('local:77');                 // the user closes it ...
+    envL.removeOpenTerm('local:77');              // ... (closeWindow's step)
+    poll(['local:77']); poll(['local:77']); poll(['local:77']);
+    ok(openedCount('local:77') === 1,
+        'L3 a window the user closed is not reopened by later polls');
+    pageL.noteSessionLaunched('local', REC, {}, frame(77));
+    poll(['local:77']);
+    ok(openedCount('local:77') === 1 && P.pendingOpens.size === 0,
+        'L4 a repeated frame for the same launch is ignored');
+    P.windows.clear(); P.pendingOpens.clear();    // a reload of this page ...
+    pageL.seedRestoreQueue();                     // ... restores openTerms only
+    poll(['local:77']);
+    ok(openedCount('local:77') === 1,
+        'L5 a reload does not reopen the closed window');
+    pageL.noteSessionLaunched('local', { leaseBoot: 'b2', leaseGen: 1 }, {},
+                              frame(77, { bootId: 'b2', gen: 1 }));
+    ok(P.pendingOpens.has('local:77'),
+        'L6 the same id from a new broker run is a new launch');
+
+    // A frame this page must not act on parks nothing.
+    resetPage();
+    const drops = [
+        function () { P.homeActive = false; },
+        function () { P.deactivated = true; },
+        function () { P.viewReady = false; },
+        function () { P.detached = true; },
+    ];
+    let parked = 0;
+    for (const d of drops) {
+        resetPage(); d();
+        pageL.noteSessionLaunched('local', REC, {}, frame(80));
+        parked += P.pendingOpens.size;
+    }
+    resetPage();
+    P.remote.remoteX = { everOk: true, ok: true, leaseInactive: true };
+    pageL.noteSessionLaunched('remoteX', REC, {}, frame(81));
+    parked += P.pendingOpens.size;
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(82, { gen: 2,
+        bootId: 'b1' }));
+    pageL.noteSessionLaunched('local', { leaseBoot: 'b1', leaseGen: 4 }, {},
+                              frame(83));
+    pageL.noteSessionLaunched('local', REC, {}, frame(84, { bootId: 'bX' }));
+    parked += P.pendingOpens.size;
+    ok(parked === 0 && P.fast === 0,
+        'L7 no lease, a torn-down or booting view, the detached surface, a masked remote, an older generation or another run parks nothing');
+    resetPage();
+    for (const bad of ['85', true, 1.5, -1, undefined, null, 2 ** 60]) {
+        pageL.noteSessionLaunched('local', REC, {}, frame(bad));
+    }
+    pageL.noteSessionLaunched('local', REC, {}, null);
+    ok(P.pendingOpens.size === 0,
+        'L8 a frame without a usable id parks nothing');
+    resetPage();
+    P.viewReady = false;
+    pageL.noteSessionLaunched('local', REC, {}, frame(90));
+    P.viewReady = true;
+    pageL.noteSessionLaunched('local', REC, {}, frame(90));
+    ok(P.pendingOpens.has('local:90'),
+        'L9 a frame dropped during boot is not remembered, so a later one parks');
+    resetPage();
+    P.windows.set('local:91', { id: 'local:91', disposed: false });
+    P.pendingOpens.set('local:92', Date.now() + 1000);
+    pageL.noteSessionLaunched('local', REC, {}, frame(91));
+    pageL.noteSessionLaunched('local', REC, {}, frame(92));
+    ok(P.fast === 0 && P.pendingOpens.size === 1,
+        'L10 an id already open or already parked is left alone');
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(93));
+    P.pendingOpens.set('local:93', Date.now() - 1);
+    poll([]);
+    ok(!P.pendingOpens.has('local:93') && P.notices.length === 1
+        && P.notices[0] === 'session 93 not found' && P.opened.length === 0,
+        'L11 an unopened seed expires with the UI launch\'s notice');
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(94));
+    P.pendingOpens.clear();                       // teardownView
+    poll(['local:94']);
+    pageL.noteSessionLaunched('local', REC, {}, frame(94));
+    ok(P.opened.length === 0 && P.pendingOpens.size === 0,
+        'L12 a seed a teardown cleared is not reopened, nor re-parked by the same launch');
+    resetPage();
+    P.failFast = true;
+    let threwL = false;
+    try { pageL.noteSessionLaunched('local', REC, {}, frame(95)); }
+    catch (_) { threwL = true; }
+    ok(!threwL, 'L13 a failing seed never throws out of the frame handler');
+
+    // ---- V: _viewReady follows the real boot / teardown / rebuild ---------
+    const gS = gate();
+    envV._stateReadyPromise = gS.p;
+    const boot = life.bootActiveView();
+    await ticks();
+    const duringBoot = envV._viewReady;
+    gS.open();
+    await boot;
+    ok(duringBoot === false && envV._viewReady === true,
+        'V1 the view is ready only once the boot has restored it');
+    life.teardownView();
+    ok(envV._viewReady === false, 'V2 a teardown clears it at once');
+    V.pull = gate();
+    const rebuild = life.rebuildView();
+    await ticks();
+    const duringRebuild = envV._viewReady;
+    V.pull.open();
+    await rebuild;
+    V.pull = null;
+    ok(duringRebuild === false && envV._viewReady === true,
+        'V3 a rebuild sets it only once it has restored the view');
+    life.teardownView();
+    V.pull = gate();
+    const superseded = life.rebuildView();
+    await ticks();
+    life.teardownView();                  // lost again mid-rebuild
+    V.pull.open();
+    await superseded;
+    V.pull = null;
+    ok(envV._viewReady === false,
+        'V4 a rebuild a teardown superseded never marks the view ready');
+
     await sleep(20);
     ok(unhandled === 0, 'H12 no unhandled rejection escaped any scenario');
 
@@ -235,19 +495,29 @@ const cu = new Function('env',
 
 @pytest.fixture(scope="module")
 def scenario_run(tmp_path_factory):
-    src75 = SRC_75.read_text(encoding="utf-8")
     # FAIL, never skip: without the markers the slice is unmoored from the
     # live source and every green assert below would grade a stale copy.
-    for marker in (CATCHUP_START, CATCHUP_END):
-        assert src75.count(marker) == 1, (
-            f"{marker!r} occurs {src75.count(marker)}x in {SRC_75}; the "
-            "slice boundary is missing or ambiguous")
+    for path, markers in ((SRC_75, (CATCHUP_START, CATCHUP_END,
+                                    PASS_START, PASS_END)),
+                          (SRC_64, (LAUNCH_START, LAUNCH_END)),
+                          (SRC_84, (RESTORE_START, RESTORE_END,
+                                    LIFE_START, LIFE_END))):
+        src = path.read_text(encoding="utf-8")
+        for marker in markers:
+            assert src.count(marker) == 1, (
+                f"{marker!r} occurs {src.count(marker)}x in {path}; the "
+                "slice boundary is missing or ambiguous")
     harness = tmp_path_factory.mktemp("mcp-launch-open") / "harness.js"
-    harness.write_text(
-        _HARNESS.replace("__SRC75__", json.dumps(str(SRC_75)))
-                .replace("__CU_A__", json.dumps(CATCHUP_START))
-                .replace("__CU_Z__", json.dumps(CATCHUP_END)),
-        encoding="utf-8")
+    subst = {"__SRC64__": SRC_64, "__SRC75__": SRC_75, "__SRC84__": SRC_84,
+             "__CU_A__": CATCHUP_START, "__CU_Z__": CATCHUP_END,
+             "__LA_A__": LAUNCH_START, "__LA_Z__": LAUNCH_END,
+             "__PS_A__": PASS_START, "__PS_Z__": PASS_END,
+             "__RS_A__": RESTORE_START, "__RS_Z__": RESTORE_END,
+             "__LF_A__": LIFE_START, "__LF_Z__": LIFE_END}
+    text = _HARNESS
+    for k, v in subst.items():
+        text = text.replace(k, json.dumps(str(v)))
+    harness.write_text(text, encoding="utf-8")
     proc = subprocess.run([NODE, str(harness)],
                           capture_output=True, text=True, encoding="utf-8",
                           timeout=120)
@@ -306,6 +576,57 @@ def test_the_catch_up_never_throws_and_skips_what_it_cannot_reach(scenario_run):
     _ok(scenario_run, "H10 an unknown host polls nothing and leaves no timer")
     _ok(scenario_run, "H11 a torn-down view polls nothing")
     _ok(scenario_run, "H12 no unhandled rejection escaped any scenario")
+
+
+# ---- open on launch (session_launched) ----------------------------------------
+
+
+def test_a_launch_frame_opens_the_window_once(scenario_run):
+    # The frame only parks the id; the existing auto-open pass opens it the
+    # moment /sessions lists it -- once.
+    _ok(scenario_run, "L1 a launch frame parks the id with a deadline and the fast poll, opening nothing yet")
+    _ok(scenario_run, "L2 it opens exactly once when /sessions lists it, and is unparked")
+    _ok(scenario_run, "L11 an unopened seed expires with the UI launch's notice")
+
+
+def test_a_closed_window_stays_closed(scenario_run):
+    # The owner's constraint: a terminal the user closed stays a chip --
+    # no later poll, repeated frame or reload brings it back.
+    _ok(scenario_run, "L3 a window the user closed is not reopened by later polls")
+    _ok(scenario_run, "L4 a repeated frame for the same launch is ignored")
+    _ok(scenario_run, "L5 a reload does not reopen the closed window")
+    _ok(scenario_run, "L6 the same id from a new broker run is a new launch")
+    _ok(scenario_run, "L12 a seed a teardown cleared is not reopened, nor re-parked by the same launch")
+
+
+def test_only_the_lease_holder_with_a_live_view_parks(scenario_run):
+    _ok(scenario_run, "L7 no lease, a torn-down or booting view, the detached surface, a masked remote, an older generation or another run parks nothing")
+    _ok(scenario_run, "L8 a frame without a usable id parks nothing")
+    _ok(scenario_run, "L9 a frame dropped during boot is not remembered, so a later one parks")
+    _ok(scenario_run, "L10 an id already open or already parked is left alone")
+    _ok(scenario_run, "L13 a failing seed never throws out of the frame handler")
+
+
+def test_the_view_ready_flag_follows_the_real_lifecycle(scenario_run):
+    # The handler drops a frame unless the view is fully up; _booted and
+    # !_deactivated turn true before a boot's first await, so 84 keeps its
+    # own flag, set at the end of a boot/rebuild and cleared by a teardown.
+    _ok(scenario_run, "V1 the view is ready only once the boot has restored it")
+    _ok(scenario_run, "V2 a teardown clears it at once")
+    _ok(scenario_run, "V3 a rebuild sets it only once it has restored the view")
+    _ok(scenario_run, "V4 a rebuild a teardown superseded never marks the view ready")
+
+
+def test_the_launch_frame_is_wired_into_the_control_dispatcher():
+    # The onmessage dispatcher is outside every slice, so pin the wiring by
+    # source: the new type routes to the handler BEFORE the status
+    # fall-through (which is what makes an older page ignore it).
+    src = SRC_64.read_text(encoding="utf-8")
+    route = "if (msg.type === 'session_launched') {"
+    assert src.count(route) == 1
+    assert "noteSessionLaunched(hid, rec, ws, msg);" in src
+    assert src.index(route) < src.index(
+        "if (!msg || msg.type !== 'status') return;")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

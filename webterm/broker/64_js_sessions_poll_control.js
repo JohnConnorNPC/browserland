@@ -473,6 +473,14 @@
                         .catch(function () {});
                     return;
                 }
+                // #262: an MCP launch made a window on this broker, and we
+                // hold its lease: park it for the auto-open pass. A page that
+                // predates the frame falls through to the status test below
+                // and ignores it.
+                if (msg.type === 'session_launched') {
+                    noteSessionLaunched(hid, rec, ws, msg);
+                    return;
+                }
                 if (!msg || msg.type !== 'status') return;
                 _controlStatus(st, msg);
             };
@@ -1780,3 +1788,42 @@
                 }
             }
         }
+
+        // ---- #262 open on launch ---------------------------------------------
+        // The broker's session_launched frame (protocol.py): an MCP
+        // launch_terminal just made window `id` on the broker whose /control
+        // socket delivered it, and this page holds that broker's lease. The
+        // key is parked in pendingOpens exactly as the UI's own launch parks
+        // it (76), so the id-directed auto-open pass in refreshTaskbarInner
+        // opens it once it shows up in /sessions: one open path, the same
+        // deadline and the same "not found" notice. One-shot: only an id
+        // first seen here for that broker run, never one already open or
+        // parked, and nothing re-parks it after the user closes the window.
+        // Dropped (not deferred) while the view is not fully up (a boot or
+        // rebuild in flight, or torn down), on the detached surface, and for
+        // a lease or run this page no longer holds; a dropped frame is not
+        // remembered, and the window stays a chip that any desktop op opens.
+        const _launchOpenSeen = new Map();     // JSON [hid, bootId, id] -> true
+        const _LAUNCH_SEEN_MAX = 128;
+        function noteSessionLaunched(hid, rec, ws, msg) {
+            try {
+                if (!msg || !Number.isSafeInteger(msg.id) || msg.id < 0) return;
+                if (isDetachedSurface()) return;
+                if (_viewReady !== true || _deactivated) return;
+                if (hid === homeHostId() && _homeActive !== true) return;
+                const boot = _desktopRpcBoot(ws, msg);
+                if (desktopLeaseLost(hid, rec, boot, msg.gen)) return;
+                const key = hid + ':' + msg.id;
+                const seen = JSON.stringify([hid, boot, msg.id]);
+                if (_launchOpenSeen.has(seen)) return;
+                if (windows.has(key) || pendingOpens.has(key)) return;
+                _launchOpenSeen.set(seen, true);
+                while (_launchOpenSeen.size > _LAUNCH_SEEN_MAX) {
+                    _launchOpenSeen.delete(_launchOpenSeen.keys().next().value);
+                }
+                pendingOpens.set(key, Date.now() + AUTO_OPEN_TIMEOUT_MS);
+                startFastPoll();
+                Promise.resolve(refreshTaskbar()).catch(function () {});
+            } catch (_) {}
+        }
+        // ---- end #262 open on launch

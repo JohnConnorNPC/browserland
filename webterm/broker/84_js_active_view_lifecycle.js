@@ -249,6 +249,7 @@
             seedRestoreQueue();
             refreshTaskbar();
             startSlowPoll();
+            _viewReady = true;              // #262
             // #226: drop records of children that died while this page was away.
             try { pruneDetachedSet(); } catch (_) {}
         }
@@ -260,6 +261,7 @@
         // never touched here, so rebuildView restores the view identically.
         function teardownView() {
             _deactivated = true;             // gate every shared-state mutation
+            _viewReady = false;              // #262
             _viewEpoch++;                    // supersede any in-flight boot/rebuild
             stopFastPoll();
             if (_slowPollTimer) { _slowPollTimer.stop(); _slowPollTimer = null; }
@@ -348,6 +350,7 @@
             seedRestoreQueue();
             refreshTaskbar();
             startSlowPoll();
+            _viewReady = true;              // #262
         }
 
         // Remote-host lease status. The HOME lease drives the page (above); a
