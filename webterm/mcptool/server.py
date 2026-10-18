@@ -1137,12 +1137,19 @@ def arrange_window(id: str, op: str, to: str = "", preset: str = "",
 
 #: The workspace ops the `workspaces` tool relays (prefixed
 #: "workspaces:<op>" on the wire, the broker's allowlist).
-_WORKSPACE_OPS = ("list", "add", "rename", "remove", "switch", "send-window")
+_WORKSPACE_OPS = ("list", "add", "rename", "remove", "switch", "send-window",
+                  "move", "color", "stack", "unstack")
+#: #258: which ops take the newer arguments; anywhere else they are refused
+#: locally, like `force`.
+_WORKSPACE_ARG_OPS = {"direction": ("move",), "color": ("color",),
+                      "stack": ("move", "color", "rename")}
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def workspaces(host: str, op: str, name: str = "", index: int = -1,
                target: int = -1, win: str = "",
-               force: bool = False) -> Dict[str, Any]:
+               force: bool = False, direction: str = "", color: str = "",
+               stack: str = "") -> Dict[str, Any]:
     """Manage the workspaces of a browser's desktop (#244 — ADMIN ONLY;
     workspace data spans every window, whatever its scope). Ops:
       - `list` — the workspaces and the active index;
@@ -1176,6 +1183,14 @@ def workspaces(host: str, op: str, name: str = "", index: int = -1,
             0, "bad_args",
             "workspaces: force applies only to remove (it bypasses "
             "needs_confirm); refusing without sending.")
+    for arg, value in (("direction", direction), ("color", color),
+                       ("stack", stack)):
+        if value and op not in _WORKSPACE_ARG_OPS[arg]:
+            raise BrowserlandError(
+                0, "bad_args",
+                f"workspaces: {arg} applies only to "
+                + "/".join(_WORKSPACE_ARG_OPS[arg])
+                + "; refusing without sending.")
     if host not in _admin_hosts:
         raise BrowserlandError(
             0, "admin_required",
@@ -1189,11 +1204,45 @@ def workspaces(host: str, op: str, name: str = "", index: int = -1,
         if name:
             args["name"] = name
     elif op == "rename":
-        if not name or index < 0:
+        if not name or (index >= 0) == bool(stack):
             raise BrowserlandError(
                 0, "bad_args",
-                "workspaces rename needs index and name.")
-        args.update(index=index, name=name)
+                "workspaces rename needs name and ONE of index or stack.")
+        args.update({"stack": stack} if stack else {"index": index}, name=name)
+    elif op in ("move", "color"):
+        if (index >= 0) == bool(stack):
+            raise BrowserlandError(
+                0, "bad_args",
+                f"workspaces {op} needs ONE of index or stack.")
+        args.update({"stack": stack} if stack else {"index": index})
+        if op == "move":
+            if direction not in ("left", "right"):
+                raise BrowserlandError(
+                    0, "bad_args",
+                    "workspaces move needs direction 'left' or 'right'.")
+            args["direction"] = direction
+        elif color == "none":
+            args["color"] = None
+        elif (len(color) == 7 and color[0] == "#"
+              and set(color[1:]) <= _HEX_DIGITS):
+            args["color"] = color
+        else:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces color needs color '#rrggbb' (one of list's "
+                "palette) or 'none'.")
+    elif op == "stack":
+        if index < 0 or target < 0:
+            raise BrowserlandError(
+                0, "bad_args",
+                "workspaces stack needs index and target (workspace "
+                "indexes).")
+        args.update(index=index, target=target)
+    elif op == "unstack":
+        if index < 0:
+            raise BrowserlandError(
+                0, "bad_args", "workspaces unstack needs index.")
+        args["index"] = index
     elif op == "remove":
         if index < 0:
             raise BrowserlandError(

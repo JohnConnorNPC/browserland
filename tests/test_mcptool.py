@@ -3025,3 +3025,68 @@ def test_the_client_refuses_a_padded_peer_origin(padded):
     with pytest.raises(ValueError):
         BrowserlandClient(base="http://hub:4445/peer/m", token="t",
                           peer_origin=padded)
+
+
+def test_workspaces_258_ops_compose_their_args():
+    """#258 MT1: move/color/stack/unstack and rename-a-stack compose their
+    wire args (only what was supplied; "none" clears a colour)."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")
+    try:
+        server.workspaces("h", "move", index=2, direction="left")
+        server.workspaces("h", "move", stack="L9", direction="right")
+        server.workspaces("h", "color", index=1, color="#E96D6D")
+        server.workspaces("h", "color", stack="L9", color="none")
+        server.workspaces("h", "stack", index=0, target=3)
+        server.workspaces("h", "unstack", index=1)
+        server.workspaces("h", "rename", stack="L9", name="dev")
+    finally:
+        _reset_server()
+    assert broker.bodies("/mcp/desktop") == [
+        {"op": "workspaces:move", "args": {"index": 2, "direction": "left"}},
+        {"op": "workspaces:move", "args": {"stack": "L9", "direction": "right"}},
+        {"op": "workspaces:color", "args": {"index": 1, "color": "#E96D6D"}},
+        {"op": "workspaces:color", "args": {"stack": "L9", "color": None}},
+        {"op": "workspaces:stack", "args": {"index": 0, "target": 3}},
+        {"op": "workspaces:unstack", "args": {"index": 1}},
+        {"op": "workspaces:rename", "args": {"stack": "L9", "name": "dev"}},
+    ]
+
+
+def test_workspaces_258_refuses_locally_and_sends_nothing():
+    """#258 MT2: a misplaced or malformed newer argument is refused before
+    anything is sent -- the broker sees no request at all."""
+    broker = _ToolBroker()
+    server = _install({"h": broker})
+    server._admin_hosts.add("h")
+    calls = [
+        ("list", {"direction": "left"}),                     # not move
+        ("switch", {"index": 0, "color": "#e96d6d"}),         # not color
+        ("stack", {"index": 0, "target": 1, "stack": "L9"}),  # stack id on stack
+        ("move", {"index": 0}),                               # no direction
+        ("move", {"index": 0, "direction": "up"}),
+        ("move", {"index": 0, "stack": "L9", "direction": "left"}),  # both
+        ("move", {"direction": "left"}),                      # neither
+        ("color", {"index": 0, "color": "red"}),
+        ("color", {"index": 0}),
+        ("stack", {"index": 0}),
+        ("unstack", {}),
+        ("rename", {"index": 0, "stack": "L9", "name": "x"}),
+    ]
+    try:
+        for op, kwargs in calls:
+            with pytest.raises(BrowserlandError) as ei:
+                server.workspaces("h", op, **kwargs)
+            assert ei.value.code == "bad_args", (op, kwargs, ei.value.code)
+    finally:
+        _reset_server()
+    assert broker.requests == []
+
+
+def test_workspaces_258_ops_are_known():
+    """#258 MT5: the four new ops are in the tool's op list (an older tool
+    refuses them locally with bad_op)."""
+    from webterm.mcptool import server as srv
+    for op in ("move", "color", "stack", "unstack"):
+        assert op in srv._WORKSPACE_OPS, op
