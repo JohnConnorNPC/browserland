@@ -87,8 +87,13 @@ Right-click a workspace dot at the bottom of the taskbar:
 
 - **Rename…** — give the workspace a name.
 - **Remove workspace** — delete it (disabled when only one workspace remains).
+- **Colour…** — pick the workspace's colour from the palette, or **None**.
+- **Stack with…** / **Remove from stack** — put the workspace in a stack with another pager entry, or take it out.
+- **Move left** / **Move right** — move it one place along the pager (**Move up** / **Move down** inside a stack's list).
 - **Show names** / **Show numbers** — choose whether the dots display workspace names or numbers.
 - **New workspace** — append a fresh, empty workspace.
+
+A **stack**'s dot has its own menu: **Rename stack…**, **Colour…** and **Move left** / **Move right** for the whole stack. Right-click a row in a stack's list for that workspace's menu above.
 
 Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click. Hiding the pager (Control Panel → Windows → Workspaces) removes the dots too, but rename and remove are on the empty desktop / taskbar menu below as well, so they survive that. Disabling the mod takes both menus away together.
 

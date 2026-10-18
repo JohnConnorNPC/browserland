@@ -6,10 +6,10 @@ Workspaces are a **mod**, enabled by default — see [[Hosts-and-Multi-Browser]]
 
 You can move between workspaces a few ways:
 
-- **Pager dots** — Click a dot in the pager at the bottom of the taskbar. Each dot is one workspace; the active one is highlighted.
+- **Pager dots** — Click a dot in the pager at the bottom of the taskbar. Each dot is one workspace — or one *stack* of workspaces (see *Stacks* below) — and the active one is highlighted.
 - **The workspace menu** — Right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar, and pick a workspace from the list. It works in both window modes, and because the taskbar is always on screen it stays reachable even when windows cover the desktop — so it still works with the pager hidden.
 - **Previous / Next shortcuts** — Step to the workspace before or after the current one.
-- **Go to workspace 1–5** — Jump straight to a numbered workspace.
+- **Go to workspace 1–5** — Jump straight to a numbered pager entry. A stack counts as one entry, so the numbers always match the dots; a number that lands on a stack opens its list instead of switching.
 
 | Action | Default binding |
 |---|---|
@@ -20,8 +20,10 @@ You can move between workspaces a few ways:
 | Go to workspace 3 | `Ctrl+Alt+3` |
 | Go to workspace 4 | `Ctrl+Alt+4` |
 | Go to workspace 5 | `Ctrl+Alt+5` |
+| Move workspace left | *(unbound by default)* |
+| Move workspace right | *(unbound by default)* |
 
-All of these are rebindable — see [[Keyboard-Shortcuts]].
+Previous / Next step through **every** workspace in pager order, including each workspace inside a stack, so the keyboard reaches all of them. All of these are rebindable — see [[Keyboard-Shortcuts]].
 
 Each row of the workspace menu shows that workspace's name and a count of what it holds — its columns in tiling mode, its floating windows in floating mode — with a `✓` on the one you are on. Below the list the menu adds, renames, and removes workspaces too; see the sections below. For more on the tiling strip, see [[Window-Modes]].
 
@@ -72,6 +74,10 @@ Right-click a **pager dot** for that workspace's options:
 |---|---|
 | `Rename…` | Give the workspace a custom name. |
 | `Remove workspace` | Delete that workspace (disabled when only one workspace remains). |
+| `Colour…` | Give the workspace a colour from the palette, or `None` (see *Colours*). |
+| `Stack with…` | Put the workspace in a stack with another pager entry (see *Stacks*). |
+| `Remove from stack` | Take it out of its stack (shown only for a workspace in a stack). |
+| `Move left` / `Move right` | Move it one place along the pager (see *Moving workspaces*). |
 | `Show names` | Show each workspace's name on its pager dot. |
 | `Show numbers` | Show workspace numbers on the dots instead. |
 | `New workspace` | Append a fresh empty workspace. |
@@ -86,6 +92,32 @@ The workspace menu — right-click the empty desktop, the empty tiling strip, or
 | `Remove <workspace>` | Delete the workspace you are on (disabled when only one remains). |
 
 These are the same two actions as the pager-dot menu, on a surface that does not depend on the pager — so they still work with the pager hidden.
+
+## Moving workspaces
+
+Workspaces stay in the order you put them:
+
+- **Drag** a pager dot to a new place: drop it on the left half of another dot to put it before that one, on the right half to put it after. A stack's dot drags as one, with all its workspaces.
+- **Move left / Move right** in a dot's right-click menu move it one place. A workspace jumps over a whole stack, never into it.
+- **Move workspace left / right** do the same from the keyboard for the workspace you are on (unbound by default — bind them under **Control Panel → Input → Keybindings**).
+
+The workspace you are on stays highlighted after the move. Moving a workspace never moves its windows: they stay where they are, and only the order of the pager changes. Moving windows *between* workspaces is still **Send to workspace** (above).
+
+## Colours
+
+Each workspace can have a colour, picked from the same palette the launch profiles use: **Colour…** in its dot's right-click menu lists `None` and every palette colour, with a `✓` on the current one. The colour tints the dot and shows beside the workspace's name in the hover preview, the workspace menu, the **Send to** items and the taskbar badges. The number or name is always shown as well, so the colour is never the only way to tell workspaces apart.
+
+## Stacks
+
+A stack groups several workspaces under **one** pager dot, so a long row of workspaces stays short. Stacks are yours to make:
+
+- **Stack with…** in a workspace's right-click menu lists the other pager entries. Pick a workspace to start a new stack there, or a stack to join it.
+- **Remove from stack** takes a workspace out again; it lands just after the stack. A stack left with only one workspace dissolves on its own.
+- You cannot drag a workspace into or out of a stack — use these two menu items.
+
+The stack's dot shows its number (or its name, with **Show names**), the number of workspaces in it, and — when you are on one of them — which one, as `2.1`, `2.2` and so on. Click it, or press the number key that lands on it, and a small list of its workspaces opens: pick one to switch to it. The list works from the keyboard too: it opens on the workspace you are on (or the one you used last), the arrow keys, Home and End move between the rows, Enter switches, and Escape closes it. Right-click a row for that workspace's own menu (with **Move up** / **Move down** to reorder it inside the stack).
+
+Right-click the stack's dot for the stack's own menu: **Rename stack…**, **Colour…** (the stack's own colour, separate from its workspaces' colours) and **Move left** / **Move right**. A stack remembers the workspace you used last in it, in every browser.
 
 ## Hover preview
 
@@ -105,7 +137,7 @@ Clicking a chip for a window on another workspace switches there first, so a chi
 
 ### Hiding the pager
 
-If you switch workspaces from the keyboard, **Hide the workspace pager from the taskbar** reclaims the space the dots take up. It hides the pager and nothing else — the badges and dimming, the chip-click workspace switch, **Send to workspace**, floating-window masking, and the seven shortcuts all keep working exactly as before.
+If you switch workspaces from the keyboard, **Hide the workspace pager from the taskbar** reclaims the space the dots take up. It hides the pager and nothing else — the badges and dimming, the chip-click workspace switch, **Send to workspace**, floating-window masking, and the nine shortcuts all keep working exactly as before.
 
 Everything the dots could do is still reachable: the workspace menu (right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar) switches, adds, renames, and removes workspaces, and the shortcuts above switch. Turn the setting back off and the pager returns with its workspaces unchanged.
 
@@ -118,15 +150,15 @@ An MCP agent can manage workspaces too — with two gates stacked on top of each
 - the broker's **Allow MCP to arrange the desktop** switch (`allow_desktop`) must be on — it gates the whole desktop relay, window arranging included; and
 - the agent must hold the **admin credential** (#245) — a plain scoped or unscoped agent never gets to rename or remove a workspace out from under windows it cannot even see.
 
-The surface is the `workspaces` tool of the shipped MCP server (see [[MCP-and-AI-Agents]]): `list`, `add` (optional name, trimmed to 40 characters), `rename` (index + name; a blank name clears it), `switch` (index), `send-window` (a window id + a target index), and `remove` (index). Semantics follow the desktop's own rules, with one deliberate difference:
+The surface is the `workspaces` tool of the shipped MCP server (see [[MCP-and-AI-Agents]]): `list`, `add` (optional name, trimmed to 40 characters), `rename` (index + name; a blank name clears it — or a stack id + name), `switch` (index), `send-window` (a window id + a target index), `remove` (index), `move` (index or stack id, `left` / `right`), `color` (index or stack id, a palette colour or `none`), `stack` (index + target index) and `unstack` (index). A workspace's index is its place in the pager with every stack opened out; a stack is addressed by the id `list` reports. Semantics follow the desktop's own rules, with one deliberate difference:
 
 - **Removing a non-empty workspace never pops a dialog.** Over MCP the answer is `needs_confirm` carrying the number of **live** windows the workspace holds; the agent passes `force: true` to proceed, and the windows move to the **adjacent** workspace — exactly what the desktop's own confirmation dialog says happens. The last workspace is refused outright (`last_workspace`), force or not.
 - **Mod off or absent.** With the workspaces mod disabled every op answers `inactive`; with it not installed, `absent` — a state report, never a silent no-op. (Over MCP you also learn *which* desktop you missed: workspace data belongs to a browser's **home** broker, and an op relayed through any other broker answers `not_home`.)
-- Everything else behaves as the desktop does: adding switches to the new workspace, `send-window` re-stamps the window's column onto the target workspace, and `list` reports the workspaces, the active index and where each column lives.
+- Everything else behaves as the desktop does: adding switches to the new workspace, `send-window` re-stamps the window's column onto the target workspace, and `list` reports the workspaces (with each one's colour and stack), the active index, where each column lives, the stacks and the palette a colour must come from.
 
 ## What is shared, and what is per browser
 
-The set of workspaces, their names, and which columns belong to each are part of the broker's shared layout, so every browser looking at that broker sees the same workspaces. Which workspace a **floating** window belongs to is per browser, because a floating window's pixel geometry is per browser too.
+The set of workspaces, their order, names and colours, the stacks (with their names, colours and last-used workspace), and which columns belong to each are part of the broker's shared layout, so every browser looking at that broker sees the same workspaces. Which workspace a **floating** window belongs to is per browser, because a floating window's pixel geometry is per browser too.
 
 ## Turning workspaces off
 
@@ -136,12 +168,12 @@ Nothing is destroyed and nothing is hidden either way. Every tiled column lives 
 
 - every column from every workspace appears together on a single desktop;
 - the pager disappears;
-- the seven workspace shortcuts leave the Keyboard shortcuts list (your bindings are remembered, not deleted);
+- the nine workspace shortcuts leave the Keyboard shortcuts list (your bindings are remembered, not deleted);
 - **Send to workspace** and **On all workspaces** leave the title-bar menus, and the whole workspace block leaves the empty-desktop / taskbar menu;
 - the mod's three settings leave **Control Panel → Windows**;
 - any floating window that was masked to another workspace becomes visible.
 
-Re-enable it and your workspaces come back exactly as they were. A column created while the mod was off joins whichever workspace is active when you turn it back on.
+Re-enable it and your workspaces come back exactly as they were — in the same order, with their colours and stacks. A column created while the mod was off joins whichever workspace is active when you turn it back on.
 
 One thing to know if you run **two browsers on the same broker with the mod on in one and off in the other**: the browser without it sees every column on one desktop, so rearranging them there rearranges your workspaces too. Stacking a window from workspace 1 into a column that belongs to workspace 2 really does move it to workspace 2 — the column is the membership. That is the same thing happening either way round; it just isn't labelled as a workspace move in the browser that can't see workspaces.
 
