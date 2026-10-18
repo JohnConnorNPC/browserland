@@ -537,12 +537,10 @@
                 const sig = JSON.stringify([mode, active,
                     list.map(w => [w.id, w.name || '', w.color || '', w.stack || '']),
                     stacks.map(s => [s.id, s.name || '', s.color || ''])]);
-                if (container.dataset.sig === sig) {
-                    container.querySelectorAll('.ws-dot:not(.add)').forEach((d, i) => {
-                        d.classList.toggle('active', i === active);
-                    });
-                    return;
-                }
+                // The active index is in the signature, so a match means there
+                // is nothing to repaint (a dot's position is no longer its
+                // flat index once a stack collapses several into one).
+                if (container.dataset.sig === sig) return;
                 container.dataset.sig = sig;
                 // The rebuild below drops the dot the pointer may be resting on
                 // WITHOUT firing its mouseleave, so its body-level preview would
@@ -550,7 +548,9 @@
                 // the pager's hide path has to avoid (#162).
                 hideWsPreview();
                 container.innerHTML = '';
-                list.forEach((ws, i) => {
+                wsPagerEntries().forEach((e) => {
+                    if (e.stack) { container.appendChild(wsStackDot(e, mode)); return; }
+                    const ws = e.ws, i = e.flat;
                     const d = document.createElement('div');
                     d.className = 'ws-dot' + (i === active ? ' active' : '')
                         + (mode === 'name' ? ' named' : '');
@@ -564,9 +564,7 @@
                     }
                     d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + wsNumber(ws.id)
                         + '  (right-click: rename / remove)';
-                    // #258: a stack member's dot opens its stack's list.
-                    if (ws.stack) d.dataset.stackId = ws.stack;
-                    d.addEventListener('click', () => ws.stack ? openStackList(ws.stack) : switchWorkspace(i));
+                    d.addEventListener('click', () => switchWorkspace(i));
                     d.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -584,6 +582,36 @@
                 container.appendChild(add);
             }
 
+            // #258: ONE dot per stack -- its number (or name), the member
+            // count, and the current member when you are on one. Click opens
+            // the stack's list; the tint is the STACK's own colour.
+            function wsStackShown(e) {      // the member a stack stands for now
+                const cur = activeWorkspaceId();
+                return e.members.find(m => m.id === cur)
+                    || e.members.find(m => m.id === e.stack.lastId) || e.members[0];
+            }
+            function wsStackDot(e, mode) {
+                const s = e.stack, d = document.createElement('div');
+                const cur = e.members.find(m => m.id === activeWorkspaceId());
+                d.className = 'ws-dot stack' + (cur ? ' active' : '') + (mode === 'name' ? ' named' : '');
+                let txt = (mode === 'name') ? (s.name || 'Stack ' + e.num) : String(e.num);
+                if (cur) txt += (mode === 'name') ? ' › ' + (cur.name || 'WS' + wsNumber(cur.id))
+                                                  : '.' + (e.members.indexOf(cur) + 1);
+                d.textContent = txt;
+                const n = document.createElement('span');
+                n.className = 'ws-count';
+                n.textContent = String(e.members.length);
+                d.appendChild(n);
+                d.title = (s.name ? s.name + ' — ' : '') + 'stack ' + e.num + ' of '
+                    + e.members.length + ' workspaces  (click: pick one; right-click: more)';
+                d.dataset.stackId = s.id;
+                if (s.color) { d.classList.add('tinted'); d.style.setProperty('--ws-color', s.color); }
+                wireEntryDrag(d, e.key);
+                d.addEventListener('click', () => openStackList(s.id));
+                d.addEventListener('mouseenter', () => showWsPreview(e.flat + e.members.indexOf(wsStackShown(e)), d));
+                d.addEventListener('mouseleave', hideWsPreview);
+                return d;
+            }
             // The stack's list: real buttons in a core popover, one per member.
             // Every row acts on its member's ID at click time.
             let _wsStackPop = null;

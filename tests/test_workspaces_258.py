@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 67
+EXPECTED_ASSERTS = 77
 
 _PRELUDE = r"""
 'use strict';
@@ -1126,6 +1126,8 @@ _EPILOGUE = r"""
     await stacking();
     await stackMembers();
     await stackList();
+    await stackEntry();
+    await stackDrag();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1299,12 +1301,31 @@ def test_remove_a_stack_member(scenario_run):
     _ok(scenario_run, "RS3 removing one of two members dissolves the stack in the saved state")
 
 
+def test_stack_entry(scenario_run):
+    _ok(scenario_run, "SE1 a stack is ONE pager entry with its number and member count")
+    _ok(scenario_run, "SE2 when you are on a member the stack entry is current and names it N.k")
+    _ok(scenario_run, "SE2 in names mode it reads stack › member")
+    _ok(scenario_run, "SE3 the stack entry's tooltip names the stack and its size")
+    _ok(scenario_run, "TN3 the stack entry is tinted with the STACK's colour, not a member's")
+
+
+def test_pager_signature_covers_stack_fields(scenario_run):
+    _ok(scenario_run, "SG4 renaming a stack rebuilds its entry with the new name")
+    _ok(scenario_run, "SG5 recolouring a stack rebuilds its entry with the new tint")
+    _ok(scenario_run, "SG7 a switch between members of one stack repaints which member is current")
+
+
 def test_stack_list(scenario_run):
     _ok(scenario_run, "SL1 clicking a stack opens one list of its members, anchored to it, the current one checked")
     _ok(scenario_run, "SL1 each row carries its member's colour as a decorative swatch")
     _ok(scenario_run, "SL2 choosing a row switches to it and closes the list")
     _ok(scenario_run, "SL3 a row switches to ITS workspace after a peer reorders the stack")
     _ok(scenario_run, "SL4 right-clicking a row closes the list and opens that member's menu")
+
+
+def test_drags_that_involve_a_stack(scenario_run):
+    _ok(scenario_run, "DR3 dropping on a stack lands beside the whole stack, never inside it")
+    _ok(scenario_run, "MV3 dragging a stack moves all its members as one block")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
