@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 83
+EXPECTED_ASSERTS = 87
 
 _HARNESS = r"""
 'use strict';
@@ -84,6 +84,10 @@ let openCalls = [];
 // #262: every refreshSessionsFor call; state.catchUp (when set) runs inside
 // it, the way a real catch-up merges a fresh /sessions answer.
 let catchUps = [];
+// #262: [mutator, ran inside withoutFocus?] for every recorded call, and the
+// keys of every withoutFocus scope.
+let quietLog = [];
+let quietScopes = [];
 
 function findKeyInLayout(key) {
     for (let ci = 0; ci < L.columns.length; ci++) {
@@ -124,6 +128,7 @@ function resetWorld() {
     state.tiling = true; state.detached = false; state.openHusk = false;
     state.forcePlace = null; openCalls = [];
     state.catchUp = null; catchUps = [];
+    state.quiet = 0; quietLog = []; quietScopes = [];
     mk('local:7', null, { title: 'agent 7' });
     mk('local:9', null, { title: 'agent 9' });
     mk('local:12', { tiled: false,
@@ -137,6 +142,7 @@ resetWorld();
 function rec(name, fn) {
     return function () {
         mut.push(name);
+        quietLog.push([name, state.quiet > 0]);
         return fn ? fn.apply(null, arguments) : undefined;
     };
 }
@@ -157,6 +163,7 @@ rearmPush(true);
 // open that built no live window.
 function openWindowStub(key, sess) {
     openCalls.push(key);
+    quietLog.push(['openWindow:' + key, state.quiet > 0]);
     if (state.openHusk) return;
     const inL = !!findKeyInLayout(key);
     let tiled = inL || state.tiling;
@@ -223,6 +230,11 @@ const env = {
     openWindow: openWindowStub,
     isTilingMode: function () { return state.tiling; },
     isDetachedSurface: function () { return state.detached; },
+    withoutFocus: function (keys, fn) {
+        quietScopes.push(keys.slice());
+        state.quiet++;
+        try { return fn(); } finally { state.quiet--; }
+    },
     refreshSessionsFor: function (hid, ms) {
         catchUps.push({ hid: hid, ms: ms });
         const f = state.catchUp;
@@ -892,6 +904,55 @@ function countMut(name) {
         && catchUps.length === 1,
         'U7 an unpolled tab_into target is caught up too');
 
+    // ---- Q: #262 only `focus` may take keyboard focus ----------------------
+    function quietOf(name) {
+        const hits = quietLog.filter(function (e) { return e[0] === name; });
+        return hits.length ? hits.every(function (e) { return e[1]; }) : null;
+    }
+    chips();
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 30, visible: null } });
+    ok(r && r.ok === true && quietOf('openWindow:local:30') === true
+        && quietOf('attachToStrip') === true
+        && quietScopes.length === 1 && quietScopes[0].indexOf('local:30') !== -1,
+        'Q1 tile on a chip opens and tiles it without focus');
+    chips();
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: null } });
+    ok(r && r.ok === true && quietOf('openWindow:local:30') === false
+        && quietOf('reveal') === false && quietScopes.length === 0,
+        'Q2 the focus op opens and focuses the window');
+    const LIVE_OPS = [
+        ['tile', { id: 12 }, 'attachToStrip'], ['float', { id: 7 }, 'detachToFloat'],
+        ['move_column', { id: 7, to: 'right' }, 'moveColumn'],
+        ['set_width', { id: 7, preset: '1/3' }, 'setColumnPreset'],
+        ['set_geometry', { id: 12, x: 1, y: 2, w: 300, h: 200 }, 'applyGeomToWindow'],
+        ['tab_into', { id: 9, target: 7 }, 'tabWindowInto'],
+        ['split', { id: 9, target: 12, axis: 'row' }, 'splitAtWindow'],
+    ];
+    let quietOps = 0;
+    for (const c of LIVE_OPS) {
+        resetWorld();
+        r = await drive('local', { rid: freshRid(), op: c[0],
+            args: Object.assign({ visible: null }, c[1]) });
+        const keys = quietScopes[0] || [];
+        const named = ['local:' + c[1].id].concat(
+            c[1].target ? ['local:' + c[1].target] : []);
+        if (r && r.ok === true && quietOf(c[2]) === true
+                && named.every(function (k) { return keys.indexOf(k) !== -1; })) {
+            quietOps++;
+        }
+    }
+    ok(quietOps === LIVE_OPS.length,
+        'Q3 every op but focus runs without focus, over the windows it names');
+    chips();
+    execNext = wsMod(TWO_WS);
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 1 } });
+    execNext = null;
+    ok(r && r.ok === true && quietOf('openWindow:local:30') === true,
+        'Q4 send-window opens a chip without focus');
+
     // ---- K: #262 get lists chip-only terminals as open:false --------------
     chips();
     sessions.set('remoteX:60', { title: 'remote chip' });
@@ -1186,6 +1247,18 @@ def test_262_one_catch_up_for_an_id_not_polled_yet(scenario_run):
     _ok(scenario_run, "U5 send-window catches up an id not polled yet, then opens and sends it")
     _ok(scenario_run, "U6 a catch-up that rejects still answers unknown_window, never an error")
     _ok(scenario_run, "U7 an unpolled tab_into target is caught up too")
+
+
+def test_262_only_the_focus_op_takes_keyboard_focus(scenario_run):
+    # Adversary M1: an open (or arrange) the user did not ask for must not
+    # move keyboard focus into an agent's window. Every relayed op but
+    # `focus` runs inside withoutFocus over the ids it names; `focus` opens
+    # and focuses as before. (The real bringToFront under withoutFocus is
+    # pinned in tests/test_mcp_launch_open.py, Z1-Z6.)
+    _ok(scenario_run, "Q1 tile on a chip opens and tiles it without focus")
+    _ok(scenario_run, "Q2 the focus op opens and focuses the window")
+    _ok(scenario_run, "Q3 every op but focus runs without focus, over the windows it names")
+    _ok(scenario_run, "Q4 send-window opens a chip without focus")
 
 
 def test_262_get_lists_chip_only_terminals(scenario_run):

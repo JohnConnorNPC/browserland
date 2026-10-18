@@ -107,7 +107,15 @@
             // reading a visible index back: an unclaimed column is invisible, so
             // focusedCol would otherwise land on the wrong tile (#148).
             notifyColumnCreated(col);
-            L.focusedCol = Math.max(0, visibleColIndex(col));
+            const vci = Math.max(0, visibleColIndex(col));
+            if (typeof focusIsQuiet === 'function' && focusIsQuiet(key)) {
+                // #262: a quiet open keeps the focused column; a column
+                // inserted at or before it shifts it one to the right.
+                if (Number.isInteger(L.focusedCol) && vci <= L.focusedCol
+                        && L.columns.length > 1) L.focusedCol += 1;
+            } else {
+                L.focusedCol = vci;
+            }
             savePrefs();
             return col;
         }

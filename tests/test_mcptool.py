@@ -647,6 +647,9 @@ def test_262_desktop_docstrings_state_open_on_demand():
     ldoc = " ".join((server.launch_terminal.__doc__ or "").split())
     assert ("the new window opens on the desktop of the browser holding the "
             "control lease") in ldoc
+    # Adversary M1: neither path takes the user's keyboard focus.
+    assert "without taking the user's keyboard focus" in ldoc
+    assert "Only `focus` moves keyboard focus" in adoc
 
 
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----

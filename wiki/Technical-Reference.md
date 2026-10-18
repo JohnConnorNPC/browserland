@@ -1168,7 +1168,12 @@ browser keys the answers it has given on host, run and rid (#250).
   `set_width` on a chip that would open floating answer `bad_args`
   `not_tiled`, and `set_geometry` on one that would open tiled
   `not_floating`, without opening it. An op can therefore reopen a window
-  the user closed. A layout entry with no session is never opened. An op
+  the user closed. Only `focus` takes keyboard focus: every other op, and
+  the open it may do, runs inside `withoutFocus`, so `bringToFront` moves no
+  focus, `lastTermId`, `frontId` or focused column (a float still stacks),
+  for the window it names and for the next two frames. A window opened from
+  a `session_launched` frame opens the same way. A layout entry with no
+  session is never opened. An op
   naming an int id the page has not polled yet (just after
   `launch_terminal`) first waits for one session refresh, bounded at 2 s,
   then answers.

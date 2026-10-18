@@ -261,6 +261,11 @@
         // park keys here; refreshTaskbarInner opens each one as it appears
         // in its host's /sessions (id-directed — no snapshot diffing).
         const pendingOpens = new Map();
+        // #262: subset of pendingOpens keys parked by an MCP launch frame
+        // (noteSessionLaunched): the pass opens them withoutFocus, since the
+        // user did not ask for them. The pass drops a key here once it is no
+        // longer parked.
+        const quietOpens = new Set();
         // Subset of pendingOpens keys seeded by restore-on-refresh (vs. /launch
         // or a ?session= deep link). Restore is best-effort: a restored key
         // that never shows up expires SILENTLY (no "not found" notice), and is
@@ -1678,8 +1683,18 @@
                                 await refreshSessionsFor(hid, DESKTOP_REFRESH_MS);
                             } catch (_) {}
                         }
+                        // #262: only `focus` may take keyboard focus; every
+                        // other op (and the open it may do) runs quiet over
+                        // the windows it names.
+                        const quietKeys = named.filter(Number.isInteger)
+                            .map(function (id) { return hid + ':' + id; });
                         out = lost() ? { ok: false, error: 'lost_lease' }
-                            : desktopCoreOp(hid, msg.op, args, visible);
+                            : (msg.op === 'focus'
+                                ? desktopCoreOp(hid, msg.op, args, visible)
+                                : withoutFocus(quietKeys, function () {
+                                    return desktopCoreOp(hid, msg.op, args,
+                                                         visible);
+                                }));
                         if (out.ok) {
                             // Flush before ack: success means the /state
                             // write was attempted under our lease.
@@ -1736,7 +1751,9 @@
                                         || args.target >= items.length) {
                                     out = { ok: false, error: 'bad_args',
                                             detail: 'args' };
-                                } else if (!_desktopOpenChip(k)) {
+                                } else if (!withoutFocus([k], function () {
+                                    return _desktopOpenChip(k);
+                                })) {
                                     out = { ok: false, error: 'unknown_window' };
                                 } else {
                                     args.key = k;
@@ -1822,6 +1839,7 @@
                     _launchOpenSeen.delete(_launchOpenSeen.keys().next().value);
                 }
                 pendingOpens.set(key, Date.now() + AUTO_OPEN_TIMEOUT_MS);
+                quietOpens.add(key);
                 startFastPoll();
                 Promise.resolve(refreshTaskbar()).catch(function () {});
             } catch (_) {}

@@ -845,7 +845,7 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
 
     When the host advertises `allow_desktop`, the new window opens on the
     desktop of the browser holding the control lease, once, without a
-    click; with no such browser it stays a taskbar chip, which any
+    click and without taking the user's keyboard focus; with no such browser it stays a taskbar chip, which any
     arrange_window op opens. The result does not wait for the browser."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
@@ -1086,8 +1086,9 @@ def arrange_window(id: str, op: str, to: str = "", preset: str = "",
     the way a chip click opens it, and then the op applies; this reopens a
     window the user closed. A refused op opens nothing, and `move_column` /
     `set_width` on a chip that would open floating answer not_tiled without
-    opening it. Fails closed when the host does not advertise
-    `allow_desktop` on /mcp/info."""
+    opening it. Only `focus` moves keyboard focus; every other op (and the
+    open it may do) leaves the user's focus where it was. Fails closed when
+    the host does not advertise `allow_desktop` on /mcp/info."""
     if op not in _ARRANGE_OPS:
         raise BrowserlandError(
             0, "bad_op",

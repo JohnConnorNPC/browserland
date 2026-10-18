@@ -54,10 +54,18 @@ RESTORE_END = "if (seeded) startFastPoll();\n        }"
 # 84's boot, teardown and rebuild, which own the _viewReady flag.
 LIFE_START = "async function bootActiveView() {"
 LIFE_END = "// Remote-host lease status."
+# 66's z-order block: withoutFocus, focusWin and the real bringToFront.
+SRC_66 = BROKER_DIR / "66_js_notices_zorder.js"
+Z_START = "// ---- z-order"
+Z_END = "function updateTaskbarActive() {"
+# 58's layoutAddColumn (it moves focusedCol unless the open is quiet).
+SRC_58 = BROKER_DIR / "58_js_layout_mutators.js"
+LA_START = "function layoutAddColumn(key, preset, atIndex) {"
+LA_END = "function layoutRemoveKey(key) {"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 29
+EXPECTED_ASSERTS = 38
 
 _HARNESS = r"""
 'use strict';
@@ -151,6 +159,7 @@ function resetPage() {
     P.opened = []; P.notices = []; P.fast = 0; P.refreshes = 0;
     P.viewReady = true; P.deactivated = false; P.homeActive = true;
     P.detached = false; P.remote = {}; P.failFast = false;
+    P.quietOpens = new Set(); P.quiet = 0; P.quietOpened = [];
 }
 resetPage();
 const envL = {
@@ -167,8 +176,13 @@ const envL = {
     },
     stopFastPoll: function () {},
     refreshTaskbar: function () { P.refreshes++; return Promise.resolve(); },
+    withoutFocus: function (keys, fn) {
+        P.quiet++;
+        try { return fn(); } finally { P.quiet--; }
+    },
     openWindow: function (key, sess) {
         P.opened.push(key);
+        if (P.quiet > 0) P.quietOpened.push(key);
         P.windows.set(key, { id: key, disposed: false });
         P.openTerms.push(key);                // addOpenTerm, as openWindow does
     },
@@ -186,7 +200,7 @@ const envL = {
     PROFILES_WARM_RETRY_MS: 1e9,
     fetchProfiles: function () {}, applyWarmProfileColors: function () {},
 };
-['pendingOpens', 'restoreKeys', 'windows'].forEach(function (k) {
+['pendingOpens', 'restoreKeys', 'windows', 'quietOpens'].forEach(function (k) {
     Object.defineProperty(envL, k, { get: function () { return P[k]; } });
 });
 [['_viewReady', 'viewReady'], ['_deactivated', 'deactivated'],
@@ -241,6 +255,82 @@ const life = new Function('env',
     'var __exports = { bootActiveView: bootActiveView,\n' +
     '  teardownView: teardownView, rebuildView: rebuildView };\n' +
     '}\nreturn __exports;\n')(envV);
+
+// ---- the real z-order block (66): withoutFocus -> bringToFront -> focusWin
+// focusWin runs for real, so the observable is the window's own
+// term.focus() being called (the seam openWindow's attach path ends in).
+const zSrc = cut(fs.readFileSync(__SRC66__, 'utf8'), __Z_A__, __Z_Z__)
+    .slice(0, -'function updateTaskbarActive() {'.length);
+const Z = { rafs: [], focused: [], scrolls: 0, L: null };
+function zWin(key, tiled) {
+    return { id: key, type: 'terminal', tiled: tiled, minimized: false,
+             controlled: false, hostId: 'local',
+             term: { focus: function () { Z.focused.push(key); } },
+             dom: { classList: { contains: function () { return false; } },
+                    style: {} } };
+}
+const envZ = {
+    windows: new Map(), frontId: null, lastTermId: null,
+    requestAnimationFrame: function (fn) { Z.rafs.push(fn); },
+    hostHidden: function () { return false; },
+    findKeyInLayout: function (k) {
+        for (const col of Z.L.columns) {
+            if (col.rows[0].keys.indexOf(k) !== -1) {
+                return { desktop: Z.L, col: col, row: col.rows[0], cell: null };
+            }
+        }
+        return null;
+    },
+    visibleColIndex: function (col) { return Z.L.columns.indexOf(col); },
+    savePrefs: function () {}, requestRelayout: function () {},
+    scrollColumnIntoView: function () { Z.scrolls++; },
+    updateTaskbarActive: function () {},
+    floatZIndex: function () { return 777; },
+};
+const zApi = new Function('env',
+    'with (env) {\n' + zSrc + '\n' +
+    'var __exports = { withoutFocus: withoutFocus, bringToFront: bringToFront,\n' +
+    '  focusIsQuiet: focusIsQuiet };\n' +
+    '}\nreturn __exports;\n')(envZ);
+function zReset() {
+    // Run (never drop) earlier scopes' pending clears, so no key stays quiet.
+    for (let i = 0; i < 4 && Z.rafs.length; i++) zFlush();
+    Z.focused = []; Z.scrolls = 0;
+    Z.L = { focusedCol: 0, columns: [
+        { id: 'c0', rows: [{ keys: ['local:1'], mode: 'single' }] },
+        { id: 'c1', rows: [{ keys: ['local:2'], mode: 'single' }] } ] };
+    envZ.windows.clear();
+    envZ.windows.set('local:1', zWin('local:1', true));
+    envZ.windows.set('local:2', zWin('local:2', true));
+    envZ.windows.set('local:3', zWin('local:3', false));
+    envZ.frontId = 'local:1'; envZ.lastTermId = 'local:1';
+}
+function zFlush() { const q = Z.rafs.splice(0); for (const f of q) f(); }
+
+// ---- 58's layoutAddColumn ----------------------------------------------
+const laSrc = cut(fs.readFileSync(__SRC58__, 'utf8'), __AC_A__, __AC_Z__)
+    .slice(0, -'function layoutRemoveKey(key) {'.length);
+const LA = { L: null, quiet: false };
+const envLA = {
+    WIDTH_PRESETS: ['1/3', '1/2', '2/3', 'max'], DEFAULT_NEW_PRESET: '1/2',
+    activeDesktop: function () { return LA.L; },
+    newColumn: function () { return { id: 'n' + LA.L.columns.length, rows: [] }; },
+    newRow: function (keys) { return { keys: keys }; },
+    visibleColumns: function () { return LA.L.columns; },
+    storageColIndex: function (vi) { return vi; },
+    notifyColumnCreated: function () {},
+    visibleColIndex: function (col) { return LA.L.columns.indexOf(col); },
+    savePrefs: function () {},
+    focusIsQuiet: function () { return LA.quiet; },
+};
+const laApi = new Function('env',
+    'with (env) {\n' + laSrc + '\n' +
+    'var __exports = { layoutAddColumn: layoutAddColumn };\n' +
+    '}\nreturn __exports;\n')(envLA);
+function laReset(quiet) {
+    LA.quiet = quiet;
+    LA.L = { focusedCol: 1, columns: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] };
+}
 
 (async function () {
     // ---- H: the catch-up ---------------------------------------------------
@@ -481,6 +571,77 @@ const life = new Function('env',
     ok(envV._viewReady === false,
         'V4 a rebuild a teardown superseded never marks the view ready');
 
+    // ---- F: #262 a launch frame's window opens without focus -------------
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(96));
+    P.pendingOpens.set('local:97', Date.now() + 15000);   // the UI's own launch
+    poll(['local:96', 'local:97']);
+    ok(P.quietOpened.length === 1 && P.quietOpened[0] === 'local:96'
+        && openedCount('local:97') === 1 && P.quietOpens.size === 0,
+        'F1 a launched window opens without focus; the UI\'s own launch still focuses');
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(98));
+    P.pendingOpens.clear();                               // teardownView
+    poll([]);
+    ok(P.quietOpens.size === 0,
+        'F2 a quiet mark whose park a teardown cleared is dropped by the next pass');
+
+    // ---- Z: the real bringToFront under withoutFocus ----------------------
+    zReset();
+    zApi.bringToFront('local:2');
+    ok(Z.focused.join() === 'local:2' && envZ.lastTermId === 'local:2'
+        && envZ.frontId === 'local:2' && Z.L.focusedCol === 1 && Z.scrolls === 1,
+        'Z1 an ordinary bringToFront focuses, moves lastTermId and scrolls');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () { zApi.bringToFront('local:2'); });
+    ok(Z.focused.length === 0 && envZ.lastTermId === 'local:1'
+        && envZ.frontId === 'local:1' && Z.L.focusedCol === 0 && Z.scrolls === 0,
+        'Z2 inside withoutFocus nothing moves: focus, lastTermId, frontId, the focused column');
+    zReset();
+    zApi.withoutFocus(['local:3'], function () { zApi.bringToFront('local:3'); });
+    const w3 = envZ.windows.get('local:3');
+    ok(Z.focused.length === 0 && w3.dom.style.zIndex === '777'
+        && envZ.frontId === 'local:1',
+        'Z3 a quiet float still stacks, without focus');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {
+        envZ.requestAnimationFrame(function () { zApi.bringToFront('local:2'); });
+    });
+    zFlush();                          // the deferred re-entry, one frame on
+    const deferredQuiet = Z.focused.length === 0;
+    zFlush();                          // the quiet window closes
+    zApi.bringToFront('local:2');      // a later click
+    ok(deferredQuiet && Z.focused.join() === 'local:2',
+        'Z4 a bringToFront deferred to the next frame stays quiet; a later one focuses');
+    zReset();
+    try {
+        zApi.withoutFocus(['local:2'], function () { throw new Error('mutator threw'); });
+    } catch (_) {}
+    zApi.bringToFront('local:1');
+    ok(Z.focused.join() === 'local:1',
+        'Z5 a throwing scope still ends: other windows focus again at once');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});
+    zApi.withoutFocus(['local:2'], function () {});
+    zFlush(); zFlush();                // the first scope's clear runs ...
+    const stillQuiet = zApi.focusIsQuiet('local:2');
+    ok(stillQuiet === false,
+        'Z6 overlapping scopes on one key all clear');
+
+    // ---- LA: layoutAddColumn keeps the focused column when quiet ----------
+    laReset(false);
+    laApi.layoutAddColumn('local:9');
+    const loud = LA.L.focusedCol;
+    laReset(true);
+    laApi.layoutAddColumn('local:9');
+    const quietAppend = LA.L.focusedCol;
+    laReset(true);
+    const focusedBefore = LA.L.columns[1];
+    laApi.layoutAddColumn('local:9', '1/2', 0);
+    ok(loud === 3 && quietAppend === 1
+        && LA.L.columns[LA.L.focusedCol] === focusedBefore,
+        'LA1 a quiet new column keeps the focused column (an insert before it shifts the index)');
+
     await sleep(20);
     ok(unhandled === 0, 'H12 no unhandled rejection escaped any scenario');
 
@@ -501,7 +662,9 @@ def scenario_run(tmp_path_factory):
                                     PASS_START, PASS_END)),
                           (SRC_64, (LAUNCH_START, LAUNCH_END)),
                           (SRC_84, (RESTORE_START, RESTORE_END,
-                                    LIFE_START, LIFE_END))):
+                                    LIFE_START, LIFE_END)),
+                          (SRC_66, (Z_START, Z_END)),
+                          (SRC_58, (LA_START, LA_END))):
         src = path.read_text(encoding="utf-8")
         for marker in markers:
             assert src.count(marker) == 1, (
@@ -513,7 +676,9 @@ def scenario_run(tmp_path_factory):
              "__LA_A__": LAUNCH_START, "__LA_Z__": LAUNCH_END,
              "__PS_A__": PASS_START, "__PS_Z__": PASS_END,
              "__RS_A__": RESTORE_START, "__RS_Z__": RESTORE_END,
-             "__LF_A__": LIFE_START, "__LF_Z__": LIFE_END}
+             "__LF_A__": LIFE_START, "__LF_Z__": LIFE_END,
+             "__SRC66__": SRC_66, "__Z_A__": Z_START, "__Z_Z__": Z_END,
+             "__SRC58__": SRC_58, "__AC_A__": LA_START, "__AC_Z__": LA_END}
     text = _HARNESS
     for k, v in subst.items():
         text = text.replace(k, json.dumps(str(v)))
@@ -615,6 +780,21 @@ def test_the_view_ready_flag_follows_the_real_lifecycle(scenario_run):
     _ok(scenario_run, "V2 a teardown clears it at once")
     _ok(scenario_run, "V3 a rebuild sets it only once it has restored the view")
     _ok(scenario_run, "V4 a rebuild a teardown superseded never marks the view ready")
+
+
+def test_an_open_the_user_did_not_ask_for_takes_no_focus(scenario_run):
+    # Adversary M1: a launched window must not pull keyboard focus into an
+    # agent's terminal. The pass opens a frame-parked key withoutFocus; the
+    # REAL bringToFront (66) and layoutAddColumn (58) then move nothing.
+    _ok(scenario_run, "F1 a launched window opens without focus; the UI's own launch still focuses")
+    _ok(scenario_run, "F2 a quiet mark whose park a teardown cleared is dropped by the next pass")
+    _ok(scenario_run, "Z1 an ordinary bringToFront focuses, moves lastTermId and scrolls")
+    _ok(scenario_run, "Z2 inside withoutFocus nothing moves: focus, lastTermId, frontId, the focused column")
+    _ok(scenario_run, "Z3 a quiet float still stacks, without focus")
+    _ok(scenario_run, "Z4 a bringToFront deferred to the next frame stays quiet; a later one focuses")
+    _ok(scenario_run, "Z5 a throwing scope still ends: other windows focus again at once")
+    _ok(scenario_run, "Z6 overlapping scopes on one key all clear")
+    _ok(scenario_run, "LA1 a quiet new column keeps the focused column (an insert before it shifts the index)")
 
 
 def test_the_launch_frame_is_wired_into_the_control_dispatcher():

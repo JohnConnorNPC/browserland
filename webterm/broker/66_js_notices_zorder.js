@@ -51,6 +51,36 @@
         }
 
         // ---- z-order ------------------------------------------------------
+        // #262: an open or arrange the user did not ask for (an MCP launch,
+        // a relayed desktop op other than `focus`) must never take keyboard
+        // focus: whatever had it keeps it, lastTermId and frontId do not
+        // move, and the strip does not scroll to the window. withoutFocus
+        // runs fn with bringToFront (and layoutAddColumn's focusedCol) held
+        // QUIET, and keeps `keys` quiet for the next two frames as well, for
+        // the bringToFront a mutator defers to the next frame (a tab switch
+        // re-enters after its relayout). A quiet float still stacks.
+        // Synchronous by contract: fn must not await.
+        let _focusQuiet = 0;
+        const _quietKeys = new Map();          // key -> pending clears
+        function withoutFocus(keys, fn) {
+            const held = (keys || []).filter(k => typeof k === 'string');
+            for (const k of held) _quietKeys.set(k, (_quietKeys.get(k) || 0) + 1);
+            _focusQuiet++;
+            try {
+                return fn();
+            } finally {
+                _focusQuiet--;
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    for (const k of held) {
+                        const n = (_quietKeys.get(k) || 0) - 1;
+                        if (n > 0) _quietKeys.set(k, n); else _quietKeys.delete(k);
+                    }
+                }));
+            }
+        }
+        function focusIsQuiet(id) {
+            return _focusQuiet > 0 || _quietKeys.has(String(id));
+        }
         // Focus a window's content: the xterm for terminals, the textarea for
         // app windows. Tolerant of either being absent.
         function focusWin(win) {
@@ -77,6 +107,11 @@
             // A floating window masked off the active workspace (task 8) can't
             // take focus — its taskbar click switches workspace first.
             if (!win.tiled && win.dom.classList.contains('ws-hidden')) return;
+            // #262: quiet -- a float still stacks; nothing else moves.
+            if (focusIsQuiet(id)) {
+                if (!win.tiled) win.dom.style.zIndex = String(floatZIndex(win));
+                return;
+            }
             // Remember the active TERMINAL (not an app window) so the file tools
             // can open "where I am" — at its cwd, on its host (#35).
             if (win.type !== 'app') lastTermId = id;

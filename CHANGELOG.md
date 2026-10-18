@@ -282,11 +282,12 @@ again, unless they change a dependency file too.
   answered `404 unknown_or_off` until someone clicked the chip. Now, with
   **Allow MCP to arrange the desktop** on, the broker tells the browser
   holding the control lease about the launch, and that browser opens the
-  window once, on its active workspace. The launch reply never waits for
-  this. A window you close stays closed, and a reload does not reopen it.
+  window once, on its active workspace, without taking your keyboard focus.
+  The launch reply never waits for this. A window you close stays closed, and a reload does not reopen it.
   Independently, any arrange op or `send-window` on a terminal that is only a
-  chip opens its window first and then applies, including one you closed. A
-  refused op opens nothing, and an op on a terminal the browser has not seen
+  chip opens its window first and then applies, including one you closed.
+  Only `focus` moves keyboard focus: no other op, and no open, can pull your
+  typing into an agent's terminal. A refused op opens nothing, and an op on a terminal the browser has not seen
   yet waits up to 2 s for it to appear. `get_desktop` lists chip-only
   terminals with `open: false` and open windows with `open: true` (a new,
   additive field).

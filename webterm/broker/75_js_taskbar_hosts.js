@@ -1234,9 +1234,15 @@
                     if (merged.has(key)) {
                         pendingOpens.delete(key);
                         restoreKeys.delete(key);
-                        openWindow(key, merged.get(key));
+                        // #262: an MCP launch's window never takes focus.
+                        if (quietOpens.delete(key)) {
+                            withoutFocus([key], () => openWindow(key, merged.get(key)));
+                        } else {
+                            openWindow(key, merged.get(key));
+                        }
                     } else if (now >= deadline) {
                         pendingOpens.delete(key);
+                        quietOpens.delete(key);
                         if (restoreKeys.has(key)) {
                             // Restore-on-refresh is best-effort: no "not found"
                             // notice (the user didn't ask for THIS open). Prune
@@ -1255,6 +1261,11 @@
                         }
                     }
                 }
+            }
+            // #262: a quiet mark outlives its park only after a teardown cleared
+            // pendingOpens; drop it here so it can never quiet a later open.
+            for (const key of Array.from(quietOpens)) {
+                if (!pendingOpens.has(key)) quietOpens.delete(key);
             }
             if (!pendingOpens.size) stopFastPoll();
 
