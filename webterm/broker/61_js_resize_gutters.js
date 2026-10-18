@@ -2,6 +2,9 @@
         // Companion to the vertical row gutters: drag steals width between the
         // two adjacent columns, writing a custom col.widthFrac that overrides
         // the preset. Pair-sum stays constant so the rest of the strip is still.
+        // The drag sizes every drawn column with the same columnPixelWidths
+        // call relayoutStrip makes, so the relayout on release lands on the
+        // pixels the drag showed (#259).
         // Only a FINITE positive widthFrac counts: columnPixelWidths sums the
         // fractions, so one Infinity would turn every later column into NaN.
         function colCurrentFrac(col) {
@@ -63,24 +66,37 @@
             if (!leftCol || !rightCol) return;
             const strip = document.getElementById('strip');
             const stripW = strip.clientWidth || 1;
+            // The columns relayoutStrip drew, left to right, read off the
+            // gutters it rebuilt between them (a stale .strip-col left by a
+            // deferred pass has no gutter, so it is not counted).
+            const gutters = Array.from(
+                strip.querySelectorAll(':scope > .strip-col-gutter'));
+            if (!gutters.length) return;
+            const drawnIds = [gutters[0].dataset.leftColId]
+                .concat(gutters.map(x => x.dataset.rightColId));
+            const drawn = drawnIds.map(id => cols.find(c => c.id === id));
+            if (drawn.some(c => !c)) return;
+            const drawnEls = drawnIds.map(id => strip.querySelector(
+                '.strip-col[data-col-id="' + cssEscape(id) + '"]'));
+            const availW = stripAvailWidth(stripW, drawn.length);
             const startX = e.clientX;
             const startL = colCurrentFrac(leftCol);
             const startR = colCurrentFrac(rightCol);
             const pairSum = startL + startR;
             const minF = Math.min(0.12, pairSum / 2);
-            const leftEl = strip.querySelector(
-                '.strip-col[data-col-id="' + cssEscape(leftCol.id) + '"]');
-            const rightEl = strip.querySelector(
-                '.strip-col[data-col-id="' + cssEscape(rightCol.id) + '"]');
             document.body.classList.add('col-resizing');
             const onMove = (ev) => {
-                const dfrac = (ev.clientX - startX) / stripW;
+                // Fractions are of availW (as relayoutStrip reads them), so
+                // the gutter follows the cursor 1:1.
+                const dfrac = (ev.clientX - startX) / availW;
                 const nl = Math.max(minF, Math.min(pairSum - minF, startL + dfrac));
                 const nr = pairSum - nl;
                 leftCol.widthFrac = nl;
                 rightCol.widthFrac = nr;
-                if (leftEl) leftEl.style.width = Math.round(nl * stripW) + 'px';
-                if (rightEl) rightEl.style.width = Math.round(nr * stripW) + 'px';
+                const widths = columnPixelWidths(drawn.map(colCurrentFrac), stripW);
+                drawnEls.forEach((el, i) => {
+                    if (el) el.style.width = widths[i] + 'px';
+                });
             };
             const onUp = () => {
                 document.removeEventListener('mousemove', onMove);

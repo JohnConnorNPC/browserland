@@ -186,6 +186,10 @@ class FakeEl {
         this.parentElement = null;
     }
     addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); }
+    contains(node) {
+        for (let e = node; e; e = e.parentElement) if (e === this) return true;
+        return false;
+    }
     querySelector(sel) {
         const m = /^\.strip-col\[data-col-id="(.*)"\]$/.exec(sel);
         if (!m) throw new Error('querySelector: unsupported ' + sel);
@@ -274,7 +278,10 @@ function makeSandbox(wf, cols, opts) {
                 liveIds: cols.filter(c => c.live).map(c => c.id) };
     const ENV = {
         document,
-        window: { getSelection: () => ({ isCollapsed: true, rangeCount: 0 }) },
+        // t.selection (a node in the strip) makes relayoutStrip defer.
+        window: { getSelection: () => (t.selection
+            ? { isCollapsed: false, rangeCount: 1, anchorNode: t.selection }
+            : { isCollapsed: true, rangeCount: 0 }) },
         windows,
         getLayout: () => layout,
         visibleColumns: () => layout.columns,
@@ -287,7 +294,12 @@ function makeSandbox(wf, cols, opts) {
         reorderTaskbarItems: () => {},
         getSettings: () => settings,
         savePrefs: () => {},
-        requestRelayout: () => { t.relayouts = (t.relayouts || 0) + 1; t.api.relayoutStrip(); },
+        // Runs the real relayout at once, except while a deferred pass asks
+        // for its retry (the selection is still live then).
+        requestRelayout: () => {
+            t.relayouts = (t.relayouts || 0) + 1;
+            if (!t.selection) t.api.relayoutStrip();
+        },
         requestAnimationFrame: cb => { rafQ.push({ id: ++rafId, cb }); return rafId; },
         cancelAnimationFrame: id => { rafQ = rafQ.filter(r => r.id !== id); },
     };
@@ -304,7 +316,8 @@ function makeSandbox(wf, cols, opts) {
         set: (o, k) => { throw new Error('sandbox: write to outer ' + String(k)); },
     });
     t.api = new Function('env', 'with (env) {\n' + presetSrc + S61 +
-        '\nreturn { relayoutStrip, scrollColumnIntoView, columnPixelWidths };\n}\n')(scope);
+        '\nreturn { relayoutStrip, scrollColumnIntoView, columnPixelWidths,' +
+        ' colFrac: colCurrentFrac };\n}\n')(scope);
     t.unknown = unknown;
     // rAF callbacks run with strictly increasing timestamps until none remain.
     t.flush = () => {
@@ -463,8 +476,90 @@ function revealCase() {
     }
 }
 
+// ---- C3: the gutter drag and the relayout on release agree ----------------
+function mouse(x) {
+    return { button: 0, clientX: x, preventDefault() {}, stopPropagation() {} };
+}
+function widthsOf(els) { return els.map(e => e.style.width).join(); }
+function startDrag(t, gi) {
+    const g = t.gutters()[gi];
+    const ev = mouse(500);
+    ev.currentTarget = g;
+    g.listeners.mousedown.forEach(fn => fn(ev));
+}
+
+function dragCase() {
+    const sets = { '2x1/2': ['1/2', '1/2'], '3x1/3': ['1/3', '1/3', '1/3'] };
+    for (const name in sets) {
+        for (const wf of [1919, 1920]) {
+            for (let gi = 0; gi < sets[name].length - 1; gi++) {
+                for (const dx of [1, 37, 300, -250]) {
+                    const t = makeSandbox(wf, sets[name].map((p, i) =>
+                        ({ id: 'c' + i, preset: p, live: true })));
+                    const label = 'C3 ' + name + ' W=' + wf + ' gutter ' + gi + ' dx=' + dx;
+                    drawn(t, label, true);
+                    const els = t.colEls();
+                    const A = wf - (els.length - 1) * GUTTER_CSS_W;
+                    // The dragged gutter's exact position in column space
+                    // (availW units, gutters left out), before the drag.
+                    let P = 0;
+                    for (let i = 0; i <= gi; i++) P += t.api.colFrac(t.layout.columns[i]);
+                    const exactEdge = A * P;
+                    startDrag(t, gi);
+                    t.fire('mousemove', mouse(500 + dx));
+                    const live = widthsOf(els);
+                    ok(t.strip.contentW() === t.strip.clientWidth,
+                       label + ' live columns+gutters ' + t.strip.contentW() +
+                       ' == clientWidth ' + t.strip.clientWidth + ' (' + live + ')');
+                    const edge = els[gi].offsetLeft + els[gi].offsetWidth - gi * GUTTER_CSS_W;
+                    ok(Math.abs(edge - (exactEdge + dx)) <= 0.5 + 1e-9,
+                       label + ' left edge ' + edge + ' follows the cursor to ' +
+                       (exactEdge + dx).toFixed(2));
+                    t.fire('mouseup', mouse(500 + dx));
+                    t.flush();
+                    ok(t.relayouts === 1, label + ' release relayout ran');
+                    ok(widthsOf(t.colEls()) === live,
+                       label + ' release ' + widthsOf(t.colEls()) + ' == drag ' + live);
+                    noUnknown(t, label);
+                }
+            }
+        }
+    }
+}
+
+// C3 with a stale column: a deferred relayout (live selection) leaves the
+// .strip-col of a column that just went dormant in the strip. The drag must
+// size only the drawn columns, or the release relayout moves them.
+function staleDragCase() {
+    for (const wf of [1919, 1920]) {
+        const t = makeSandbox(wf, ['a', 'b', 'c'].map(id =>
+            ({ id, preset: '1/3', live: true })));
+        const label = 'C3 stale W=' + wf;
+        drawn(t, label, true);
+        t.layout.columns[2].rows[0].keys = ['local:gone'];   // c goes dormant
+        t.selection = t.colEls()[0];
+        t.api.relayoutStrip();
+        t.flush();
+        t.selection = null;
+        ok(t.colEls().map(e => e.dataset.colId).join() === 'a,b,c'
+           && t.gutters().length === 1,
+           label + ' precondition: stale c is still in the strip, one gutter');
+        const els = t.colEls().slice(0, 2);
+        startDrag(t, 0);
+        t.fire('mousemove', mouse(537));
+        const live = widthsOf(els);
+        t.fire('mouseup', mouse(537));
+        t.flush();
+        ok(t.colEls().map(e => e.dataset.colId).join() === 'a,b',
+           label + ' release relayout removed the stale column');
+        ok(widthsOf(t.colEls()) === live,
+           label + ' release ' + widthsOf(t.colEls()) + ' == drag ' + live);
+        noUnknown(t, label);
+    }
+}
+
 const CASES = { helper: helperCase, focus: focusCase, wide: wideCase,
-                reveal: revealCase };
+                reveal: revealCase, drag: dragCase, stale: staleDragCase };
 CASES[process.argv[2]]();
 console.log('COUNT ' + pass + ' ' + fail);
 """
@@ -541,3 +636,21 @@ def test_wide_column_still_scrolls_into_view(tmp_path):
 def test_one_pixel_clipped_column_is_revealed(tmp_path):
     out, n = _run(tmp_path, "reveal")
     assert n == REVEAL_ASSERTS, out[-400:]
+
+
+# Per (set, width, gutter, dx): drew + tail + exact fill, live fill, edge,
+# release ran, release == drag, no-unknown = 8; 2x1/2 has 1 gutter, 3x1/3 2.
+DRAG_ASSERTS = 2 * 4 * (1 + 2) * 8
+# Per width: drew + tail + exact fill, precondition, stale removed,
+# release == drag, no-unknown.
+STALE_ASSERTS = 2 * (3 + 4)
+
+
+def test_gutter_drag_and_release_relayout_agree(tmp_path):
+    out, n = _run(tmp_path, "drag")
+    assert n == DRAG_ASSERTS, out[-400:]
+
+
+def test_gutter_drag_ignores_a_stale_deferred_column(tmp_path):
+    out, n = _run(tmp_path, "stale")
+    assert n == STALE_ASSERTS, out[-400:]
