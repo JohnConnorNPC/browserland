@@ -2,8 +2,8 @@
 
 What 1.0 supports and promises, then the breaking changes, what they cost you,
 and how to recover, newest first. Coming from 0.8.0, read the entries from
-**Python 3.10 is the minimum** down to **MCP-launched windows start in
-`readwrite`**; the ones below those already shipped in 0.8.0.
+**Python 3.10 is the minimum** down to **Publishing passwords needs https,
+localhost or encryption off**; the ones below those already shipped in 0.8.0.
 
 ---
 
@@ -101,6 +101,74 @@ their launcher. Scoped launches already started in `readwrite`. With
 robot button only revokes write access after the launch (the window comes up
 drivable first); a browser edit also clears the launch handle, so the agent
 cannot change it back.
+
+---
+
+## AI status checks need a grant on the broker (#189)
+
+**What changed.** The broker's `/status/fetch`, the only way the AI status mod
+reaches the providers' status pages, is behind a new gate,
+`status_fetch_enabled`, which is off by default. While it is off the route
+answers 503 `status_fetch_disabled`.
+
+**Who is affected.** Anyone who had the AI status mod on: its chip and window
+now say *status checks are switched off on this broker* instead of showing the
+providers.
+
+**What to do.** Click **Switch on status checks on this broker** in the AI
+status window, or put `"status_fetch_enabled": true` in that broker's
+`broker_config.json` (a key in the file owns the gate from then on).
+
+---
+
+## A mod package must declare what it uses (#193)
+
+**What changed.** Installing a mod checks its scripts against the
+`permissions` list in its `mod.json`. A package that uses a capability it does
+not declare is refused with 400 `undeclared_capability`, and a manifest with no
+`permissions` key counts as declaring none. Mods this broker already installed
+keep loading; the check runs on every new install.
+
+**Who is affected.** Anyone installing a package written for 0.8.0 whose
+manifest has no `permissions` list, or an incomplete one — for example when
+installing it on a second broker.
+
+**What to do.** Add what the package uses to `permissions` in its `mod.json`;
+the refusal names the file, the line and the permission it needs. See
+[[Writing a Mod|Writing-a-Mod]].
+
+---
+
+## The Agent docs button is gone (#177)
+
+**What changed.** The Agent-docs mod, the 📋 button on every terminal's title
+bar that opened that folder's `AGENTS.md` and `CLAUDE.md`, is retired. It
+guessed the folder from the terminal's detected working directory, so it could
+open — and save — another project's file.
+
+**Who is affected.** Anyone who used the 📋 button. Agent-docs windows you
+already have keep restoring and saving.
+
+**What to do.** Open `AGENTS.md` and `CLAUDE.md` with the text editor or the
+file manager. Bringing the mod back is a source-tree change, described in
+`webterm/broker/mods-deprecated/README.md`.
+
+---
+
+## Publishing passwords needs https, localhost or encryption off (#175)
+
+**What changed.** The Broker registry encrypts what it publishes in the
+browser, and its default, *Passwords only*, needs a secure page (https, or
+localhost). On a plain-http page such as `http://192.168.1.5:4445`, a Publish
+with **Include passwords** ticked is refused ("Publish cancelled. Broker
+registry encryption is set to …") instead of writing the tokens in the clear.
+
+**Who is affected.** Anyone who published passwords from a plain-http page.
+Publishing without passwords is unchanged.
+
+**What to do.** Reach the broker over https (for example `tailscale serve`) or
+on localhost, or set **Control Panel → Browser → Broker registry encryption** to
+**Off — publish in the clear**, which is the old behaviour.
 
 ---
 
