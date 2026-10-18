@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 16
+EXPECTED_ASSERTS = 20
 
 _PRELUDE = r"""
 'use strict';
@@ -478,6 +478,48 @@ async function heal() {
     w = buildWorld({ stacks: 'junk' });
     ok(w.st().list.length === 3 && !('stacks' in w.st()) && w.spies.save === 1,
         'H5 a non-array stacks field is deleted');
+
+    function ws(id, stack) { const o = { id: id, focusedCol: 0 }; if (stack) o.stack = stack; return o; }
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    const SST = [{ id: 'SA' }, { id: 'SB' }, { id: 'SC' }];
+    w = buildWorld({ list: [ws('A1', 'SA'), ws('B1', 'SB'), ws('A2', 'SA'), ws('C1', 'SC'),
+                            ws('B2', 'SB'), ws('C2', 'SC')], stacks: SST.map(function (s) { return Object.assign({}, s); }) });
+    const r1 = ids(w);
+    const w2 = buildWorld({ list: [ws('P1'), ws('A1', 'SA'), ws('P2'), ws('A2', 'SA'), ws('A3', 'SA')],
+                            stacks: [{ id: 'SA' }] });
+    const w3 = buildWorld({ list: [ws('B1', 'SB'), ws('A1', 'SA'), ws('B2', 'SB'), ws('A2', 'SA'), ws('P1')],
+                            stacks: [{ id: 'SA' }, { id: 'SB' }] });
+    ok(r1 === 'A1,A2,B1,B2,C1,C2' && ids(w2) === 'P1,A1,A2,A3,P2' && ids(w3) === 'B1,B2,A1,A2,P1'
+        && w.spies.save === 1 && w.st().stacks.length === 3,
+        'H3 interleaved stack members are regrouped where each stack first appears, order kept');
+
+    w = buildWorld({ list: [ws('W1'), ws('W2', 'S1'), ws('W3')],
+                     stacks: [{ id: 'S1', name: 'solo', lastId: 'W2' }] });
+    ok(w.st().list.length === 3 && w.st().list[1].stack === undefined
+        && J(w.st().stacks) === J([]) && w.spies.save === 1,
+        'H4 a stack left with one workspace dissolves (row and membership)');
+
+    w = buildWorld({ list: [ws('W1'), ws('W2', 'S1'), ws('W3', 'S1')],
+                     stacks: [{ id: 'S1', lastId: 'W1' }] });
+    ok(w.st().stacks.length === 1 && w.st().list[2].stack === 'S1'
+        && w.st().stacks[0].lastId === undefined && w.spies.save === 1,
+        'H6 a lastId naming a workspace outside its stack is dropped');
+
+    // H7: every malformed seed above, healed again, is byte-identical and unsaved.
+    const seeds = [
+        { list: [ws('A1', 'SA'), ws('B1', 'SB'), ws('A2', 'SA'), ws('C1', 'SC'), ws('B2', 'SB'), ws('C2', 'SC')],
+          stacks: [{ id: 'SA', name: ' x ', color: '#ABC' }, { id: 'SB', lastId: 'A1' }, { id: 'SC' }] },
+        { list: [ws('W1', 'GONE'), ws('W2', 'S1'), ws('W3')], stacks: [{ id: 'S1' }, { id: 'S1' }, 7] },
+        { list: [{ id: 'W1', focusedCol: 0, color: '#FFF' }, ws('W2'), ws('W3')], stacks: 'junk' },
+    ];
+    let idem = 0;
+    for (const s of seeds) {
+        const ww = buildWorld(s);
+        const j1 = J(ww.st()), s1 = ww.spies.save;
+        ww.render(); ww.render();
+        if (s1 === 1 && J(ww.st()) === j1 && ww.spies.save === s1) idem++;
+    }
+    ok(idem === seeds.length, 'H7 a healed store heals to itself: a second pass changes nothing and saves nothing');
 }
 """
 
@@ -556,6 +598,22 @@ def test_heal_colours(scenario_run):
 def test_heal_stack_garbage(scenario_run):
     _ok(scenario_run, "H5 garbage, duplicate and workspace-id stack rows and a dangling membership are healed")
     _ok(scenario_run, "H5 a non-array stacks field is deleted")
+
+
+def test_heal_stack_contiguity(scenario_run):
+    _ok(scenario_run, "H3 interleaved stack members are regrouped where each stack first appears, order kept")
+
+
+def test_heal_dissolves_single_stacks(scenario_run):
+    _ok(scenario_run, "H4 a stack left with one workspace dissolves (row and membership)")
+
+
+def test_heal_last_used_member(scenario_run):
+    _ok(scenario_run, "H6 a lastId naming a workspace outside its stack is dropped")
+
+
+def test_heal_is_canonical_and_idempotent(scenario_run):
+    _ok(scenario_run, "H7 a healed store heals to itself: a second pass changes nothing and saves nothing")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

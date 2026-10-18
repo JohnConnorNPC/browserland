@@ -283,9 +283,10 @@
                 if (c === null) delete o.color; else o.color = c;
                 return true;
             }
-            // #258 stacks, healed in a FIXED order: the stack rows, then each
-            // member's w.stack. True when anything was rewritten. Nothing is
-            // ever ADDED to a valid store (no `stacks: []` materialised).
+            // #258 stacks, healed in a FIXED order: the stack rows, each
+            // member's w.stack, contiguity, dissolving, then lastId. True when
+            // anything was rewritten. Nothing is ever ADDED to a valid store
+            // (no `stacks: []` materialised), and a second pass is a no-op.
             function healStacks(st) {
                 let dirty = false;
                 if (st.stacks !== undefined && !Array.isArray(st.stacks)) {
@@ -319,6 +320,45 @@
                     if (w.stack !== undefined && !(typeof w.stack === 'string' && rows.has(w.stack))) {
                         delete w.stack;
                         dirty = true;
+                    }
+                }
+                // Members are CONTIGUOUS, which is what makes the flat order
+                // the pager's reading order. Stable group-at-first-occurrence:
+                // a stack's members all land where its first member stands,
+                // in list order; plain workspaces keep their place.
+                const order = [];
+                const placed = new Set();
+                for (const w of st.list) {
+                    if (!w.stack) { order.push(w); continue; }
+                    if (placed.has(w.stack)) continue;
+                    placed.add(w.stack);
+                    for (const m of st.list) if (m.stack === w.stack) order.push(m);
+                }
+                if (order.some(function (w, i) { return w !== st.list[i]; })) {
+                    st.list.length = 0;              // in place, like the entry heal
+                    for (const w of order) st.list.push(w);
+                    dirty = true;
+                }
+                // A stack left with one workspace dissolves on its own.
+                const size = new Map();
+                for (const w of st.list) if (w.stack) size.set(w.stack, (size.get(w.stack) || 0) + 1);
+                for (const w of st.list) {
+                    if (w.stack && size.get(w.stack) < 2) { delete w.stack; dirty = true; }
+                }
+                if (Array.isArray(st.stacks)) {
+                    const live = st.stacks.filter(function (s) { return (size.get(s.id) || 0) >= 2; });
+                    if (live.length !== st.stacks.length) {
+                        st.stacks.length = 0;
+                        for (const s of live) st.stacks.push(s);
+                        dirty = true;
+                    }
+                    // LAST: the last-used member must still be a member.
+                    for (const s of st.stacks) {
+                        if (s.lastId !== undefined && !st.list.some(function (w) {
+                            return w.id === s.lastId && w.stack === s.id; })) {
+                            delete s.lastId;
+                            dirty = true;
+                        }
                     }
                 }
                 return dirty;
