@@ -1765,9 +1765,9 @@ def _refuse_if_quiescing(app, what: str):
 
     Its callers are the entry points that CREATE something the drain would
     then have to wait for or throw away, and the update-policy write; grep for
-    the call sites rather than trusting a list here. The chunk/commit/abort halves stay open
-    on purpose — refusing those would strand exactly the in-flight sessions the
-    drain is trying to let finish.
+    the call sites rather than trusting a list here. The chunk/commit/abort
+    halves stay open on purpose — refusing those would strand exactly the
+    in-flight sessions the drain is trying to let finish.
 
     503 (not 409/423): "come back shortly", which is the literal truth when the
     process is about to be relaunched. ``Retry-After`` is deliberately omitted —
