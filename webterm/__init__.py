@@ -1,6 +1,6 @@
 """webterm: headless PTY agents + broker speaking Browserland's web-terminal producer protocol."""
 
-__version__ = "0.8.0"
+__version__ = "1.0.0"
 
 _BUILD_VERSION = None
 
@@ -18,7 +18,7 @@ def build_version() -> str:
     next to that repo's ``.git``); don't do that. Cached per process; never
     raises.
 
-    Example: ``"0.8.0+ba4b62e"`` from a checkout, or ``"0.8.0"`` without git.
+    Example: ``"1.0.0+ba4b62e"`` from a checkout, or ``"1.0.0"`` without git.
     Uses ``rev-parse --short HEAD`` (stable across clones/tags) and does NOT
     encode a dirty-tree marker — two different dirty trees share a hash, so it
     would be a misleading equality signal. NOTE: when git is absent on BOTH the

@@ -323,8 +323,8 @@ def compute_state(*, mode: str, local_version: Optional[str],
                   ) -> Dict[str, Any]:
     """Reduce the fetch results to one state. The honesty rules live here:
 
-    * No local sha -> ``unknown(no-git)``. NEVER compare a bare ``0.8.0``
-      against ``0.8.0`` and call it current -- two different builds share that
+    * No local sha -> ``unknown(no-git)``. NEVER compare a bare ``1.0.0``
+      against ``1.0.0`` and call it current -- two different builds share that
       string, which is what the ``build_version()`` docstring warns about.
     * A compare that is not a 200 -> ``unknown``, with the reason distinguishing
       rate-limited / offline / compare-unavailable. Ahead and behind are read
