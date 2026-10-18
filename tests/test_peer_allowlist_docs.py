@@ -84,7 +84,8 @@ def test_the_section_states_what_the_code_does():
                           "proxy_unavailable", "peer_hop_refused",
                           "not_relayed", "peer_origin_changed", "bad_scope",
                           "peer_busy", "body_too_large", "bad_length",
-                          "body_timeout", "peer_timeout", "bad_ticket"}
+                          "body_timeout", "peer_timeout", "peer_unreachable",
+                          "bad_ticket"}
     for code_name in documented:
         assert f'"{code_name}"' in code, code_name
 

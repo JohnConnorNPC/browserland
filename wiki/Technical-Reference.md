@@ -589,6 +589,8 @@ dropped connection once the answer has started); a recording download
 0.6 Mbit/s. `Range` and `If-None-Match` are not forwarded: the peer answers
 a recording whole, with no partial answer and no ETag. Connect timeout 2.5 s (under the page's 3 s fetch deadline),
 read timeout 30 s (past the 15 s `/mcp/read` wait and the 10 s desktop relay).
+A dial that fails any other way (connection refused, reset, a transport
+error) answers 502 `peer_unreachable`.
 Bodies stream both ways, one chunk at a time — a 256 MiB recording is never
 held whole; a body that dies half-way drops the connection rather than
 arriving short. Nothing is retried. Log lines name the peer **id**, the
