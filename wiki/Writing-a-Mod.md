@@ -117,7 +117,8 @@ The rules that shape it:
 malformed declaration (no object, no string `id`, no function `init`) or a
 duplicate id. Fields it normalizes: `version` (non-string → `'0'`),
 `ctxVersion` (non-number → `null`, meaning "pin nothing"), `tiers` and
-`requires` (non-arrays → `[]`, non-string members dropped), `defaultEnabled`
+`requires` (non-arrays → `[]`, non-string members dropped, and empty strings
+too for `requires`), `defaultEnabled`
 (anything but literal `false` → `true`).
 
 ---
