@@ -38,8 +38,19 @@ here can change in a 1.x release.
 **What to do.** Install Python 3.10 or newer, then reinstall from the checkout
 (`pip install -e .` plus your extras). The launcher scripts run the checkout
 with whatever `python` or `python3` is on `PATH` and never check its version.
-On Linux, `run-broker.sh` and `run-agent.sh` reuse an existing `.venv`, so
-delete it after installing the newer Python and the next run rebuilds it.
+On Linux, `run-broker.sh` and `run-agent.sh` keep the `.venv` they created, so
+it stays on the old Python until you rebuild it:
+
+1. Stop the agent and the broker (under the shipped units,
+   `systemctl stop webterm-agent webterm-broker`), then delete `.venv` (or
+   the directory `$VENV_DIR` names).
+2. If `python3 --version` reports 3.10 or newer, start the **broker first**
+   and let `run-broker.sh` create the venv, then start the agent. Whichever
+   script runs first creates it with `python3`, and a venv that `run-agent.sh`
+   created holds only `websockets`, so the broker then cannot import `sanic`.
+3. If `python3` is older, create the venv yourself with a 3.10 interpreter
+   from the checkout — `python3.10 -m venv .venv`, then
+   `.venv/bin/pip install -e .` — and the scripts use it as it is.
 
 **The Update window will not apply this one.** The update to 1.0 changes
 `pyproject.toml`, so applying it from **Update…** is refused, and the window

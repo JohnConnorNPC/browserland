@@ -48,7 +48,7 @@ Linux:
 | `webterm/agent/snapshot/raw.py` | tier-1 snapshot: `ESC[0m ESC[2J ESC[H` + ring replay |
 | `webterm/agent/snapshot/pyte_snap.py` | tier-2 (optional, `--snapshot-mode pyte`): replay ring through pyte, render the settled grid |
 | `webterm/broker/` | Sanic app: desktop UI page, `/ws` relay, `/browserland` producer WS, `/sessions`, profiles-only `POST /launch` |
-| `launchers/` | venv-bootstrapping run scripts for both OSes |
+| `launchers/` | run scripts for both OSes (the Linux ones bootstrap a venv) and systemd units |
 
 ## Agent
 
@@ -689,7 +689,7 @@ address).
 **Install** (for running *and* testing):
 
 ```bash
-python3 -m venv .venv
+python3 -m venv .venv          # needs Python 3.10+; else e.g. python3.10 -m venv .venv
 .venv/bin/pip install -e ".[dev,pyte,proxy,mcp]" sanic-testing
 ```
 
@@ -698,7 +698,8 @@ The tests need more than the `dev` extra: most use Sanic's test client
 (the `proxy` extra), and the MCP-server tests skip without `mcp`.
 
 Zero-setup alternative: `launchers/run-broker.sh` / `run-agent.sh`
-bootstrap a venv with the runtime deps on first run — fine for running,
+bootstrap a venv with the runtime deps on first run, using whatever `python3`
+is on `PATH` (it must be 3.10+) — fine for running,
 but they don't install pytest or any extra, so use the editable install for
 testing. Both use the same `.venv` and install only when they create it, so
 run `run-broker.sh` first: a venv that `run-agent.sh` created holds only
