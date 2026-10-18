@@ -243,6 +243,10 @@ function makeStrip(wf) {
 // cols: [{id, preset?, frac?, live}] in layout order. A col with live:false
 // has only dead keys, so relayoutStrip leaves it DORMANT (not drawn) while
 // visibleColumns() still lists it: visible index != drawn index.
+// opts.realLayout loads the WHOLE 57 fragment too, so getLayout (with its
+// reconcileLayout), visibleColumns and rowKeys are the shipped ones, reading
+// prefs._layout; otherwise getLayout hands the layout back as is (C4 injects
+// a widthFrac that reconcile would drop).
 function makeSandbox(wf, cols, opts) {
     opts = opts || {};
     const root = new FakeEl('html'); root.isRoot = true;
@@ -283,6 +287,7 @@ function makeSandbox(wf, cols, opts) {
             ? { isCollapsed: false, rangeCount: 1, anchorNode: t.selection }
             : { isCollapsed: true, rangeCount: 0 }) },
         windows,
+        prefs: { _layout: layout },
         getLayout: () => layout,
         visibleColumns: () => layout.columns,
         hostHidden: () => false,
@@ -315,9 +320,10 @@ function makeSandbox(wf, cols, opts) {
         },
         set: (o, k) => { throw new Error('sandbox: write to outer ' + String(k)); },
     });
-    t.api = new Function('env', 'with (env) {\n' + presetSrc + S61 +
+    t.api = new Function('env', 'with (env) {\n' +
+        (opts.realLayout ? S57 : presetSrc) + S61 +
         '\nreturn { relayoutStrip, scrollColumnIntoView, columnPixelWidths,' +
-        ' colFrac: colCurrentFrac };\n}\n')(scope);
+        ' colFrac: colCurrentFrac, getLayout };\n}\n')(scope);
     t.unknown = unknown;
     // rAF callbacks run with strictly increasing timestamps until none remain.
     t.flush = () => {
@@ -558,8 +564,39 @@ function staleDragCase() {
     }
 }
 
+// C3 for a pair wider than the strip (max+1/2, 1/2+max, max+max) through the
+// REAL getLayout/reconcileLayout (57), which drops a widthFrac > 1: the
+// drag keeps each side <= 1, so what it shows is what release lands on.
+function reconcileDragCase() {
+    const pairs = [['max', '1/2'], ['1/2', 'max'], ['max', 'max']];
+    for (const [p0, p1] of pairs) {
+        for (const wf of [1919, 1920]) {
+            for (const dx of [50, -300, 300, -1000]) {
+                const t = makeSandbox(wf, [{ id: 'a', preset: p0, live: true },
+                    { id: 'b', preset: p1, live: true }], { realLayout: true });
+                const label = 'C3r ' + p0 + '+' + p1 + ' W=' + wf + ' dx=' + dx;
+                drawn(t, label, false);
+                const els = t.colEls();
+                startDrag(t, 0);
+                t.fire('mousemove', mouse(500 + dx));
+                const live = widthsOf(els);
+                const fr = t.api.getLayout().columns.map(c => c.widthFrac);
+                ok(fr.every(f => typeof f === 'number' && f > 0 && f <= 1),
+                   label + ' both widthFracs survive reconcile in (0,1]: ' + fr);
+                t.fire('mouseup', mouse(500 + dx));
+                t.flush();
+                ok(t.relayouts === 1, label + ' release relayout ran');
+                ok(widthsOf(t.colEls()) === live,
+                   label + ' release ' + widthsOf(t.colEls()) + ' == drag ' + live);
+                noUnknown(t, label);
+            }
+        }
+    }
+}
+
 const CASES = { helper: helperCase, focus: focusCase, wide: wideCase,
-                reveal: revealCase, drag: dragCase, stale: staleDragCase };
+                reveal: revealCase, drag: dragCase, stale: staleDragCase,
+                reconcile: reconcileDragCase };
 CASES[process.argv[2]]();
 console.log('COUNT ' + pass + ' ' + fail);
 """
@@ -654,3 +691,13 @@ def test_gutter_drag_and_release_relayout_agree(tmp_path):
 def test_gutter_drag_ignores_a_stale_deferred_column(tmp_path):
     out, n = _run(tmp_path, "stale")
     assert n == STALE_ASSERTS, out[-400:]
+
+
+# Per (pair, width, dx): drew + tail, fracs in (0,1], release ran,
+# release == drag, no-unknown; 3 pairs x 2 widths x 4 dx.
+RECONCILE_ASSERTS = 3 * 2 * 4 * 6
+
+
+def test_gutter_drag_wider_pair_survives_the_real_reconcile(tmp_path):
+    out, n = _run(tmp_path, "reconcile")
+    assert n == RECONCILE_ASSERTS, out[-400:]

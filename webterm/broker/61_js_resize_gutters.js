@@ -84,13 +84,18 @@
             const startR = colCurrentFrac(rightCol);
             const pairSum = startL + startR;
             const minF = Math.min(0.12, pairSum / 2);
+            // Each side also stays <= 1: getLayout's reconcile drops a
+            // widthFrac > 1, so a wider side would snap back to its preset on
+            // release (max+1/2, max+max).
+            const loF = Math.max(minF, pairSum - 1);
+            const hiF = Math.min(pairSum - minF, 1);
             document.body.classList.add('col-resizing');
             const onMove = (ev) => {
                 // Fractions are of availW (as relayoutStrip reads them), so
                 // the gutter follows the cursor 1:1.
                 const dfrac = (ev.clientX - startX) / availW;
-                const nl = Math.max(minF, Math.min(pairSum - minF, startL + dfrac));
-                const nr = pairSum - nl;
+                const nl = Math.max(loF, Math.min(hiF, startL + dfrac));
+                const nr = Math.min(1, pairSum - nl);   // float: never 1 + ulp
                 leftCol.widthFrac = nl;
                 rightCol.widthFrac = nr;
                 const widths = columnPixelWidths(drawn.map(colCurrentFrac), stripW);
