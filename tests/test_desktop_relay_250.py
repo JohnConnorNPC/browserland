@@ -265,6 +265,7 @@ def _run(harness_src, cut, scenarios, start_end=None):
     src = src.replace("__SRC_PATH__", json.dumps(str(rpc.SRC_JS)))
     # #262 review round 1: the rpc world also loads 58's real decideTiled.
     src = src.replace("__SRC58_PATH__", json.dumps(str(rpc.SRC_58)))
+    src = src.replace("__SRC66_PATH__", json.dumps(str(rpc.SRC_66)))
     if start_end:
         src = (src.replace("__START__", json.dumps(start_end[0]))
                   .replace("__END__", json.dumps(start_end[1])))

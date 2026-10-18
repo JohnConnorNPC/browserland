@@ -35,6 +35,7 @@ from webterm.broker import ui
 BROKER_DIR = Path(ui.__file__).resolve().parent
 SRC_JS = BROKER_DIR / "64_js_sessions_poll_control.js"
 SRC_58 = BROKER_DIR / "58_js_layout_mutators.js"
+SRC_66 = BROKER_DIR / "66_js_notices_zorder.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -45,7 +46,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 91
+EXPECTED_ASSERTS = 92
 
 _HARNESS = r"""
 'use strict';
@@ -61,6 +62,13 @@ const c58a = src58.indexOf('function isKnownFloat(key) {');
 const c58b = src58.indexOf('// ---- consume / expel');
 if (c58a < 0 || c58b < 0) throw new Error('58 decideTiled marker missing');
 const slice58 = src58.slice(c58a, c58b);
+// Review round 2 (R10): 66's REAL quiet machinery + bringToFront, so the
+// shipped focus op can be joined to it with no hand call in between.
+const src66 = fs.readFileSync(__SRC66_PATH__, 'utf8');
+const c66a = src66.indexOf('// ---- z-order');
+const c66b = src66.indexOf('function updateTaskbarActive() {');
+if (c66a < 0 || c66b < 0) throw new Error('66 z-order marker missing');
+const slice66 = src66.slice(c66a, c66b);
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -268,6 +276,44 @@ const factory = new Function('env',
     '  wouldTile: _desktopWouldTile };\n' +
     '}\nreturn __exports;\n');
 const api = factory(env);
+// The R10 world: the same stubs, but withoutFocus / clearFocusQuiet /
+// bringToFront are 66's own, every opened window carries a term whose focus()
+// is recorded, and revealAndFocusWindow / attachToStrip end in the real
+// bringToFront the way the page's do.
+const F = { focused: [] };
+const envF = Object.create(env);
+Object.assign(envF, {
+    frontId: null, lastTermId: null,
+    document: { activeElement: null, body: {}, addEventListener: function () {} },
+    requestAnimationFrame: function () {},     // frames never arrive here
+    hostHidden: function () { return false; },
+    scrollColumnIntoView: function () {}, updateTaskbarActive: function () {},
+    requestRelayout: function () {}, floatZIndex: function () { return 1; },
+    openWindow: function (key, sess) {
+        openWindowStub(key, sess);
+        const w = windows.get(key);
+        if (w) {
+            w.term = { focus: function () { F.focused.push(key); } };
+            w.dom = { classList: { contains: function () { return false; } },
+                      style: {}, contains: function () { return false; } };
+        }
+    },
+});
+const z66 = new Function('env',
+    'with (env) {\n' + slice66 + '\n' +
+    'var __exports = { withoutFocus: withoutFocus, clearFocusQuiet: clearFocusQuiet,\n' +
+    '  bringToFront: bringToFront, focusIsQuiet: focusIsQuiet };\n' +
+    '}\nreturn __exports;\n')(envF);
+envF.withoutFocus = z66.withoutFocus;
+envF.clearFocusQuiet = z66.clearFocusQuiet;
+envF.revealAndFocusWindow = function (k) { mut.push('reveal'); z66.bringToFront(k); };
+envF.attachToStrip = function (w) { mut.push('attachToStrip'); w.tiled = true; z66.bringToFront(w.id); };
+const apiF = factory(envF);
+async function driveF(hid, msg) {
+    const ws = mkSock();
+    await apiF.handleDesktopRpc(hid, { ws: ws }, ws, msg);
+    return ws.sent[ws.sent.length - 1];
+}
 const real58 = new Function('env',
     'with (env) {\n' + slice58 + '\n' +
     'var __exports = { decideTiled: decideTiled, isKnownFloat: isKnownFloat };\n' +
@@ -1042,6 +1088,19 @@ function countMut(name) {
     ok(r && r.ok === true && windows.has('local:50') && catchUps.length === 1,
         'R3 a scoped caller\'s op on its own unpolled window is caught up too');
 
+    // Review round 2 (R10): the shipped focus op, joined to the real 66.
+    chips();
+    F.focused = [];
+    r = await driveF('local', { rid: freshRid(), op: 'tile',
+        args: { id: 30, visible: null } });
+    const quietOpen = r && r.ok === true && windows.has('local:30')
+        && F.focused.length === 0 && z66.focusIsQuiet('local:30');
+    r = await driveF('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: null } });
+    ok(quietOpen && r && r.ok === true && F.focused.join() === 'local:30'
+        && envF.lastTermId === 'local:30',
+        'R4 a focus op right after a quiet open of the same window focuses it (real 66)');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1065,7 +1124,8 @@ def scenario_run(tmp_path_factory):
     harness = tmp_path_factory.mktemp("desktop-rpc") / "harness.js"
     harness.write_text(
         _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS)))
-                .replace("__SRC58_PATH__", json.dumps(str(SRC_58))),
+                .replace("__SRC58_PATH__", json.dumps(str(SRC_58)))
+                .replace("__SRC66_PATH__", json.dumps(str(SRC_66))),
         encoding="utf-8")
     proc = subprocess.run([NODE, str(harness)],
                           capture_output=True, text=True, encoding="utf-8",
@@ -1353,6 +1413,8 @@ def test_262_review_round_1(scenario_run):
     _ok(scenario_run, "R1 the focus op releases its window's quiet before it focuses")
     _ok(scenario_run, "R2 focus on a dormant chip gates its whole column, like tile")
     _ok(scenario_run, "R3 a scoped caller's op on its own unpolled window is caught up too")
+    # Review round 2 (R10): the focus op through the REAL 66 quiet code.
+    _ok(scenario_run, "R4 a focus op right after a quiet open of the same window focuses it (real 66)")
 
 
 # ---- the catch-all ---------------------------------------------------------------

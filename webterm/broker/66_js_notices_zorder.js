@@ -70,11 +70,21 @@
         // and again at the release -- but never once focus moved somewhere
         // else (a deliberate blur to <body> inside that short window is
         // undone too: accepted). Synchronous by contract: fn must not await.
+        // Accepted: under main-thread jank the 50 ms timer can release before
+        // the deferred frame lands (worst case one unwanted focus).
         const QUIET_RELEASE_MS = 50;
-        const _quietKeys = new Map();          // key -> pending releases
+        // key -> the Set of scopes holding it quiet. Per SCOPE, not a count:
+        // a scope's release drops only its own token, so a release that
+        // runs after clearFocusQuiet (or a user event) emptied the key can
+        // never cut short a newer scope on the same key.
+        const _quietKeys = new Map();
         function withoutFocus(keys, fn) {
             const held = (keys || []).filter(k => typeof k === 'string');
-            for (const k of held) _quietKeys.set(k, (_quietKeys.get(k) || 0) + 1);
+            const token = {};
+            for (const k of held) {
+                if (!_quietKeys.has(k)) _quietKeys.set(k, new Set());
+                _quietKeys.get(k).add(token);
+            }
             const prev = document.activeElement;
             const giveBack = () => {
                 try {
@@ -91,8 +101,10 @@
                 if (released) return;
                 released = true;
                 for (const k of held) {
-                    const n = (_quietKeys.get(k) || 0) - 1;
-                    if (n > 0) _quietKeys.set(k, n); else _quietKeys.delete(k);
+                    const scopes = _quietKeys.get(k);
+                    if (!scopes) continue;
+                    scopes.delete(token);
+                    if (!scopes.size) _quietKeys.delete(k);
                 }
                 giveBack();
             };
@@ -107,11 +119,15 @@
         function focusIsQuiet(id) {
             return _quietKeys.has(String(id));
         }
+        // Releases every scope holding THIS key now (the focus op asked for
+        // it); other keys, and scopes opened on this key later, keep theirs.
         function clearFocusQuiet(id) {
             _quietKeys.delete(String(id));
         }
         // The user acting INSIDE a quiet window (a click, a key press) asked
-        // for it: release it before its own handlers run (capture phase).
+        // for it: release that window only, before its own handlers run.
+        // Accepted: the capture flag is unpinned, and mousedown is a belt for
+        // a page without pointer events (pointerdown precedes it elsewhere).
         function _releaseQuietAt(ev) {
             if (!_quietKeys.size || !ev || !ev.target) return;
             for (const k of Array.from(_quietKeys.keys())) {

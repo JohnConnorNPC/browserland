@@ -503,6 +503,115 @@ def test_262_chips_are_a_separate_typed_list(tmp_path, monkeypatch):
     assert out["windows"][0]["id"] == "h:5"
 
 
+def test_262_a_row_never_carries_open(tmp_path, monkeypatch):
+    """Review round 2 (R13): the row whitelist stays the pre-#262 one, so a
+    page that still sends a row key `open` gets it dropped."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    _live(app, 5, mcp_mode="readwrite")
+    out = _get_snapshot(app, {"windows": [
+        {"id": 5, "open": False, "tiled": True, "kind": "terminal"}]})
+    assert out["windows"] == [{"id": 5, "title": app.ctx.registry.get(5).title,
+                               "tiled": True, "kind": "terminal"}]
+
+
+def test_262_a_chip_id_must_be_a_real_int(tmp_path, monkeypatch):
+    """Review round 2 (R14): with terminal 1 live, a chip id that is not a
+    real int -- true (which Python treats as 1), "1", 1.5, null -- matches
+    nothing and is dropped; only the int 1 names terminal 1."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    _live(app, 1, mcp_mode="readwrite")
+    out = _get_snapshot(app, {"windows": [], "chips": [
+        {"id": True}, {"id": "1"}, {"id": 1.5}, {"id": None}, {}]})
+    assert out["chips"] == []
+    out = _get_snapshot(app, {"windows": [], "chips": [{"id": True}, {"id": 1}]})
+    assert out["chips"] == [{"id": 1, "title": app.ctx.registry.get(1).title}]
+
+
+_OLD_BROKER_REV = "e022ee8"           # the last broker before #262
+
+
+def test_262_an_old_broker_drops_chips_and_keeps_the_rows(tmp_path):
+    """Review round 2 (R15): a NEW page behind an OLD broker. The pre-#262
+    broker (extracted from git at e022ee8 and run in its own interpreter)
+    answers a snapshot that carries `chips` with the rows unchanged, no
+    `chips` key, and no error."""
+    import shutil
+    import subprocess
+    import sys
+    import tarfile
+    repo = Path(__file__).resolve().parents[1]
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    probe = subprocess.run(["git", "cat-file", "-e", _OLD_BROKER_REV + "^{commit}"],
+                           cwd=repo, capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip(f"{_OLD_BROKER_REV} is not in this clone")
+    tar = tmp_path / "old.tar"
+    subprocess.run(["git", "archive", "-o", str(tar), _OLD_BROKER_REV, "webterm"],
+                   cwd=repo, check=True)
+    old = tmp_path / "old"
+    with tarfile.open(tar) as t:
+        t.extractall(old)
+    script = tmp_path / "probe.py"
+    script.write_text(_OLD_BROKER_PROBE, encoding="utf-8")
+    proc = subprocess.run([sys.executable, "-I", str(script), str(old),
+                           str(tmp_path)], capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["status"] == 200
+    assert "chips" not in result["body"]
+    assert result["body"]["windows"] == result["rows_without_chips"]
+
+
+_OLD_BROKER_PROBE = r"""
+import asyncio, json, sys
+sys.path.insert(0, sys.argv[1])
+from webterm.broker import app as app_mod
+from webterm.broker.registry import WindowEntry
+
+tmp = sys.argv[2]
+cfg = {"state_path": tmp + "/s.json", "mcp_state_path": tmp + "/m.json",
+       "auth_token": "t" * 32, "mcp_enabled": True, "mcp_token": "mcp-tok",
+       "mcp_default_mode": "readwrite", "mcp_allow_desktop": True}
+app = app_mod.create_app(cfg, name="old-broker-262")
+
+
+class WS:
+    def __init__(self, snap):
+        self.snap = snap
+
+    async def send(self, frame):
+        rid = json.loads(frame).get("rid")
+        call = app.ctx.desktop_rpcs.get(rid)
+        if call is not None and not call.future.done():
+            call.future.set_result({"ok": True, "value": self.snap})
+
+    async def close(self, *a, **k):
+        pass
+
+
+for wid in (5, 6):
+    app.ctx.registry._entries[wid] = WindowEntry(wid, 1, "t%d" % wid, 80, 24,
+                                                 WS(None), kind="agent")
+rows = [{"id": 5, "tiled": True, "kind": "terminal"}]
+
+
+def get(snap):
+    app.ctx.control_clients["b"] = {WS(snap)}
+    app.ctx.active_client_id = "b"
+    _, resp = app.test_client.get(
+        "/mcp/desktop", headers={"Authorization": "Bearer mcp-tok"})
+    return resp.status, resp.json
+
+
+status, body = get({"windows": rows, "chips": [{"id": 6, "title": "chip"}]})
+_, plain = get({"windows": rows})
+print(json.dumps({"status": status, "body": body,
+                  "rows_without_chips": plain["windows"]}))
+"""
+
+
 def test_262_chips_follow_the_callers_visibility(tmp_path, monkeypatch):
     """A non-admin keeps only chips it can see (effective mode not off),
     exactly like rows; an admin sees them all."""

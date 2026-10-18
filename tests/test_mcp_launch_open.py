@@ -65,7 +65,7 @@ LA_END = "function layoutRemoveKey(key) {"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 48
+EXPECTED_ASSERTS = 51
 
 _HARNESS = r"""
 'use strict';
@@ -747,6 +747,27 @@ function laReset(quiet) {
     zFlush(); zFlush();
     ok(Z.focused.length === 0 && zDoc.activeElement === zBody,
         'Z13 focus is never given back to an element that left the document');
+    // Review round 2 (R11, R12, N6).
+    zReset();
+    zApi.withoutFocus(['local:1'], function () {});
+    zApi.withoutFocus(['local:2'], function () {});
+    zUser('keydown', 'local:1');          // the user types in window 1 ...
+    ok(zApi.focusIsQuiet('local:1') === false && zApi.focusIsQuiet('local:2') === true,
+        'Z14 a user event releases only the quiet window it hit');
+    zReset();
+    zApi.withoutFocus(['local:1'], function () {});
+    zApi.withoutFocus(['local:2'], function () {});
+    zApi.clearFocusQuiet('local:1');      // a focus op on window 1
+    ok(zApi.focusIsQuiet('local:1') === false && zApi.focusIsQuiet('local:2') === true,
+        'Z15 clearFocusQuiet releases only its own window');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});      // scope A
+    zApi.clearFocusQuiet('local:2');                     // the focus op
+    zFlush();                                            // A's release is a frame away
+    zApi.withoutFocus(['local:2'], function () {});      // a newer scope B
+    zFlush();                                            // A's release runs now
+    ok(zApi.focusIsQuiet('local:2') === true,
+        'Z16 a stale release never cuts short a newer quiet scope on the same window');
 
     // ---- LA: layoutAddColumn keeps the focused column when quiet ----------
     laReset(false);
@@ -920,6 +941,9 @@ def test_an_open_the_user_did_not_ask_for_takes_no_focus(scenario_run):
     _ok(scenario_run, "Z7 focus a moved node dropped to <body> is given back, at once or a frame later")
     _ok(scenario_run, "Z8 focus the user moved elsewhere (or none at all) is never taken back")
     _ok(scenario_run, "Z13 focus is never given back to an element that left the document")
+    _ok(scenario_run, "Z14 a user event releases only the quiet window it hit")
+    _ok(scenario_run, "Z15 clearFocusQuiet releases only its own window")
+    _ok(scenario_run, "Z16 a stale release never cuts short a newer quiet scope on the same window")
 
 
 def test_quiet_never_swallows_a_focus_somebody_asked_for(scenario_run):

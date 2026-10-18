@@ -1093,9 +1093,10 @@ def arrange_window(id: str, op: str, to: str = "", preset: str = "",
     a chip click opens it, and then the op applies; this reopens a window
     the user closed. An op refused for its arguments or the caller's scope
     opens nothing, and `move_column` / `set_width` on a chip that would open
-    floating answer not_tiled without opening it. Only `focus` moves keyboard focus; every other op (and the
-    open it may do) leaves the user's focus where it was. Fails closed when
-    the host does not advertise `allow_desktop` on /mcp/info."""
+    floating answer not_tiled without opening it. Only `focus` moves
+    keyboard focus; every other op (and the open it may do) leaves the
+    user's focus where it was. Fails closed when the host does not
+    advertise `allow_desktop` on /mcp/info."""
     if op not in _ARRANGE_OPS:
         raise BrowserlandError(
             0, "bad_op",
