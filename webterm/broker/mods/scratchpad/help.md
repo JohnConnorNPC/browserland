@@ -13,7 +13,7 @@ Each note is a tab across the top of the window:
 - **New tab** — click the **+** in the toolbar. A fresh **Notes** tab opens (up to 20 tabs).
 - **Switch** — click a tab.
 - **Rename** — double-click a tab's name, type the new name, and press **Enter** (or **Escape** to cancel).
-- **Close** — click the **×** on a tab. The last remaining tab cannot be closed, so there is always at least one note. Closing the Scratchpad window itself does not delete any note, which stays on the broker; there is no Delete item for the window.
+- **Close** — click the **×** on a tab. The last remaining tab cannot be closed, so there is always at least one note. Closing the Scratchpad window itself does not delete any note, which stays on the broker; there is no Delete item for the window. The Scratchpad has no action that deletes every note at once: close the tabs one by one, and clear the last tab's text.
 
 Which tab is active is remembered per browser, so it is not counted as a content change and does not add a revision.
 
