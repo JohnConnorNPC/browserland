@@ -1589,6 +1589,15 @@
                     if (fk) bringToFront(fk);
                 }
             }
+            // #258: the number keys count PAGER entries (a stack is one);
+            // a key that lands on a stack opens its list. With no stacks
+            // entry n is workspace n, exactly as before.
+            function goToEntry(n) {
+                const e = wsPagerEntries()[n];
+                if (!e) return;
+                if (e.stack) openStackList(e.stack.id);
+                else switchWorkspace(e.flat);
+            }
             function addWorkspace() {
                 return addWorkspaceNamed(null);
             }
@@ -1846,15 +1855,15 @@
                     { id: 'workspace-next',  label: 'Next workspace',
                       run: () => switchWorkspace(activeWorkspaceIndex() + 1) },
                     { id: 'workspace-1',     label: 'Go to workspace 1',
-                      run: () => switchWorkspace(0) },
+                      run: () => goToEntry(0) },
                     { id: 'workspace-2',     label: 'Go to workspace 2',
-                      run: () => switchWorkspace(1) },
+                      run: () => goToEntry(1) },
                     { id: 'workspace-3',     label: 'Go to workspace 3',
-                      run: () => switchWorkspace(2) },
+                      run: () => goToEntry(2) },
                     { id: 'workspace-4',     label: 'Go to workspace 4',
-                      run: () => switchWorkspace(3) },
+                      run: () => goToEntry(3) },
                     { id: 'workspace-5',     label: 'Go to workspace 5',
-                      run: () => switchWorkspace(4) },
+                      run: () => goToEntry(4) },
                     // #258: NEW ids, unbound by default (no DEFAULT_KEYBINDINGS
                     // entry). They move the ACTIVE workspace -- inside its
                     // stack when it is in one.

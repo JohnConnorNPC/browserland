@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 87
+EXPECTED_ASSERTS = 90
 
 _PRELUDE = r"""
 'use strict';
@@ -1232,6 +1232,37 @@ async function stackMenu() {
 }
 """
 
+_SCENARIOS += r"""
+async function numberKeys() {
+    // ---- KB: number keys count pager entries; next/prev reach every member --
+    function seed(active) {
+        return { activeId: active || 'W1', stacks: [{ id: 'S1' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 },
+            { id: 'W5', focusedCol: 0 }] };
+    }
+    function press(w, id) { const a = (w.keys || {})[id]; if (a) a.run(); return !!a; }
+    let w = buildWorld(seed());
+    const k3 = press(w, 'workspace-3');
+    ok(k3 && w.st().activeId === 'W4', 'KB1 Go to workspace 3 goes to the third pager entry (after a stack)');
+
+    w = buildWorld(seed());
+    const seen = [];
+    for (let i = 0; i < 4; i++) { press(w, 'workspace-next'); seen.push(w.st().activeId); }
+    for (let i = 0; i < 2; i++) { press(w, 'workspace-prev'); seen.push(w.st().activeId); }
+    ok(J(seen) === J(['W2', 'W3', 'W4', 'W5', 'W4', 'W3']),
+        'KB2 next/previous step through every workspace, stack members included');
+
+    w = buildWorld(seed('W5'));
+    const s0 = w.spies.save, p0 = w.pops.length;
+    const k2 = press(w, 'workspace-2');
+    const pop = w.pops[w.pops.length - 1];
+    ok(k2 && w.pops.length === p0 + 1 && pop.open && pop.node.classList.contains('ws-stack-list')
+        && pop.anchor === w.stackDot('S1') && w.st().activeId === 'W5' && w.spies.save === s0,
+        'KB3 a number key that lands on a stack opens its list and switches nothing');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1250,6 +1281,7 @@ _EPILOGUE = r"""
     await stackDrag();
     await stackListKeys();
     await stackMenu();
+    await numberKeys();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1464,6 +1496,12 @@ def test_stack_menu(scenario_run):
     _ok(scenario_run, "SM4 Rename stack… names the stack (trimmed); a blank name clears it")
     _ok(scenario_run, "SM5 Colour… on a stack colours the stack, not its members")
     _ok(scenario_run, "MV3b Move right on a stack moves the whole stack past the next entry")
+
+
+def test_number_keys_count_pager_entries(scenario_run):
+    _ok(scenario_run, "KB1 Go to workspace 3 goes to the third pager entry (after a stack)")
+    _ok(scenario_run, "KB2 next/previous step through every workspace, stack members included")
+    _ok(scenario_run, "KB3 a number key that lands on a stack opens its list and switches nothing")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
