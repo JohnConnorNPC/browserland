@@ -14,8 +14,8 @@ broker endpoint contract and error reference.
 
 ## Install
 
-The MCP SDK requires **Python ≥ 3.10** (webterm core stays ≥ 3.9), so it lives
-in an optional extra:
+Like the rest of webterm it needs **Python ≥ 3.10**; it lives in an optional
+extra so the core install stays websockets + sanic.
 
 ```bash
 pip install -e ".[mcp]"
@@ -73,8 +73,10 @@ Several MCP clients often share one broker and one token: for example a
 Claude Code session per project folder, each with its own `.mcp.json`. A
 **scope** keeps them apart. A server started with a scope sees and drives
 **only** the windows tagged with that scope. A window gets its tag when this
-server launches it (`launch_terminal`), or through the broker's browser-realm
-`POST /session/mcp` (see the Technical Reference).
+server launches it (`launch_terminal`), through `set_window(scope=…)` on a
+window this server launched or on an admin host (`POST /mcp/window`, see
+**Launch handles**), or through the broker's browser-realm `POST /session/mcp`
+(see the Technical Reference).
 
 ```bash
 browserland-mcp --scope projA            # or BROWSERLAND_MCP_SCOPE=projA
@@ -84,7 +86,8 @@ browserland-mcp --scope projA            # or BROWSERLAND_MCP_SCOPE=projA
   letter or digit. An invalid one exits with status 2 before the server starts.
 - `--scope` beats `$BROWSERLAND_MCP_SCOPE`. An **empty** value means
   **unscoped**. An unscoped server keeps the old view: every window its access
-  mode allows, whatever its tag. It is the admin view.
+  mode allows, whatever its tag (`off` windows stay hidden). Seeing `off`
+  windows as well takes the admin credential (below).
 - Each `--hosts` entry may carry its own `"scope"`. An empty or absent one
   inherits `--scope`:
 
@@ -142,16 +145,21 @@ writes the host's `admin_token` for you.)
   host's `/mcp/info` (concurrently, one bounded deadline): the admin-only
   tools (`set_mcp_knobs`, `workspaces`) are registered only when **at least
   one** host answers `admin: true`. A broker without the key, an unreachable
-  host, or a wrong token all read as not-admin — fail closed.
+  host, or a wrong token all read as not-admin — fail closed. A wrong token
+  on a broker that has one configured also makes every other call to that
+  host fail with `403 admin_required` (see **Rotation**).
 - **Per-host refusals.** An admin tool called against a host whose probe did
   not confirm admin refuses **locally** (`admin_required`, naming the host)
   and sends nothing. FastMCP cannot unregister tools, so a later
   re-`configure()` with fewer admin hosts leaves the locally-refusing tools
   listed — in production `configure()` runs once, at startup.
-- **Rotation.** If you rotate the admin token in the Control Panel, a running
-  server's admin calls fail loudly with a `403 admin_required` error naming
-  the host and the remedy (refresh this server's config and restart it). It
-  never silently retries without the header, and never degrades to non-admin.
+- **Rotation.** If you rotate the admin token in the Control Panel, every call
+  this server makes to that host fails loudly with `403 admin_required` — not
+  only the admin tools: the server sends the header on every request, and the
+  broker refuses a present-but-wrong one on every `/mcp/*` route. The error
+  carries the remedy (refresh this server's config and restart it);
+  `set_mcp_knobs` also names the host. It never silently retries without the
+  header, and never degrades to non-admin.
 - **Known limit.** An agent running as the same OS user as the admin agent can
   read the admin agent's `.mcp.json`, and with it the admin token. The admin
   token separates well-behaved agents; it is not a sandbox.
@@ -299,12 +307,13 @@ admin-only ones appear only when the startup probe confirmed an admin host).
 
 Each tool maps to a broker endpoint and returns its JSON. Window `id`s are
 namespaced `"<host>:<int>"` strings (see **Multi-host** above); the tools route
-on the host prefix:
+on the host prefix. Within 1.x, tool names stay and their arguments only gain
+optional fields ([What 1.0 promises](../../wiki/Upgrading.md#what-10-promises)).
 
 | Tool | Endpoint | Notes |
 |---|---|---|
 | `mcp_info(host?)` | `GET /mcp/info` | the broker's MCP flags (`allow_launch`, `terminals` #253, `default_mode`, `allow_desktop` #244, `window_edit` #243), `admin` (#245: whether this host's admin credential matched), broker `version` + `scope` (the scope this server declared, as the broker saw it). Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
-| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), `pace_ms` (the default `send_keys` pacing, `0` = single-burst) and `scope` (its tag, `null` when untagged). Windows this server holds launch handles for (#243) are marked `owned: true`. A scoped host lists only its own windows (see **Scopes**); one that does not confirm the scope, or lists a window with another tag, lands in `errors` with `scope_unsupported` |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), `pace_ms` (the default `send_keys` pacing, `0` = single-burst), `controlled` (#238: a person is driving it from outside; MCP input is not gated by it), `pyte` (#134: `false` → `read_screen` uses the dependency-free fallback) and `scope` (its tag, `null` when untagged). Windows this server holds launch handles for (#243) are marked `owned: true`. A scoped host lists only its own windows (see **Scopes**); one that does not confirm the scope, or lists a window with another tag, lands in `errors` with `scope_unsupported` |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, wait_for_idle?, timeout_ms?, since?, attrs?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`, plus `stable_hash` (the same digest with the hardware-cursor cell masked — a cursor blink in place doesn't change it, a move does) and `idle_ms` (best-effort ms since the last PTY output; absent from older agents); `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame; `wait_for_idle=<ms>` holds until the screen has stopped changing for that many ms (measured on `stable_hash`) and returns `matched` (#135) — pass a `timeout_ms` comfortably larger than the idle window, and note a perpetually-animating app (Dwarf Fortress) never settles. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false`. `attrs=true` adds `attr_runs` — the styled fg/bg/reverse/bold/underscore cell runs — so a menu selection the plain text drops (marked by color, reverse-video, bold, or underline alone) is visible (#128, #136) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
@@ -317,7 +326,7 @@ on the host prefix:
 | `set_mcp_knobs(host, default_mode?, allow_launch?, allow_desktop?)` | `POST /mcp/knobs` | **admin only** (registered when the startup probe confirmed an admin host; refused locally for every other host). Sets the broker's default window mode, launch gate and desktop relay switch (`allow_desktop`) — never the tokens or `enabled`. A successful call re-reads `/mcp/info`, so a knob that turns a capability on is visible to the next fail-closed tool call |
 | `get_desktop(host?)` | `GET /mcp/desktop` | the lease-holding browser's desktop snapshot (window layout, viewport, workspaces). Fails closed (`desktop_unsupported`, no request) when the host does not advertise `allow_desktop`. Without `host`: one entry per configured host — a snapshot, or `{"ok": false, "error": …}` for a host whose relay is off or has no active browser |
 | `arrange_window(id, op, to?, preset?, x?, y?, w?, h?, target?, axis?)` | `POST /mcp/desktop` | op = `focus` / `move_column` (`to` = left, right or a column index — an index expels a shared window to its own column) / `set_width` (`preset`) / `tile` / `float` / `set_geometry` (`x,y,w,h`; the answer reports the box **as applied**) / `tab_into` (`target`) / `split` (`target`, `axis`). `target` must be a window id on the same host. Fails closed without `allow_desktop` |
-| `workspaces(host, op, …)` | `POST /mcp/desktop` | **admin only** (same registration as `set_mcp_knobs`). op = `list` / `add` (`name?`) / `rename` (`index`,`name`) / `remove` (`index`, `force?` — remove-only; `force` bypasses `needs_confirm` and is refused on any other op) / `switch` (`index`) / `send-window` (`win`, `target`). Fails closed without `allow_desktop`; a non-home lease holder answers `not_home` |
+| `workspaces(host, op, …)` | `POST /mcp/desktop` | **admin only** (same registration as `set_mcp_knobs`). op = `list` (each workspace's `color` and `stack`, the `stacks` and the `palette`) / `add` (`name?`) / `rename` (`index` or `stack`, `name`) / `remove` (`index`, `force?` — remove-only; `force` bypasses `needs_confirm` and is refused on any other op) / `switch` (`index`) / `send-window` (`win`, `target`) / `move` (`index` or `stack`, `direction` = `left`/`right`) / `color` (`index` or `stack`, `color` = a `palette` colour or `none`) / `stack` (`index`, `target`) / `unstack` (`index`). `direction`, `color` and `stack` are refused locally on any op not listed with them, like `force`. Fails closed without `allow_desktop`; a non-home lease holder answers `not_home` |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
 …) surface as a readable tool error (a `BrowserlandError`), not a raw stack
@@ -369,8 +378,9 @@ burst**. A frame-polling raw-input TUI — one that reads input once per render
 frame, like Dwarf Fortress — drops keys that arrive faster than it polls, so a
 burst of arrows/spaces can advance only partially. Pass `delay_ms` (per token,
 capped 1000) to write each token in its own `POST /mcp/input` with that pause
-between them, so every keypress lands on a separate frame. The default `0` keeps
-the single-burst write (back-compat), pacing only applies with more than one
+between them, so every keypress lands on a separate frame. Leaving `delay_ms` out
+keeps the single-burst write (back-compat) unless the terminal has a `set_pace`
+default (below); an explicit `0` always bursts. Pacing only applies with more than one
 token, and DECCKM re-encoding (SS3 arrows) is preserved per token. An invalid
 token still raises before any byte is sent.
 
