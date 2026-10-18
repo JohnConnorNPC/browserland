@@ -1,3 +1,5 @@
+> **Retired (#177).** This mod no longer ships; this page is kept for reference beside its code.
+
 Agent docs is the tabbed editor for a folder's **`AGENTS.md`** and **`CLAUDE.md`** — the instruction files an agent reads before working in that directory. It opens from the **📋** button on every terminal's title bar, pointed at that terminal's working directory and host, so you can read and edit a project's agent instructions without leaving the desktop.
 
 The feature ships as its own mod that **requires the Text editor mod**: it reuses the editor's window, tabs, and save machinery. If you disable the Text editor mod, Agent docs is switched off with it (the Mods pane shows it as `needs: editor`) and the 📋 buttons disappear; re-enable the editor and they return. Turn Agent docs itself on or off from Control Panel → Mods.
