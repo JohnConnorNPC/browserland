@@ -20,7 +20,7 @@ Every terminal window has a **robot button** that sets that window's MCP access 
 
 | Mode | What an agent can do |
 |---|---|
-| `off` | Nothing — the window is hidden from MCP entirely |
+| `off` | Nothing — the window is hidden from MCP (only an agent holding the admin credential still lists it) |
 | `read` | Observe only — read the current screen |
 | `readwrite` | Observe **and** type into the terminal (`send_input`) — shown as "Read-write" in the UI |
 
@@ -77,7 +77,7 @@ Sometimes you want one designated agent to manage the whole desktop on your beha
 Several MCP clients often share one broker: for example a "manager" and a "worker" Claude Code session in one project folder, and another pair in a second folder. Each folder's `.mcp.json` starts its own MCP server. A **scope** keeps the pairs apart: a server that declares scope `projA` sees and drives only the windows tagged `projA`.
 
 - **What a scope is.** A name of 1–64 characters from `A-Z a-z 0-9 . _ -`, starting with a letter or digit. A window carries at most one.
-- **Who sees what.** A client that declares a scope sees only the windows tagged with it, each still only as far as its access mode allows. A client that declares **no** scope sees every window its mode allows, tagged or not: that is the admin view, and any `.mcp.json` without a scope gets it. An untagged window is hidden from every scoped client.
+- **Who sees what.** A client that declares a scope sees only the windows tagged with it, each still only as far as its access mode allows. A client that declares **no** scope sees every window its mode allows, tagged or not, and any `.mcp.json` without a scope gets that view; `off` windows stay hidden from it. The full admin view — `off` windows and every scope included — takes the admin credential (see **The admin credential**). An untagged window is hidden from every scoped client.
 - **Where a client's scope is set.** On the MCP server: `--scope`, or the `BROWSERLAND_MCP_SCOPE` environment variable (the flag wins, and an empty value means no scope), or a `"scope"` on one host of `BROWSERLAND_MCP_HOSTS`. The easiest way is the **Copy .mcp.json** button (below).
 - **How a window gets its tag.** A window launched by a scoped client (`launch_terminal`) is tagged before it starts and comes up in **Read-write** unless the launch asks for another `mode`, so its launcher can drive it at once. A window you started yourself has no tag: give it one from its robot button (type a scope in the **Scope** field and press Enter; clicking away from the popover or choosing a mode saves it too, and only Escape discards it; an empty field removes the tag, and a value that is not a valid scope when the popover closes is dropped without a notice) or from its title-bar right-click menu (**MCP scope**, see [[Context-Menus]]). A scoped client cannot see or find an untagged window until you tag it; that is by design. Both controls appear only on a broker that supports scopes.
 - **Seeing it.** A tagged window's taskbar button shows the scope as a small blue badge, its tooltip names it (`scope <name>`), and so does the robot button's tooltip.
@@ -97,7 +97,7 @@ Several MCP clients often share one broker: for example a "manager" and a "worke
 
 ## Tools overview
 
-An MCP client sees these tools, each mapping to a broker endpoint:
+An MCP client sees these tools, each mapping to a broker endpoint. Within 1.x, tool names stay and their arguments only gain optional fields ([[Upgrading#what-10-promises]]).
 
 | Tool | What it does |
 |---|---|
@@ -110,7 +110,7 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `set_pace(id, pace_ms)` | Sets a per-terminal default inter-key pacing for `send_keys` (window must be `readwrite`; ephemeral, `0` disables, capped at 1000 ms) |
 | `reset_terminal(id)` | Wipes Browserland's screen buffer for the window so the next `read_screen` starts clean (window must be `readwrite`; does not touch the running app) |
 | `flush_input(id)` | Discards keystrokes queued to the app but not yet consumed (window must be `readwrite`; a no-op on a Windows/ConPTY agent) |
-| `launch_terminal(profile?, cols, rows, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled). Every launch comes up in `readwrite`, or in `mode` when given — scoped or not; a scoped launch is tagged with its scope; the answer includes a launch `handle` (see **Launch handles**) |
+| `launch_terminal(profile?, cols?, rows?, title?, cwd?, host?, mode?)` | Launches a new terminal (broker must have `allow_launch` enabled; on a `terminals: false` broker it is refused with `terminals_disabled`). Every launch comes up in `readwrite`, or in `mode` when given — scoped or not; a scoped launch is tagged with its scope; the answer includes a launch `handle` (see **Launch handles**) |
 | `set_window(id, scope?, mode?, clear_scope?, clear_mode?)` | Changes the scope and/or MCP mode of a window this server launched (`owned: true`), or — on a host with an admin credential — of any window. Keep / set / clear per field: a value sets it, a `clear_*` flag resets it, an omitted field is left alone |
 | `get_desktop(host?)` | Reads a browser desktop: every window's layout, the viewport, the workspaces when the mod is on. Needs `allow_desktop`; without `host`, one snapshot (or error entry) per configured host |
 | `arrange_window(id, op, …)` | Focus, move column, set width, tile/float, set floating geometry, tab into, split — on the lease-holding browser. Needs `allow_desktop`; a non-admin may arrange only windows it can see |
