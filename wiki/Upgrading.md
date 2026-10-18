@@ -91,7 +91,7 @@ Nothing, on either path:
   **non-destructive** — no column is dropped even if the mod never loads — so a
   browser that migrates first cannot damage a peer that has not yet.
 - **Turning the mod off.** Every column from every workspace appears together
-  on one desktop; the pager, the seven workspace shortcuts and the
+  on one desktop; the pager, the nine workspace shortcuts and the
   workspace menu items go away. Your grouping is kept, not deleted: turn it back
   on and the workspaces return exactly as they were. The same is true of pinning
   it off broker-wide (Control Panel -> Mods on this broker).
