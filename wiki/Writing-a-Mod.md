@@ -2157,10 +2157,12 @@ arbitrary input type onto the page. `result` resolves to an object of
 on this surface at all — not a flag, not an option — which is the whole point:
 one mod can never dismiss another mod's prompt. A second `open()` while one is
 on screen waits its turn and is shown when the first settles. Core's own
-`openDialog` is a singleton that *cancels* whatever is live, and mods that
-prompt through it have to carry single-flight flags (`mods/host-registry`'s
-`_encBusy`) to stop themselves silently dismissing their own first prompt.
-That workaround class is what this surface removes.
+`openDialog` is a singleton that *cancels* whatever is live, so a mod that
+prompts through it has to keep its own prompts from overlapping, or it
+silently dismisses its own first prompt. That workaround class is what this
+surface removes. (`mods/host-registry`'s `_registryActionBusy` flag looks like
+one and is not: it serialises a whole registry action, a wider window than a
+dialog on screen, so this queue does not replace it.)
 
 **The named limit: core still wins.** `openDialog` is unmodified, so a *core*
 dialog still cancels whatever is live, including a mod's — and that mod's
