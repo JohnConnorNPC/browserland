@@ -1910,8 +1910,8 @@ function selfHostId() {
 These are members of the `info` bag `ctx.windows.onTerminalCreate` hands you.
 They are the **sanctioned replacement for monkey-patching an xterm instance**:
 before them, a mod that wanted to see terminal traffic replaced `term.write` by
-assignment, a scheme whose own comment in `mods/recorder/recorder.js` admits
-two patchers cannot coexist.
+assignment, a scheme whose own comment in `mods/recorder/recorder.js` admitted
+two patchers cannot coexist. Recorder now captures through these taps (#218).
 
 ```js
 ctx.windows.onTerminalCreate(function (info) {
@@ -1996,13 +1996,13 @@ armed at the moment of registration. `win.cleanups` fires only on window
 *close*, so the teardown half is what stops a disabled mod from leaving taps
 running on every terminal that is still open.
 
-**Both mechanisms coexist for one release, deliberately.** Core hooks its **own
-call sites** and nothing here touches `term.*` by assignment — `onModesChanged`
-is a subscription to xterm's public `onWriteParsed`, `onResize` to its public
-resize event. That is a compatibility requirement, not taste: recorder checks
-"is `term.write` still the function I installed" before restoring it, and a
-core wrapper on the instance would make that check false and corrupt its
-restore path. One consequence worth stating: a tap never sees anything a mod
+**Core never patches the instance.** Core hooks its **own call sites** and
+nothing here touches `term.*` by assignment — `onModesChanged` is a
+subscription to xterm's public `onWriteParsed`, `onResize` to its public resize
+event. That kept the old patching scheme working while recorder still used it:
+recorder checked "is `term.write` still the function I installed" before
+restoring it, and a core wrapper on the instance would have made that check
+false. One consequence worth stating: a tap never sees anything a mod
 writes straight to `win.term` (recorder's own playback included), because that
 is not a core call site. `docs-terminal-funnels.md` enumerates the boundary and
 its named limits.
