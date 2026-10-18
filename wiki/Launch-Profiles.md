@@ -80,6 +80,11 @@ profiles section says *This broker hosts no terminals (terminals: false), so
 its launch profiles cannot be edited here.* `GET /profiles` and
 `GET /profiles/config` still answer, so other pages can see what it offers.
 
+**A host reached *from server*** has no settings on its tab here, so its
+Launch profiles section is empty and **Add profile** / **Detect…** are
+disabled. Edit its profiles from that broker's own page, or from a browser
+that adds it directly (see [[Hosts-and-Multi-Browser]]).
+
 ## Security model
 
 Editing profiles means defining commands the host will run, so the editor is
