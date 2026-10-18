@@ -742,7 +742,8 @@ parse a number out of it.
   ```js
   { appKind, factory(appData) -> win, serialize(win) -> record|null,
     restore?(record), retainOnClose?(record) -> bool,
-    menu?: { label, launch(), iconKey?, iconGlyph?, closedItems?() } }
+    menu?: { label, launch(), iconKey?, iconGlyph?, closedItems?() },
+    deleteLabel?, deleteMessage? }
   ```
 
   It is the same registry core's built-ins use, so a mod kind is a first-class
@@ -751,6 +752,20 @@ parse a number out of it.
   optional `restore` is called **directly**, so it does *not* get
   `openAppWindow`'s dedup-by-id — it must check `windows.get(record.id)` itself,
   because a lease-loss rebuild re-runs it.
+
+  **The Delete item.** `deleteLabel` is an opt-in, non-empty string naming what
+  the window holds; setting it gives the window's context menu a
+  `Delete <deleteLabel>` item (`Delete note`, `Delete file`). The item asks
+  first, then closes the window and removes its saved record, whatever
+  `retainOnClose` would have kept. A kind without `deleteLabel` gets no Delete
+  item, so × Close is its only way out. `deleteMessage` is an optional
+  non-empty string for that confirm; unset, it reads
+  `Delete this <deleteLabel> permanently? Its saved content is removed.`
+  Set it when that is not what your Delete does. Registration throws
+  on an empty or non-string value of either, and on a `deleteMessage` without
+  a `deleteLabel`. The shipped users are `mods/sticky/` (`deleteLabel: 'note'`)
+  and `mods/editor/` (`deleteLabel: 'file'`, with a `deleteMessage` saying the
+  file on disk is not touched).
 
   **The launcher icon.** `menu.iconKey` names an entry in core's `APP_ICON_SVG`
   table, which is **closed** — a key core does not ship resolves to nothing.
