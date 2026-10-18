@@ -160,8 +160,11 @@ Field by field:
 - **`version`, `title`, `description`** — catalog text. `title` falls back to
   the id. These are what another broker's Control Panel shows when it edits this
   broker's mod pins, so write `description` for an operator, not for yourself.
-- **`ctxVersion`** — informational in `mod.json`. The one that *acts* is the
-  number in `registerMod`: a mismatch with the loader's
+- **`ctxVersion`** — informational in `mod.json`. The install validator does
+  check an installed mod's copy: absent, it is stored as `1`, and a value that
+  is not an integer is refused (`bad_manifest_field`, "ctxVersion must be an
+  int"). Neither the shipped nor the installed copy is what the loader checks.
+  The one that *acts* is the number in `registerMod`: a mismatch with the loader's
   `window.__mods.ctxVersion` makes `initMod` refuse the mod outright, and
   omitting it means "pin nothing". The contract is at `1`, and every capability
   added to `ctx` since has been additive — so **feature-detect**
@@ -192,9 +195,10 @@ Field by field:
   §11.5.
 - **`help`** — `slug` / `label` / `order` / `icon` for the in-app Help section
   (§10). All optional; slug defaults to the mod id, label to `title`, order to a
-  computed value after the wiki pages.
+  computed value after the wiki pages. An installed mod may send `slug`, but
+  the validator drops it: an installed mod's section slug is always its id.
 - **`entry`** — **inert.** Every shipped manifest declares it, and the test suite
-  pins its value for each one, but **no runtime code reads it.** What actually
+  pins its value for most of them, but **no runtime code reads it.** What actually
   loads is `ui._MODS`, an explicit list of `mods/<id>/<file>.js` paths. Editing
   `entry` changes nothing. (The `editor` mod ships *two* scripts, `codemirror.js` and
   `editor.js`, which is exactly the case a single `entry` cannot express.)
@@ -208,8 +212,13 @@ Field by field:
   install validator (`unknown_manifest_key`), so a typo is loud rather than
   silent.
 
-Note what is *not* in `mod.json`: **`tiers`**. It lives only in the
-`registerMod` call, and `ui.mod_catalog()` deliberately does not report it.
+Note what is *not* in a shipped `mod.json`: **`tiers`**. For a shipped mod it
+lives only in the `registerMod` call, and `ui.mod_catalog()` deliberately does
+not report it. An installed mod's manifest may carry `tiers` (§11.5's example
+does): the validator accepts at most 8 non-empty strings of up to 32
+characters each, and the token-gated `GET /mods/installed` reports them (the
+`/info` catalog does not). As everywhere, they are declared, not enforced
+(§5).
 
 ---
 
