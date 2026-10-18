@@ -801,9 +801,10 @@ parse a number out of it.
 
 - **`ctx.registerHelpCards(cards)`** — contribute typed Help cards. **Never raw
   HTML**: `{ slug, section, title, body:[block], keys?, search? }` where
-  `block = {t:'p'|'bullet'|'sub', spans:[span]}` and
-  `span = {t:'text'|'strong'|'code'|'kbd', v:String}`. Unknown types degrade to
-  text; values are coerced to `String`. Removed on teardown, and an open Help
+  `block = {t:'p'|'bullet'|'sub'|'pre', spans:[span]}` and
+  `span = {t:'text'|'strong'|'code'|'kbd', v:String}`. An unknown block type
+  degrades to `p` and an unknown span type to `text`; values are coerced to
+  `String`, and a card with no `title` is dropped. Removed on teardown, and an open Help
   window re-renders.
 
 ### App windows: `ctx.windows.createAppWindow` (#194)
