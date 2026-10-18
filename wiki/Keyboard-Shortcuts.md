@@ -47,6 +47,8 @@ The table below lists every bindable action and its **default** binding. Rebind 
 | Go to workspace 3 | `Ctrl+Alt+3` |
 | Go to workspace 4 | `Ctrl+Alt+4` |
 | Go to workspace 5 | `Ctrl+Alt+5` |
+| Move workspace left | *(unbound by default)* |
+| Move workspace right | *(unbound by default)* |
 | New terminal | `Ctrl+Alt+Enter` |
 | Toggle tiling mode | `Ctrl+Alt+t` |
 | Close focused window | `Ctrl+Alt+w` |
@@ -69,7 +71,7 @@ Focus column left/right and move column left/right shift your focus and your col
 
 ### Workspaces
 
-Previous/next workspace step through your virtual desktops; the "Go to workspace 1–5" actions jump straight to one. See [[Workspaces]] for the pager and sending windows between desktops.
+Previous/next workspace step through your virtual desktops; the "Go to workspace 1–5" actions jump straight to one. Move workspace left/right move the workspace you are on one place in the pager (within its stack, if it is in one); both are unbound by default. See [[Workspaces]] for the pager and sending windows between desktops.
 
 These seven come from the **Workspaces** mod (enabled by default), so they leave this list if you turn it off — and your bindings for them come back untouched when you turn it back on.
 

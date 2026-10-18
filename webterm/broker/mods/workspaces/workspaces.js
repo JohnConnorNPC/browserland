@@ -130,7 +130,7 @@
                 // collapses every workspace onto one desktop, drops the taskbar
                 // badges and dimming, removes Send to workspace / On all
                 // workspaces from the title-bar menus, unmasks floating windows
-                // that were hiding, and delists the seven shortcuts. "Disable
+                // that were hiding, and delists the workspace shortcuts. "Disable
                 // the mod" and "hide the pager" are genuinely different asks.
                 //
                 // Hide-prefixed and default-off to match hideTaskbarOtherWs: an
@@ -682,6 +682,53 @@
                 applyTaskbarWorkspace();
                 updateTaskbarActive();
                 return { removed: true };
+            }
+            // ---- moving workspaces (#258) ---------------------------------
+            // An entry is keyed 'w:<id>' (a plain workspace) or 's:<id>' (a
+            // whole stack). Each call re-acquires the store and re-locates
+            // its keys at RUN time: a drag or a menu can sit across a poll
+            // adopt. Order is the list order, so a move is an in-place splice.
+            // [start, end) of a CURRENT pager entry's members, else null (a
+            // stacked workspace is not an entry of its own).
+            function wsBlock(list, key) {
+                const id = String(key).slice(2);
+                if (String(key).indexOf('s:') === 0) {
+                    const a = list.findIndex(function (w) { return w.stack === id; });
+                    if (a < 0) return null;
+                    let b = a;
+                    while (b < list.length && list[b].stack === id) b++;
+                    return [a, b];
+                }
+                const i = list.findIndex(function (w) { return w.id === id; });
+                return (i >= 0 && !list[i].stack) ? [i, i + 1] : null;
+            }
+            function wsMoved() {
+                savePrefs();
+                renderWorkspaces();
+                applyTaskbarWorkspace();           // badges carry the numbers
+            }
+            // Put entry srcKey before/after entry dstKey. False (and no save)
+            // when either is not a current entry or nothing would change.
+            function moveEntryTo(srcKey, dstKey, after) {
+                const st = wsStore();
+                const was = st.list.map(function (w) { return w.id; }).join('\n');
+                if (srcKey === dstKey || !wsBlock(st.list, srcKey)
+                    || !wsBlock(st.list, dstKey)) return false;
+                const src = wsBlock(st.list, srcKey);
+                const moved = st.list.splice(src[0], src[1] - src[0]);
+                const dst = wsBlock(st.list, dstKey);
+                st.list.splice(after ? dst[1] : dst[0], 0, ...moved);
+                if (st.list.map(function (w) { return w.id; }).join('\n') === was) return false;
+                wsMoved();
+                return true;
+            }
+            // One step (dir -1 / +1): a pager entry passes its neighbouring
+            // ENTRY (a plain workspace jumps a whole stack).
+            function moveEntry(key, dir) {
+                const es = wsPagerEntries();
+                const p = es.findIndex(function (e) { return e.key === key; });
+                if (p < 0 || p + dir < 0 || p + dir >= es.length) return false;
+                return moveEntryTo(key, es[p + dir].key, dir > 0);
             }
             async function renameWorkspace(i) {
                 const ws = wsList()[i];
@@ -1451,7 +1498,8 @@
                     }
                     return items;
                 });
-                // The seven shortcuts. Their ids are VERBATIM the pre-#148 ones:
+                // The seven shortcuts (plus #258's two unbound moves). Their
+                // ids are VERBATIM the pre-#148 ones:
                 // user rebindings are stored by id, and DEFAULT_KEYBINDINGS (54)
                 // still carries the same defaults, so nothing about a user's
                 // keyboard changes when this becomes a mod.
@@ -1470,6 +1518,13 @@
                       run: () => switchWorkspace(3) },
                     { id: 'workspace-5',     label: 'Go to workspace 5',
                       run: () => switchWorkspace(4) },
+                    // #258: NEW ids, unbound by default (no DEFAULT_KEYBINDINGS
+                    // entry). They move the ACTIVE workspace -- inside its
+                    // stack when it is in one.
+                    { id: 'workspace-move-left', label: 'Move workspace left',
+                      run: () => moveEntry('w:' + activeWorkspaceId(), -1) },
+                    { id: 'workspace-move-right', label: 'Move workspace right',
+                      run: () => moveEntry('w:' + activeWorkspaceId(), 1) },
                 ]);
 
                 // ---- MCP desktop commands (#244) --------------------------

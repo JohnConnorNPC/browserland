@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 32
+EXPECTED_ASSERTS = 37
 
 _PRELUDE = r"""
 'use strict';
@@ -641,6 +641,53 @@ async function signature() {
 }
 """
 
+_SCENARIOS += r"""
+async function moving() {
+    // ---- MV / KM: moving workspaces (driven through the two move actions) --
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    function key(w, id) { const k = w.keys || {}; return k[id] || null; }
+    function press(w, id) { const a = key(w, id); if (a) a.run(); }
+    function press(w, id) { const a = key(w, id); if (a) a.run(); }
+    function seed(active) {
+        return { activeId: active, stacks: [{ id: 'S1' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 1, stack: 'S1' },
+            { id: 'W3', focusedCol: 2, stack: 'S1' }, { id: 'W4', focusedCol: 3 },
+            { id: 'W5', focusedCol: 4 }] };
+    }
+    let w = buildWorld({ activeId: 'W1' });
+    ok(!!key(w, 'workspace-move-left') && !!key(w, 'workspace-move-right')
+        && key(w, 'workspace-move-left').label === 'Move workspace left',
+        'KM1 the two move actions are registered');
+    let s0 = w.spies.save;
+    press(w, 'workspace-move-right');
+    ok(ids(w) === 'W2,W1,W3' && w.st().activeId === 'W1' && w.spies.save === s0 + 1
+        && w.dots()[1] && w.dots()[1].classList.contains('active'),
+        'MV1 move right swaps with the next workspace, stays current, saves once and repaints');
+
+    w = buildWorld(seed('W4'));
+    press(w, 'workspace-move-left');
+    ok(ids(w) === 'W1,W4,W2,W3,W5', 'MV2 a plain workspace jumps over a whole stack');
+
+    w = buildWorld(seed('W3'));
+    s0 = w.spies.save;
+    press(w, 'workspace-move-right');                  // last member: no further
+    const at1 = ids(w), sv1 = (w.spies.save === s0);
+    w = buildWorld(seed('W1'));
+    const s1 = w.spies.save;
+    press(w, 'workspace-move-left');                   // first entry
+    ok(sv1 && at1 === 'W1,W2,W3,W4,W5' && ids(w) === 'W1,W2,W3,W4,W5' && w.spies.save === s1,
+        'MV5 a move past either end, or out of a stack, does nothing and saves nothing');
+
+    // MV8: each workspace keeps its own focus memory through moves.
+    w = buildWorld(seed('W4'));
+    press(w, 'workspace-move-left');
+    press(w, 'workspace-move-left');
+    const fc = w.st().list.map(function (x) { return x.id + ':' + x.focusedCol; }).join(',');
+    ok(fc === 'W4:3,W1:0,W2:1,W3:2,W5:4' && w.st().activeId === 'W4',
+        'MV8 a moved workspace carries its own remembered focus');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -648,6 +695,7 @@ _EPILOGUE = r"""
     await minting();
     await pagerNumbers();
     await signature();
+    await moving();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -759,6 +807,23 @@ def test_pager_signature_covers_every_visible_field(scenario_run):
 def test_tint(scenario_run):
     _ok(scenario_run, "TN1 a coloured workspace's dot is tinted with its colour and keeps its number")
     _ok(scenario_run, "TN2 an uncoloured dot carries no tint")
+
+
+def test_move(scenario_run):
+    _ok(scenario_run, "KM1 the two move actions are registered")
+    _ok(scenario_run, "MV1 move right swaps with the next workspace, stays current, saves once and repaints")
+    _ok(scenario_run, "MV2 a plain workspace jumps over a whole stack")
+    _ok(scenario_run, "MV5 a move past either end, or out of a stack, does nothing and saves nothing")
+    _ok(scenario_run, "MV8 a moved workspace carries its own remembered focus")
+
+
+def test_move_actions_are_unbound_by_default():
+    # KM2: new ids, no default combo -- the user binds them (DQ1).
+    store = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    ws = SRC_JS.read_text(encoding="utf-8")
+    for aid in ("workspace-move-left", "workspace-move-right"):
+        assert f"id: '{aid}'" in ws, f"{aid} is not registered by the mod"
+        assert f"'{aid}'" not in store, f"{aid} must stay unbound by default"
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
