@@ -689,6 +689,17 @@
                     (b) => b.dataset.wsId === shown.id);
                 if (first) first.focus();
             }
+            // #258: a colour shown beside a name -- decoration only (the name
+            // or number is the cue). A menu row's swatch is renderMenu's own.
+            function wsSwatchItem(color) { return color ? { color: color } : undefined; }
+            function wsSwatchInto(el, color) {
+                if (!color) return;
+                const s = document.createElement('span');
+                s.className = 'wsp-swatch';
+                s.setAttribute('aria-hidden', 'true');
+                s.style.background = color;
+                el.insertBefore(s, el.firstChild);
+            }
             // ---- workspace rename / remove / label-mode (tasks 18, 19) --------
             // #258: built for a workspace ID and every action re-resolves it
             // at click time -- a menu can sit open across a poll that moves
@@ -1122,6 +1133,7 @@
                 title.className = 'wsp-title';
                 title.textContent = (ws.name ? ws.name + '  ' : '')
                     + '(workspace ' + wsNumber(ws.id) + ')';
+                wsSwatchInto(title, ws.color);
                 box.appendChild(title);
                 const map = document.createElement('div');
                 map.className = 'wsp-map';
@@ -1491,6 +1503,9 @@
                     const ws = list[wsi];
                     badge.textContent = (ws && ws.name) ? ws.name : ('ws' + (ws ? wsNumber(ws.id) : wsi + 1));
                     el.classList.toggle('other-ws', wsi !== active);
+                    // #258: the workspace's colour beside its name.
+                    badge.classList.toggle('tinted', !!(ws && ws.color));
+                    if (ws && ws.color) badge.style.setProperty('--ws-color', ws.color);
                     el.classList.toggle('ws-hidden', hideOther && wsi !== active);
                 });
                 reorderTaskbarItems();
@@ -1761,10 +1776,16 @@
                     const here = activeWorkspaceIndex();
                     wsList().forEach((ws, wi) => {
                         if (wi === here) return;
+                        // #258: by id at click -- a peer can MOVE workspaces
+                        // while this menu sits open.
+                        const wsId = ws.id;
                         items.push({ label: 'Send to '
                                          + (ws.name ? ws.name : 'workspace ' + wsNumber(ws.id)),
-                                     enabled: true,
-                                     action: () => sendWindowToWorkspace(win, wi) });
+                                     enabled: true, swatch: wsSwatchItem(ws.color),
+                                     action: () => {
+                                         const i = workspaceIndexById(wsId);
+                                         if (i >= 0) sendWindowToWorkspace(win, i);
+                                     } });
                     });
                     items.push({ label: 'Send to new workspace', enabled: true,
                                  action: () => sendWindowToNewWorkspace(win) });
@@ -1802,7 +1823,7 @@
                             label: (wi === cur ? '\u2713 ' : '   ')
                                 + (ws.name ? ws.name : 'Workspace ' + wsNumber(ws.id))
                                 + ' (' + n + ')',
-                            enabled: true,
+                            enabled: true, swatch: wsSwatchItem(ws.color),
                             action: () => {
                                 const i = workspaceIndexById(wsId);
                                 if (i >= 0) switchWorkspace(i);

@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 90
+EXPECTED_ASSERTS = 96
 
 _PRELUDE = r"""
 'use strict';
@@ -1263,6 +1263,64 @@ async function numberKeys() {
 }
 """
 
+_SCENARIOS += r"""
+async function colourSurfaces() {
+    // ---- CS: a workspace's colour beside its name, everywhere ---------------
+    function seed() {
+        return { list: [{ id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, color: '#e96d6d' },
+                        { id: 'W3', focusedCol: 0 }] };
+    }
+    let w = buildWorld(seed());
+    const d2 = w.dots()[1], d3 = w.dots()[2];
+    if (d2) fire(d2, 'mouseenter');
+    let pop = w.pops[w.pops.length - 1];
+    const t2 = pop && pop.node.children[0];
+    const sw = t2 ? t2.querySelector('.wsp-swatch') : null;
+    if (d3) fire(d3, 'mouseenter');
+    pop = w.pops[w.pops.length - 1];
+    const t3 = pop && pop.node.children[0];
+    ok(!!sw && sw.style.background === '#e96d6d' && sw.getAttribute('aria-hidden') === 'true'
+        && t2.textContent === '(workspace 2)' && !!t3 && !t3.querySelector('.wsp-swatch'),
+        'CS1 the hover preview\'s title carries the workspace\'s colour, beside its number');
+
+    const rows = (w.desktopMenu ? w.desktopMenu({ tiling: true }) : [])
+        .filter(function (it) { return /Workspace \d/.test(it.label || ''); });
+    ok(rows.length === 3 && rows[1].swatch && rows[1].swatch.color === '#e96d6d' && !rows[0].swatch,
+        'CS2 a coloured workspace\'s desktop-menu row shows its colour');
+    const sends = (w.windowMenu ? w.windowMenu(w.windows.get('local:21')) : [])
+        .filter(function (it) { return /^Send to workspace/.test(it.label || ''); });
+    ok(sends.length === 2 && sends[0].swatch && sends[0].swatch.color === '#e96d6d' && !sends[1].swatch,
+        'CS3 Send to rows show the target\'s colour');
+
+    w = buildWorld(seed());
+    const chip = w.document.getElementById('taskbar-items').appendChild(new Node('div'));
+    chip.className = 'taskbar-item';
+    chip.dataset.sessionId = 'local:22';                  // column L2 lives on W2
+    w.render();
+    const badge = chip.querySelector('.ti-ws');
+    ok(!!badge && badge.classList.contains('tinted') && badge.style.getPropertyValue('--ws-color') === '#e96d6d'
+        && badge.textContent === 'ws2',
+        'CS4 a taskbar badge carries its workspace\'s colour beside the name');
+
+    // CS5: Send to, chosen after a peer moved workspaces, still targets its workspace.
+    w = buildWorld(seed());
+    const items = w.windowMenu ? w.windowMenu(w.windows.get('local:21')) : [];
+    const toW3 = items.filter(function (it) { return it.label === 'Send to workspace 3'; })[0];
+    const l = w.st().list; const t = l[1]; l[1] = l[2]; l[2] = t;     // W1,W3,W2
+    if (toW3) toW3.action();
+    const col = w.L.columns.filter(function (c) { return c.id === 'L1'; })[0];
+    ok(!!toW3 && col.wsId === 'W3', 'CS5 Send to targets its workspace by id after a peer reorder');
+
+    // CS6: a chip click after a move goes to the chip's workspace.
+    w = buildWorld(seed());
+    const press = (w.keys || {})['workspace-move-right'];
+    if (press) press.run();                               // W1 moves right: W2,W1,W3
+    const took = w.intercept ? w.intercept('local:23') : false;
+    ok(!!press && took === true && w.st().activeId === 'W3',
+        'CS6 a taskbar chip click after a move switches to the chip\'s own workspace');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1282,6 +1340,7 @@ _EPILOGUE = r"""
     await stackListKeys();
     await stackMenu();
     await numberKeys();
+    await colourSurfaces();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1502,6 +1561,15 @@ def test_number_keys_count_pager_entries(scenario_run):
     _ok(scenario_run, "KB1 Go to workspace 3 goes to the third pager entry (after a stack)")
     _ok(scenario_run, "KB2 next/previous step through every workspace, stack members included")
     _ok(scenario_run, "KB3 a number key that lands on a stack opens its list and switches nothing")
+
+
+def test_colour_on_every_surface(scenario_run):
+    _ok(scenario_run, "CS1 the hover preview's title carries the workspace's colour, beside its number")
+    _ok(scenario_run, "CS2 a coloured workspace's desktop-menu row shows its colour")
+    _ok(scenario_run, "CS3 Send to rows show the target's colour")
+    _ok(scenario_run, "CS4 a taskbar badge carries its workspace's colour beside the name")
+    _ok(scenario_run, "CS5 Send to targets its workspace by id after a peer reorder")
+    _ok(scenario_run, "CS6 a taskbar chip click after a move switches to the chip's own workspace")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

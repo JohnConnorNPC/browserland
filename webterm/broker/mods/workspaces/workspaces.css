@@ -88,6 +88,10 @@
             pointer-events: none;
         }
         .ws-preview .wsp-title { font: 11px monospace; color: var(--fg-dim); margin-bottom: 4px; }
+        .ws-preview .wsp-swatch {
+            display: inline-block; width: 8px; height: 8px; margin-right: 5px;
+            border-radius: 50%; vertical-align: middle;
+        }
         .ws-preview .wsp-map {
             position: relative; width: 168px; height: 104px;
             background: var(--bg); border: 1px solid var(--bg-3);
@@ -117,3 +121,4 @@
             border-radius: 3px;
             background: rgba(255,255,255,0.10);
         }
+        .taskbar-item .ti-ws.tinted { box-shadow: inset 2px 0 0 var(--ws-color); }
