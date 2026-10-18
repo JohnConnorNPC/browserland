@@ -278,7 +278,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. `POST /profiles/config` and `GET /profiles/detect` answer **403 `terminals_disabled`** on a `terminals: false` broker (#253). |
 | `GET`/`POST`/`PUT /peer/<id>/…` (peer proxy, #252) | **two gates**, see [Peer proxy](#peer-proxy-252): browser routes take **this broker's token as the bearer** (header only — a `?token=` does not count here) **plus** the peer's own token in `X-Browserland-Peer-Token` and the pairing in `X-Browserland-Peer-Origin`; `/peer/<id>/mcp/*` takes the **peer's MCP token alone**, and only for a peer configured with `mcp: true`. `OPTIONS` is not routed (405). |
 | `POST /peer/<id>/ws-ticket`, `WS /peer/<id>/ws`, `WS /peer/<id>/control` (peer proxy sockets, #252) | the mint takes the **browser gate** above and answers a one-time ticket; the two socket routes take **only** `?ticket=` — no token of any kind — and close **4403** on a bad, expired, reused or revoked one. See [Sockets](#sockets). |
-| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three HTTP-library egresses (`/status/fetch`, `/update/check`, the configured peers) plus the update apply's `git fetch` subprocess: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes `?provider=` ids, never a URL; none means all of them, unknown ids are dropped, and an all-unknown request is **400 `no_valid_provider`**). Answers carry `Cache-Control: no-store`. Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: the egress is behind the broker's own `status_fetch_enabled` gate (#189; off by default, resolved per key like the update gates: a config key owns it, else the sidecar a `POST /update/policy` grant writes — the default-off `aistatus` mod asks for that grant when you turn it on). While the gate is off the route is **503 `status_fetch_disabled`** and nothing is dialled; once on, the broker's egress IP becomes visible to those status hosts. |
+| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. One of the broker's three HTTP-library egresses (`/status/fetch`, `/update/check`, the configured peers) plus the update apply's `git fetch` subprocess: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes `?provider=` ids, never a URL; none means all of them, unknown ids are dropped, and an all-unknown request is **400 `no_valid_provider`**). Answers carry `Cache-Control: no-store`. Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: the egress is behind the broker's own `status_fetch_enabled` gate (#189; off by default, resolved per key like the update gates: a config key owns it, else the sidecar a `POST /update/policy` grant writes — the default-off `aistatus` mod's window has a button that asks for that grant). While the gate is off the route is **503 `status_fetch_disabled`** and nothing is dialled; once on, the broker's egress IP becomes visible to those status hosts. |
 | CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
 | Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token), and CSP `script-src` — see below. A relayed `/peer/*` answer carries the sandbox CSP `sandbox; default-src 'none'; frame-ancestors 'none'` instead (see [Peer proxy](#peer-proxy-252)). |
 
@@ -457,7 +457,7 @@ operator names each peer in `broker_config.json`:
 
 | Gate | Credential | Refusals, in order |
 |---|---|---|
-| browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 503 `proxy_unavailable` → 404 `unknown_peer` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 503 `peer_busy` |
+| browser routes | `Authorization: Bearer <this broker's token>` (the header only) **and** `X-Browserland-Peer-Token: <the peer's browser token>` **and** `X-Browserland-Peer-Origin: <the origin that token was paired with>` | 401 `auth_required` (this broker's token) → 503 `proxy_unavailable` → 404 `unknown_peer` → 404 `peer_hop_refused` / `not_relayed` → 401 `auth_required` (no peer token) → **409 `peer_origin_changed`** (the pairing header is missing or names another origin) → 400 `bad_scope` (a repeated scope header) → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (only a GET or other non-POST/PUT that carries a body, which is drained and dropped) → 503 `peer_busy` |
 | `/peer/<id>/mcp/*` | `Authorization: Bearer <the peer's MCP token>` and nothing of this broker's; `X-Browserland-Peer-Origin` optional | 401 `auth_required` (no bearer — checked before any lookup) → 404 `unknown_peer` (also for a peer without `mcp: true`) → 503 `proxy_unavailable` → 404 `not_relayed` → **409 `peer_origin_changed`** (only when the pairing header is sent and names another origin) → 400 `bad_scope` → 413 `body_too_large` / 400 `bad_length` / 408 `body_timeout` (the body is read whole first) → 503 `peer_busy` |
 
 Every refusal happens before anything is dialed. Browser-gate bodies are
@@ -553,7 +553,8 @@ method (`GET`) is read and dropped, never forwarded.
 exactly one
 `X-Browserland-Scope`, `X-Webterm-Admin` only when the caller sent it and
 only on the browser gate, `X-Browserland-Mcp-Admin` only on the MCP gate, and the one `Authorization` this broker sets (the
-peer's token). The upstream client adds no headers of its own (no
+peer's token), plus `Accept-Encoding: identity`, because the relay passes the
+peer's bytes through untouched. The upstream client adds no headers of its own (no
 `User-Agent`) and keeps no cookies. This broker's own bearer, the peer-token and pairing headers,
 `Cookie`, `Host`, `Origin`, `X-Forwarded-*` and every hop-by-hop header never
 cross, and `token` / `auth` are dropped from the forwarded query. Back:
@@ -687,12 +688,19 @@ address).
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev,pyte]"
+.venv/bin/pip install -e ".[dev,pyte,proxy,mcp]" sanic-testing
 ```
+
+The tests need more than the `dev` extra: most use Sanic's test client
+(`sanic-testing`, which no extra lists), the peer-proxy tests import `httpx`
+(the `proxy` extra), and the MCP-server tests skip without `mcp`.
 
 Zero-setup alternative: `launchers/run-broker.sh` / `run-agent.sh`
 bootstrap a venv with the runtime deps on first run — fine for running,
-but they don't install pytest, so use the editable install for testing.
+but they don't install pytest or any extra, so use the editable install for
+testing. Both use the same `.venv` and install only when they create it, so
+run `run-broker.sh` first: a venv that `run-agent.sh` created holds only
+`websockets`, and the broker then fails to import `sanic`.
 
 **Config**: copy `broker_config.linux.example.json` to
 `broker_config.json` (or point `$WEB_TERMINAL_CONFIG` at it). Default
@@ -708,8 +716,11 @@ to choose the value yourself, or let the broker mint one into
 the token, then `systemctl daemon-reload && systemctl enable --now ...`.
 Caveats: the `bash -l` profile sources the service user's login profile
 (use the `sh` profile if that produces noise), and `/launch`-spawned
-agents are session leaders that survive broker restarts — they
-re-register within ~10 s of the broker coming back.
+agents are session leaders that survive an in-app broker restart (the
+supervisor stays up) — they re-register within ~10 s of the broker coming
+back. `systemctl stop` / `restart` of the unit is different: the unit sets no
+`KillMode=`, so systemd's default stops every process in its control group,
+agents included.
 
 **Tests on Linux**: `python -m pytest tests -q` → the full suite passes;
 the Windows-ConPTY e2e suites skip on Linux. This
@@ -1406,7 +1417,7 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after mcp_disabled and the token. An empty value is not refused: it means unscoped, which sees every window its mode allows. Also `POST /mcp/window` with a body `scope` that is not a valid name or `null` |
 | 400 | `bad_json` | body is not a JSON object |
 | 400 | `bad_request` | `/mcp/launch` body is valid JSON but not an object |
-| 400 | `bad_id` | `id` missing or not convertible to an integer (`int()`: `"12"` and `3.9` are accepted and converted) |
+| 400 | `bad_id` | `id` missing or not convertible to an integer (`int()`: `"12"` and `7.5` are accepted and converted) |
 | 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope; on `POST /mcp/window` (#243) every handle-path failure answers these same bytes, so ids cannot be probed |
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
@@ -1766,7 +1777,7 @@ thin stdio wrapper that maps each endpoint above to an MCP tool (`mcp_info`,
 with the MCP token.
 
 ```bash
-pip install -e ".[mcp]"                      # needs Python >=3.10 (the mcp SDK)
+pip install -e ".[mcp]"                      # Python >=3.10, like the rest of webterm
 claude mcp add browserland --env BROWSERLAND_MCP_TOKEN=… -- python -m webterm.mcptool
 ```
 
