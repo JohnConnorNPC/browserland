@@ -32,16 +32,21 @@ from webterm.broker import ui
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
 SRC_JS = BROKER_DIR / "mods" / "workspaces" / "workspaces.js"
+CONST_JS = BROKER_DIR / "50_js_constants.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 25
+EXPECTED_ASSERTS = 32
 
 _HARNESS = r"""
 'use strict';
 const fs = require('fs');
 const src = fs.readFileSync(__SRC_PATH__, 'utf8');
+// #258: the REAL palette, sliced from 50 (colour commands accept only it).
+const constSrc = fs.readFileSync(__CONST_PATH__, 'utf8');
+const PALETTE = new Function(constSrc.slice(constSrc.indexOf('const PALETTE = ['),
+    constSrc.indexOf('];', constSrc.indexOf('const PALETTE = [')) + 2) + ' return PALETTE;')();
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -52,7 +57,10 @@ function ok(cond, label) {
 // ---- stubs ----------------------------------------------------------------
 function mkNode(tag) {
     const node = {
-        tagName: tag || 'div', style: {}, dataset: {}, children: [],
+        tagName: tag || 'div', dataset: {}, children: [],
+        // #258: a coloured dot sets --ws-color, as in a browser.
+        style: { setProperty: function () {}, removeProperty: function () {} },
+        setAttribute: function () {},
         textContent: '', title: '', className: '',
         classList: {
             add: function () {}, remove: function () {},
@@ -196,7 +204,7 @@ function buildWorld(seedFloatWs) {
         'requestRelayout', 'reconcileTiledFocus', 'visibleColIndex',
         'captureTiledFocusContext', 'showNotice', 'bringToFront',
         'firstLiveKeyInColumn', 'reorderTaskbarItems', '_deactivated',
-        'console', src);
+        'console', 'PALETTE', src);
     factory(registerMod, w.document, w.prefs,
         function () { return w.L; },
         function () { w.spies.save++; },
@@ -242,13 +250,16 @@ function buildWorld(seedFloatWs) {
         firstLiveKeyInColumn,
         function () {},                       // reorderTaskbarItems
         false,                               // _deactivated
-        console);
+        console,
+        PALETTE);                            // #258: the real 50 palette
     registered.def = registered;              // (shape parity, harmless)
     world.def = registered;
     world.def.init(world.ctx);
     world.commandsCaps = world.commandsCaps;
     world.run = function (id, args) {
         const spec = world.commandsCaps[id];
+        // A missing command reads as no answer (its labels fail), not a crash.
+        if (!spec) return Promise.resolve(null);
         return Promise.resolve()
             .then(function () { return spec.run(args); });
     };
@@ -268,10 +279,10 @@ function storeShape(world) {
     // ---- registration ------------------------------------------------------
     let world = buildWorld({ floatWs: { 'local:9': 'W2' } });
     const expectedIds = ['list', 'add', 'rename', 'remove', 'switch',
-                         'send-window'];
+                         'send-window', 'move', 'color'];
     ok(expectedIds.every(function (id) { return !!world.commandsCaps[id]; })
-        && Object.keys(world.commandsCaps).length === 6,
-        'R1 the six workspaces commands register, and only those');
+        && Object.keys(world.commandsCaps).length === expectedIds.length,
+        'R1 exactly the workspaces commands register');
 
     // ---- remove: needs_confirm counts LIVE windows only ---------------------
     let r = await world.run('remove', { index: 1 });
@@ -398,6 +409,57 @@ function storeShape(world) {
         && wE.L.mods.workspaces.list.length === 3,
         'P3 a refused confirm leaves the workspace in place');
 
+    // ---- #258 move / color ------------------------------------------------------
+    function order(w) { return w.L.mods.workspaces.list.map(function (x) { return x.id; }).join(','); }
+    function stacked(w) {                  // W2+W3 stacked as S1 (a store an adopt could bring)
+        const st = w.L.mods.workspaces;
+        st.stacks = [{ id: 'S1' }];
+        st.list[1].stack = 'S1'; st.list[2].stack = 'S1';
+        st.list.push({ id: 'W4', focusedCol: 0 });
+        return w;
+    }
+    world = buildWorld();
+    r = await world.run('move', { index: 0, direction: 'right' });
+    ok(r && r.moved === true && r.index === 1 && order(world) === 'W2,W1,W3',
+        'MC1 move right swaps with the next entry and reports the new index');
+    const bads = [{ index: 0 }, { index: 0, direction: 'up' }, { index: 0, stack: 'S1', direction: 'left' },
+                  { direction: 'left' }, { index: 9, direction: 'left' }, { stack: 'S9', direction: 'left' },
+                  { index: '0', direction: 'left' }];
+    let allBad = true;
+    world = stacked(buildWorld());           // S1 exists, so 'both' names two real targets
+    for (const b of bads) {
+        const rr = await world.run('move', b);
+        if (!rr || rr.refusal !== 'bad_args') allBad = false;
+    }
+    ok(allBad && order(world) === 'W1,W2,W3,W4',
+        'MC2 move refuses bad_args: no/unknown direction, both or neither of index and stack, a bad index or stack');
+    world = stacked(buildWorld());
+    r = await world.run('move', { stack: 'S1', direction: 'left' });
+    ok(r && r.moved === true && r.index === 0 && order(world) === 'W2,W3,W1,W4',
+        'MC3 move with a stack id moves the whole stack');
+    world = stacked(buildWorld());
+    r = await world.run('move', { index: 1, direction: 'right' });
+    ok(r && r.moved === true && r.index === 2 && order(world) === 'W1,W3,W2,W4',
+        'MC4 move of a stack member moves it inside its stack');
+    world = buildWorld();
+    r = await world.run('move', { index: 0, direction: 'left' });
+    ok(r && r.moved === false && r.index === 0 && order(world) === 'W1,W2,W3',
+        'MC5 move past the end reports moved:false');
+
+    world = buildWorld();
+    r = await world.run('color', { index: 1, color: PALETTE[1].toUpperCase() });
+    ok(r && r.color === PALETTE[1] && world.L.mods.workspaces.list[1].color === PALETTE[1],
+        'MC6 color takes a palette colour in any case and stores it canonical');
+    const r1 = await world.run('color', { index: 1, color: '#123456' });
+    const r2 = await world.run('color', { index: 1 });
+    const r3 = await world.run('color', { index: 1, color: null });
+    world = stacked(world);
+    const r4 = await world.run('color', { stack: 'S1', color: PALETTE[0] });
+    ok(r1 && r1.refusal === 'bad_args' && r2 && r2.refusal === 'bad_args'
+        && r3 && r3.color === null && !('color' in world.L.mods.workspaces.list[1])
+        && r4 && r4.color === PALETTE[0] && world.L.mods.workspaces.stacks[0].color === PALETTE[0],
+        'MC7 color refuses a non-palette or missing colour; null clears; a stack id colours the stack');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -411,7 +473,8 @@ function storeShape(world) {
 def scenario_run(tmp_path_factory):
     harness = tmp_path_factory.mktemp("ws-commands") / "harness.js"
     harness.write_text(
-        _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS))),
+        _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS)))
+        .replace("__CONST_PATH__", json.dumps(str(CONST_JS))),
         encoding="utf-8")
     proc = subprocess.run([NODE, str(harness)],
                           capture_output=True, text=True, encoding="utf-8",
@@ -444,8 +507,19 @@ def _ok(run, label):
         f"stdout: {run['stdout']}\nstderr: {run['stderr']}")
 
 
-def test_the_six_commands_register(scenario_run):
-    _ok(scenario_run, "R1 the six workspaces commands register, and only those")
+def test_exactly_the_workspaces_commands_register(scenario_run):
+    _ok(scenario_run, "R1 exactly the workspaces commands register")
+
+
+def test_move_and_color_commands(scenario_run):
+    # #258: the MCP move / color ops run the UI's primitives.
+    _ok(scenario_run, "MC1 move right swaps with the next entry and reports the new index")
+    _ok(scenario_run, "MC2 move refuses bad_args: no/unknown direction, both or neither of index and stack, a bad index or stack")
+    _ok(scenario_run, "MC3 move with a stack id moves the whole stack")
+    _ok(scenario_run, "MC4 move of a stack member moves it inside its stack")
+    _ok(scenario_run, "MC5 move past the end reports moved:false")
+    _ok(scenario_run, "MC6 color takes a palette colour in any case and stores it canonical")
+    _ok(scenario_run, "MC7 color refuses a non-palette or missing colour; null clears; a stack id colours the stack")
 
 
 def test_remove_refuses_non_empty_with_the_live_count(scenario_run):

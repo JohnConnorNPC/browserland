@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 96
+EXPECTED_ASSERTS = 97
 
 _PRELUDE = r"""
 'use strict';
@@ -1321,6 +1321,25 @@ async function colourSurfaces() {
 }
 """
 
+_SCENARIOS += r"""
+async function parityMoveColour() {
+    // ---- P4: the UI and the MCP command reach the same store ---------------
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    function cmd(w, id, args) { const c = (w.commands || {})[id]; return c ? c.run(args) : null; }
+    const a = buildWorld(), b = buildWorld();
+    const m = a.openWsMenu('W1');
+    act(a.item(m, /^Move right$/));
+    const r = cmd(b, 'move', { index: 0, direction: 'right' });
+    const ma = a.openWsMenu('W3');
+    act(a.item(ma, /^Colour…$/));
+    act(a.item(a.lastMenu(), new RegExp(PALETTE[4])));
+    const rc = cmd(b, 'color', { index: 2, color: PALETTE[4] });
+    ok(!!m && !!ma && r && r.moved === true && rc && rc.color === PALETTE[4]
+        && J(a.st()) === J(b.st()) && a.st().list[2].color === PALETTE[4],
+        'P4 moving and colouring from the menu or by command leave the same store');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1341,6 +1360,7 @@ _EPILOGUE = r"""
     await stackMenu();
     await numberKeys();
     await colourSurfaces();
+    await parityMoveColour();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1570,6 +1590,10 @@ def test_colour_on_every_surface(scenario_run):
     _ok(scenario_run, "CS4 a taskbar badge carries its workspace's colour beside the name")
     _ok(scenario_run, "CS5 Send to targets its workspace by id after a peer reorder")
     _ok(scenario_run, "CS6 a taskbar chip click after a move switches to the chip's own workspace")
+
+
+def test_ui_and_commands_agree_on_move_and_colour(scenario_run):
+    _ok(scenario_run, "P4 moving and colouring from the menu or by command leave the same store")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

@@ -1995,6 +1995,34 @@
                         sendWindowToWorkspace(win, a.target);
                         return { moved: true };
                     } });
+                    // #258: move / color take a workspace by flat `index` XOR
+                    // a stack by its `stack` id, and run the UI's primitives.
+                    const wsCmdTarget = function (a) {
+                        if ((a.index === undefined) === (a.stack === undefined)) return null;
+                        if (a.stack !== undefined) {
+                            return (typeof a.stack === 'string' && wsStackRow(a.stack)) ? { sid: a.stack } : null;
+                        }
+                        const ok = Number.isInteger(a.index) && a.index >= 0 && a.index < wsList().length;
+                        return ok ? { ws: wsList()[a.index] } : null;
+                    };
+                    ctx.commands.register('move', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        const t = wsCmdTarget(a);
+                        const dir = { left: -1, right: 1 }[a.direction];
+                        if (!t || !dir) return { refusal: 'bad_args' };
+                        // A stack member moves inside its stack (the keyboard's rule).
+                        const moved = moveEntry(t.ws ? 'w:' + t.ws.id : 's:' + t.sid, dir);
+                        return { moved: moved, index: t.ws ? workspaceIndexById(t.ws.id)
+                                 : wsList().findIndex(w => w.stack === t.sid) };
+                    } });
+                    ctx.commands.register('color', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        const t = wsCmdTarget(a);
+                        const c = wsPickColor(a.color);          // palette hex, or null = none
+                        if (!t || c === undefined) return { refusal: 'bad_args' };
+                        const done = t.ws ? setWorkspaceColorById(t.ws.id, c) : setStackColorById(t.sid, c);
+                        return done ? { color: c } : { refusal: 'unknown_window' };
+                    } });
                 } else {
                     // Same-bundle ctx.commands is a guarantee (86h registers
                     // it unconditionally); reaching here means a broken
