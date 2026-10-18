@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 42
+EXPECTED_ASSERTS = 48
 
 _PRELUDE = r"""
 'use strict';
@@ -735,6 +735,73 @@ async function wsMenu() {
 }
 """
 
+_SCENARIOS += r"""
+async function dragging() {
+    // ---- DR: drag a pager entry to reorder ---------------------------------
+    const T = 'application/x-browserland-ws';
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    function dot(w, id) { return w.dots().filter(function (d) { return d.dataset.wsId === id; })[0] || null; }
+    function place(w) { w.dots().forEach(function (d, i) { d.rect = { left: 100 * i, top: 0, right: 100 * i + 40, bottom: 26, width: 40, height: 26 }; }); }
+    // start on `from`, optionally let `between` run (a poll), then hover + drop on `to` at clientX
+    function drag(w, from, to, x, between) {
+        place(w);
+        const dt = mkDT();
+        const s = dot(w, from), t = dot(w, to);
+        if (!s || !t) return false;
+        fire(s, 'dragstart', { dataTransfer: dt });
+        if (between) between();
+        fire(t, 'dragover', { dataTransfer: dt, clientX: x });
+        fire(t, 'drop', { dataTransfer: dt, clientX: x });
+        fire(s, 'dragend', { dataTransfer: dt });
+        return true;
+    }
+    let w = buildWorld();
+    let d1 = drag(w, 'W1', 'W3', 230);                    // W3 spans 200..240: right half
+    ok(d1 && ids(w) === 'W2,W3,W1' && w.st().activeId === 'W1',
+        'DR1 dropping on the right half of an entry puts the dragged one after it');
+    w = buildWorld();
+    d1 = drag(w, 'W1', 'W3', 205);
+    ok(d1 && ids(w) === 'W2,W1,W3', 'DR2 dropping on the left half puts it before');
+
+    w = buildWorld();
+    d1 = drag(w, 'W1', 'W3', 230, function () {          // a peer reorders mid-drag
+        const l = w.st().list; const t = l[0]; l[0] = l[1]; l[1] = t; });
+    ok(d1 && ids(w) === 'W2,W3,W1', 'DR4 a reorder during the drag still moves the dragged workspace');
+
+    w = buildWorld();
+    let s0 = w.spies.save;
+    d1 = drag(w, 'W1', 'W3', 230, function () { w.st().list.splice(0, 1); });
+    ok(d1 && ids(w) === 'W2,W3' && w.spies.save === s0,
+        'DR5 a workspace removed during the drag is not moved and nothing is saved');
+
+    w = buildWorld({ list: [{ id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0 },
+                            { id: 'W3', focusedCol: 0 }, { id: 'W4', focusedCol: 0 }] });
+    s0 = w.spies.save;
+    d1 = drag(w, 'W1', 'W4', 330, function () {
+        w.st().stacks = [{ id: 'S1' }];
+        w.st().list[0].stack = 'S1'; w.st().list[1].stack = 'S1'; });
+    ok(d1 && ids(w) === 'W1,W2,W3,W4' && w.spies.save === s0,
+        'DR6 a workspace stacked during the drag is not moved on its own');
+
+    // DR7: hovering a CHILD of the dot uses the dot's rect; foreign drags are ignored.
+    w = buildWorld();
+    place(w);
+    const tgt = dot(w, 'W3'), src = dot(w, 'W1');
+    const span = tgt ? tgt.appendChild(new Node('span')) : null;
+    if (span) span.rect = { left: 220, top: 0, right: 230, bottom: 26, width: 10, height: 26 };
+    const dt = mkDT();
+    if (src) fire(src, 'dragstart', { dataTransfer: dt });
+    const ev = span ? fire(span, 'dragover', { dataTransfer: dt, clientX: 224 }) : null;
+    const afterCls = !!tgt && tgt.classList.contains('drop-after');
+    if (span) fire(tgt, 'dragleave', { dataTransfer: dt, relatedTarget: span });
+    const kept = !!tgt && tgt.classList.contains('drop-after');
+    const os = mkDT(); os.setData('Files', 'x');
+    const ev2 = tgt ? fire(tgt, 'dragover', { dataTransfer: os, clientX: 230 }) : null;
+    ok(!!span && ev && ev.defaultPrevented && afterCls && kept && ev2 && !ev2.defaultPrevented,
+        'DR7 the drop side comes from the dot under a child span, and a foreign drag is ignored');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -744,6 +811,7 @@ _EPILOGUE = r"""
     await signature();
     await moving();
     await wsMenu();
+    await dragging();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -880,6 +948,15 @@ def test_workspace_menu(scenario_run):
     _ok(scenario_run, "MN2 Move left is off on the first entry and Move right on the last")
     _ok(scenario_run, "MN3 Move right moves the workspace the menu was opened on")
     _ok(scenario_run, "MN4 an open menu acts on its workspace by id after a peer reorders the list")
+
+
+def test_pager_drag(scenario_run):
+    _ok(scenario_run, "DR1 dropping on the right half of an entry puts the dragged one after it")
+    _ok(scenario_run, "DR2 dropping on the left half puts it before")
+    _ok(scenario_run, "DR4 a reorder during the drag still moves the dragged workspace")
+    _ok(scenario_run, "DR5 a workspace removed during the drag is not moved and nothing is saved")
+    _ok(scenario_run, "DR6 a workspace stacked during the drag is not moved on its own")
+    _ok(scenario_run, "DR7 the drop side comes from the dot under a child span, and a foreign drag is ignored")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

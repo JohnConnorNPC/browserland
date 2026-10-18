@@ -556,6 +556,7 @@
                         + (mode === 'name' ? ' named' : '');
                     d.textContent = wsLabel(ws, i);
                     d.dataset.wsId = ws.id;
+                    wireEntryDrag(d, 'w:' + ws.id);
                     // #258: the colour tints the dot; its number or name stays.
                     if (ws.color) {
                         d.classList.add('tinted');
@@ -764,6 +765,56 @@
                 const p = es.findIndex(function (e) { return e.key === key; });
                 if (p < 0 || p + dir < 0 || p + dir >= es.length) return false;
                 return moveEntryTo(key, es[p + dir].key, dir > 0);
+            }
+            // Drag a pager entry to reorder (#258). Only OUR drag counts (the
+            // custom type: an OS file drag or a stale key is ignored), the
+            // half is taken from the DOT's rect (its spans are children), and
+            // the drop re-resolves both entries -- a poll can move, remove or
+            // stack either while the pointer is down.
+            const WS_DND = 'application/x-browserland-ws';
+            let _wsDragKey = null;
+            function wsDragOurs(e) {
+                const types = (e.dataTransfer && e.dataTransfer.types) || [];
+                return !!_wsDragKey && Array.prototype.indexOf.call(types, WS_DND) !== -1;
+            }
+            function wsDropAfter(e) {
+                const r = e.currentTarget.getBoundingClientRect();
+                return e.clientX > r.left + r.width / 2;
+            }
+            function wsClearDrop(d) { d.classList.remove('drop-before'); d.classList.remove('drop-after'); }
+            function wireEntryDrag(d, key) {
+                d.draggable = true;
+                d.addEventListener('dragstart', (e) => {
+                    _wsDragKey = key;
+                    hideWsPreview();
+                    if (e.dataTransfer) {
+                        e.dataTransfer.setData(WS_DND, key);
+                        e.dataTransfer.setData('text/plain', key);   // Firefox needs one
+                        e.dataTransfer.effectAllowed = 'move';
+                    }
+                });
+                d.addEventListener('dragover', (e) => {
+                    if (!wsDragOurs(e) || _wsDragKey === key) return;
+                    e.preventDefault();
+                    const after = wsDropAfter(e);
+                    d.classList.toggle('drop-before', !after);
+                    d.classList.toggle('drop-after', after);
+                });
+                d.addEventListener('dragleave', (e) => {
+                    if (!e.relatedTarget || !d.contains(e.relatedTarget)) wsClearDrop(d);
+                });
+                d.addEventListener('drop', (e) => {
+                    const ours = wsDragOurs(e), src = _wsDragKey;
+                    wsClearDrop(d);
+                    _wsDragKey = null;
+                    if (!ours || src === key) return;
+                    e.preventDefault();
+                    moveEntryTo(src, key, wsDropAfter(e));
+                });
+                d.addEventListener('dragend', () => {
+                    _wsDragKey = null;
+                    pager.querySelectorAll('.ws-dot').forEach(wsClearDrop);
+                });
             }
             async function renameWorkspace(i) {
                 const ws = wsList()[i];
