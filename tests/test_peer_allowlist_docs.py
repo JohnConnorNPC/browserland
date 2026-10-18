@@ -88,6 +88,12 @@ def test_the_section_states_what_the_code_does():
                           "bad_ticket"}
     for code_name in documented:
         assert f'"{code_name}"' in code, code_name
+    # #260 review round 1: the name alone also matches app.py's WS close
+    # reason, so the relay's own 502 is pinned as a pair, doc and code.
+    pairs = set(re.findall(r"\b(4\d\d|5\d\d) `([a-z_]+)`", s))
+    assert ("502", "peer_unreachable") in pairs, sorted(pairs)
+    assert 'return 502, "peer_unreachable"' in (
+        REPO / "webterm" / "broker" / "peers.py").read_text(encoding="utf-8")
 
 
 def test_the_sockets_part_states_what_the_code_does():
