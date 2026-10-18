@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 67
+EXPECTED_ASSERTS = 72
 
 _HARNESS = r"""
 'use strict';
@@ -760,6 +760,69 @@ function countMut(name) {
     ok(r && r.detail === 'not_tiled' && countMut('setColumnPreset') === 0,
         'O13 an open that placed the window otherwise is caught after the open');
 
+    // ---- W: #262 send-window opens a chip after validating --------------
+    // The mod as it behaves: list answers two workspaces; send-window refuses
+    // a key with no live window, exactly like the shipped command.
+    function wsMod(list) {
+        return function (op, a) {
+            if (op === 'workspaces:list') return list;
+            if (op === 'workspaces:send-window') {
+                const w = windows.get(a.key);
+                return (w && !w.disposed)
+                    ? { ok: true, value: { moved: true } }
+                    : { ok: true, value: { refusal: 'unknown_window' } };
+            }
+            return null;
+        };
+    }
+    const TWO_WS = { ok: true, value: { active: 0,
+        items: [ { index: 0, id: 'W1' }, { index: 1, id: 'W2' } ] } };
+    chips();
+    execNext = wsMod(TWO_WS);
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 1 } });
+    ok(r && r.ok === true && windows.has('local:30') && opens('local:30') === 1,
+        'W1 send-window opens a chip-only window, then sends it');
+    chips();
+    execNext = wsMod({ ok: false, reason: 'absent' });
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 1 } });
+    const absentOk = r && r.error === 'absent' && openCalls.length === 0;
+    chips();
+    execNext = wsMod({ ok: false, reason: 'inactive' });
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 1 } });
+    ok(absentOk && r && r.error === 'inactive' && openCalls.length === 0
+        && execCalls.every(function (c) { return c.op !== 'workspaces:send-window'; }),
+        'W2 workspaces mod off: send-window answers absent/inactive and opens nothing');
+    chips();
+    execNext = wsMod(TWO_WS);
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 2 } });
+    const rNeg = await drive('local', { rid: freshRid(),
+        op: 'workspaces:send-window', args: { win: 30, target: -1 } });
+    ok(r && r.error === 'bad_args' && rNeg && rNeg.error === 'bad_args'
+        && openCalls.length === 0,
+        'W3 a send to a workspace that does not exist opens nothing');
+    chips();
+    execNext = function (op, a) {
+        if (op === 'workspaces:list') state.deactivated = true;
+        return wsMod(TWO_WS)(op, a);
+    };
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 30, target: 1 } });
+    state.deactivated = false;
+    ok(r && r.error === 'lost_lease' && openCalls.length === 0,
+        'W4 a lease lost during the list await opens nothing');
+    chips();
+    execNext = wsMod(TWO_WS);
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 7, target: 1 } });
+    ok(r && r.ok === true && openCalls.length === 0 && execCalls.length === 1
+        && execCalls[0].op === 'workspaces:send-window',
+        'W5 a live window takes the old path (no list call, no open)');
+    execNext = null;
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1006,6 +1069,17 @@ def test_262_the_open_follows_validation_and_the_gate(scenario_run):
 def test_262_an_open_that_misfires_is_caught(scenario_run):
     _ok(scenario_run, "O12 an open that builds no live window answers unknown_window")
     _ok(scenario_run, "O13 an open that placed the window otherwise is caught after the open")
+
+
+def test_262_send_window_opens_a_chip_after_validating(scenario_run):
+    # send-window opens a chip-only window too, but only once the mod has
+    # answered and the target is one of its workspaces: a send the mod would
+    # refuse (mod off, bad target, lease lost) opens nothing.
+    _ok(scenario_run, "W1 send-window opens a chip-only window, then sends it")
+    _ok(scenario_run, "W2 workspaces mod off: send-window answers absent/inactive and opens nothing")
+    _ok(scenario_run, "W3 a send to a workspace that does not exist opens nothing")
+    _ok(scenario_run, "W4 a lease lost during the list await opens nothing")
+    _ok(scenario_run, "W5 a live window takes the old path (no list call, no open)")
 
 
 # ---- the catch-all ---------------------------------------------------------------

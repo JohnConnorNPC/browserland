@@ -1650,6 +1650,31 @@
                             const k = resolveDesktopWinKey(hid, args.win);
                             if (k === null) {
                                 out = { ok: false, error: 'unknown_window' };
+                            } else if (!windows.get(k) && _desktopCanOpen(k)) {
+                                // #262: a chip-only window opens first, but
+                                // only once the mod answers and the target is
+                                // one of its workspaces (the command's own
+                                // positional rule), so a refused send opens
+                                // nothing.
+                                const wl = await _execModCommand('workspaces:list');
+                                const items = (wl && wl.ok === true && wl.value
+                                    && Array.isArray(wl.value.items))
+                                    ? wl.value.items : [];
+                                if (lost()) {
+                                    out = { ok: false, error: 'lost_lease' };
+                                } else if (!wl || wl.ok !== true) {
+                                    out = desktopCommandResult(wl);
+                                } else if (!Number.isInteger(args.target)
+                                        || args.target < 0
+                                        || args.target >= items.length) {
+                                    out = { ok: false, error: 'bad_args',
+                                            detail: 'args' };
+                                } else if (!_desktopOpenChip(k)) {
+                                    out = { ok: false, error: 'unknown_window' };
+                                } else {
+                                    args.key = k;
+                                    r = await _execModCommand(msg.op, args);
+                                }
                             } else {
                                 args.key = k;
                                 r = await _execModCommand(msg.op, args);
