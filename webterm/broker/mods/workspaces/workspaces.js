@@ -22,6 +22,11 @@
         //   (#247: focusedColId names the focused column, trusted only while
         //   focusedCol still equals focusedColIdAt -- a browser without this
         //   code writes only the index, which then wins.)
+        //   #258 adds, all optional (absent = today's behaviour, so version
+        //   stays 1 -- an older build writes `version = 1` on every read):
+        //     list[i].color?:'#rrggbb'   list[i].stack?:'<stack id>'
+        //     stacks?:[ {id, name?, color?:'#rrggbb', lastId?:'<member id>'} ]
+        //   Order is the list order; a stack's members are contiguous in it.
         //   _layout.columns[i].wsId = '<workspace id>'   (mod-owned; core
         //                               preserves it and never reads it)
         // An UNSTAMPED column -- one core made while this was off, or one a peer
@@ -221,6 +226,7 @@
                     if (typeof w.name !== 'string' || !w.name.trim()) delete w.name;
                     else w.name = w.name.slice(0, 40);
                     if (!Number.isInteger(w.focusedCol) || w.focusedCol < 0) w.focusedCol = 0;
+                    if (healColor(w)) _wsDirty = true;
                     if (w.focusedColId !== undefined
                             && (typeof w.focusedColId !== 'string' || !w.focusedColId
                                 || !Number.isInteger(w.focusedColIdAt))) {
@@ -251,11 +257,71 @@
                     // and lose its grouping.
                     _wsDirty = true;
                 }
+                if (healStacks(st)) _wsDirty = true;
                 if (!st.list.some(function (w) { return w.id === st.activeId; })) {
                     st.activeId = st.list[0].id;
                     _wsDirty = true;
                 }
                 return st;
+            }
+            // #258: a colour is a canonical '#rrggbb' (lower case); a 3-digit
+            // or upper-case hex is canonicalised, anything else is no colour.
+            function wsHex(c) {
+                if (typeof c !== 'string') return null;
+                if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
+                if (/^#[0-9a-fA-F]{3}$/.test(c)) {
+                    return ('#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toLowerCase();
+                }
+                return null;
+            }
+            // Heal o.color in place; true when it wrote (a canonical one is
+            // left alone, so a valid adopted blob is never rewritten).
+            function healColor(o) {
+                if (o.color === undefined) return false;
+                const c = wsHex(o.color);
+                if (c === o.color) return false;
+                if (c === null) delete o.color; else o.color = c;
+                return true;
+            }
+            // #258 stacks, healed in a FIXED order: the stack rows, then each
+            // member's w.stack. True when anything was rewritten. Nothing is
+            // ever ADDED to a valid store (no `stacks: []` materialised).
+            function healStacks(st) {
+                let dirty = false;
+                if (st.stacks !== undefined && !Array.isArray(st.stacks)) {
+                    delete st.stacks;
+                    dirty = true;
+                }
+                const rows = new Map();
+                if (Array.isArray(st.stacks)) {
+                    const wsIds = new Set(st.list.map(function (w) { return w.id; }));
+                    const kept = st.stacks.filter(function (s) {
+                        if (!s || typeof s !== 'object' || Array.isArray(s)) return false;
+                        // A stack id must not collide with a workspace id:
+                        // every lookup is typed, but the store must not lie.
+                        if (typeof s.id !== 'string' || !s.id || rows.has(s.id)
+                            || wsIds.has(s.id)) return false;
+                        rows.set(s.id, s);
+                        if (s.name !== undefined) {
+                            const t = (typeof s.name === 'string') ? s.name.trim().slice(0, 40) : '';
+                            if (t !== s.name) { if (t) s.name = t; else delete s.name; dirty = true; }
+                        }
+                        if (healColor(s)) dirty = true;
+                        return true;
+                    });
+                    if (kept.length !== st.stacks.length) {
+                        st.stacks.length = 0;
+                        for (const s of kept) st.stacks.push(s);
+                        dirty = true;
+                    }
+                }
+                for (const w of st.list) {
+                    if (w.stack !== undefined && !(typeof w.stack === 'string' && rows.has(w.stack))) {
+                        delete w.stack;
+                        dirty = true;
+                    }
+                }
+                return dirty;
             }
             // Rebuild the workspace list from the pre-#148 blob core flattened. The
             // columns are already all in L.columns; this only re-stamps the grouping.

@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 10
+EXPECTED_ASSERTS = 16
 
 _PRELUDE = r"""
 'use strict';
@@ -355,6 +355,7 @@ function buildWorld(seed) {
         PALETTE: PALETTE,                                  // CHANGE: the real 50 palette
         window: { innerWidth: 1600, innerHeight: 900 },
     };
+    w.seedJson = J(w.L.mods.workspaces);
     new Function(...Object.keys(names), src)(...Object.values(names));
     w.def = registered;
     w.def.init(w.ctx);
@@ -436,9 +437,54 @@ async function baseline() {
 }
 """
 
+_SCENARIOS += r"""
+async function heal() {
+    // ---- H: the heal never writes a valid store, and canonicalises garbage --
+    const stacked = [
+        { id: 'W1', focusedCol: 0, color: '#4aa3ff' },
+        { id: 'W2', focusedCol: 0, stack: 'S9', name: 'api' },
+        { id: 'W3', focusedCol: 0, stack: 'S9', color: '#e96d6d' }];
+    let w = buildWorld({ list: stacked, stacks: [
+        { id: 'S9', name: 'dev', color: '#5fbf7f', lastId: 'W3' }] });
+    const st = w.st();
+    ok(Array.isArray(st.stacks) && st.stacks.length === 1 && st.list[2].stack === 'S9',
+        'H1 precondition: the stacked seed is in the store');
+    ok(w.spies.save === 0 && J(w.st()) === w.seedJson,
+        'H1 a valid stacked store is left byte-equal and never saved');
+    w = buildWorld();
+    ok(w.spies.save === 0 && J(w.st()) === w.seedJson && !('stacks' in w.st()),
+        'H1 a valid pre-#258 store is left byte-equal, never saved, and gains no stacks key');
+
+    w = buildWorld({ list: [
+        { id: 'W1', focusedCol: 0, color: 'red' }, { id: 'W2', focusedCol: 0, color: '#12' },
+        { id: 'W3', focusedCol: 0, color: 7 }, { id: 'W4', focusedCol: 0, color: '#ABCDEF' },
+        { id: 'W5', focusedCol: 0, color: '#abc' }] });
+    const cs = w.st().list.map(function (x) { return x.color === undefined ? '-' : x.color; });
+    ok(w.st().list.length === 5 && J(cs) === J(['-', '-', '-', '#abcdef', '#aabbcc'])
+        && w.spies.save === 1,
+        'H2 bad colours are dropped, hex is canonicalised, and the heal saves once');
+
+    w = buildWorld({ list: [
+        { id: 'W1', focusedCol: 0, stack: 'GONE' },
+        { id: 'W2', focusedCol: 0, stack: 'S1' }, { id: 'W3', focusedCol: 0, stack: 'S1' }],
+        stacks: [null, 5, { id: '' }, { id: 'S1', name: '  ops  ', color: 'blue' },
+                 { id: 'S1', name: 'dup' }, { id: 'W1' }] });
+    const s5 = w.st();
+    ok(s5.list.length === 3 && Array.isArray(s5.stacks)
+        && J(s5.stacks) === J([{ id: 'S1', name: 'ops' }])
+        && s5.list[0].stack === undefined && s5.list[1].stack === 'S1'
+        && w.spies.save === 1,
+        'H5 garbage, duplicate and workspace-id stack rows and a dangling membership are healed');
+    w = buildWorld({ stacks: 'junk' });
+    ok(w.st().list.length === 3 && !('stacks' in w.st()) && w.spies.save === 1,
+        'H5 a non-array stacks field is deleted');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
+    await heal();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -495,6 +541,21 @@ def test_unstacked_pager_behaves_as_before(scenario_run):
             "BL8 the desktop menu lists every workspace with its count and a check on the current one",
             "BL9 a tiled window's menu offers Send to every other workspace by number"):
         _ok(scenario_run, label)
+
+
+def test_heal_never_writes_a_valid_store(scenario_run):
+    _ok(scenario_run, "H1 precondition: the stacked seed is in the store")
+    _ok(scenario_run, "H1 a valid stacked store is left byte-equal and never saved")
+    _ok(scenario_run, "H1 a valid pre-#258 store is left byte-equal, never saved, and gains no stacks key")
+
+
+def test_heal_colours(scenario_run):
+    _ok(scenario_run, "H2 bad colours are dropped, hex is canonicalised, and the heal saves once")
+
+
+def test_heal_stack_garbage(scenario_run):
+    _ok(scenario_run, "H5 garbage, duplicate and workspace-id stack rows and a dangling membership are healed")
+    _ok(scenario_run, "H5 a non-array stacks field is deleted")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
