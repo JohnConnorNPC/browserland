@@ -339,9 +339,10 @@ function makeSandbox(wf, cols, opts) {
     return t;
 }
 
-// Draw the layout, settle its own focus scroll, then clear the write log.
-// Asserts the sandbox really drew the columns (widths written) and that
-// they fill the strip exactly when the set fills it.
+// Draw the layout and settle its own focus scroll (the rAF tail scrolls the
+// focused column into view), assert that tail wrote no scrollLeft, then clear
+// the write log. Also asserts the sandbox really drew the columns (widths
+// written) and that they fill the strip exactly when the set fills it.
 function drawn(t, label, filling) {
     t.api.relayoutStrip();
     t.flush();
@@ -355,6 +356,8 @@ function drawn(t, label, filling) {
            label + ' columns+gutters ' + t.strip.contentW() + ' == clientWidth ' +
            t.strip.clientWidth + ' (' + els.map(e => e.style.width).join(',') + ')');
     }
+    ok(t.strip.writes.length === 0,
+       label + ' relayout tail wrote no scrollLeft (' + t.strip.writes + ')');
     t.strip.writes.length = 0;
 }
 function visibleIndexOf(t, id) {
@@ -382,13 +385,20 @@ function focusCase() {
                     cols.push({ id: 'c' + i, preset: p, live: true });
                     if (i === 0) cols.push({ id: 'd1', preset: '2/3', live: false });
                 });
+              // Focus starts on the left column, then on the right one (the
+              // relayout tail scrolls whichever is focused into view).
+              for (const fromRight of [false, true]) {
                 const t = makeSandbox(wf, cols, { slideMs: smooth ? 350 : 0 });
                 const vis = t.liveIds.map(id => visibleIndexOf(t, id));
-                t.layout.focusedCol = vis[0];
-                const label = 'C2 ' + name + ' W=' + wf + (smooth ? ' smooth' : ' instant');
+                const lastVis = vis.length - 1;
+                t.layout.focusedCol = vis[fromRight ? lastVis : 0];
+                const label = 'C2 ' + name + ' W=' + wf + (smooth ? ' smooth' : ' instant') +
+                    (fromRight ? ' from right' : ' from left');
                 drawn(t, label, true);
                 const sl0 = t.strip.scrollLeft;
-                const seq = vis.length === 2 ? [1, 0, 1, 0] : [1, 2, 1, 0];
+                const seq = fromRight
+                    ? (vis.length === 2 ? [0, 1, 0, 1] : [1, 0, 1, 2])
+                    : (vis.length === 2 ? [1, 0, 1, 0] : [1, 2, 1, 0]);
                 for (const k of seq) {
                     t.api.scrollColumnIntoView(vis[k], smooth);
                     t.flush();
@@ -405,6 +415,7 @@ function focusCase() {
                 ok(t.strip.writes.length > 0 && t.strip.scrollLeft > sl0,
                    label + ' control: a 1px-over last column scrolls');
                 noUnknown(t, label);
+              }
             }
         }
     }
@@ -651,13 +662,16 @@ def test_gutter_width_matches_the_css():
     assert set(jm) == {m.group(1)}, (jm, m.group(1))
 
 
-# Per (set, width, mode): drew + tail + exact fill, 4 focus steps, the
-# control, no-unknown = 9; 4 sets x 6 widths x 2 modes.
-FOCUS_ASSERTS = 4 * 6 * 2 * 9
-# drew + tail + widths, 2 modes x (2 preconditions + 2 results), no-unknown.
-WIDE_ASSERTS = 3 + 2 * 4 + 1
-# Per (width, mode): drew + tail, 2 preconditions + 2 results, no-unknown.
-REVEAL_ASSERTS = 2 * 2 * (2 + 4 + 1)
+# Per (set, width, mode, start side): drew + tail + exact fill + no tail
+# write, 4 focus steps, the control, no-unknown = 10; 4 sets x 6 widths x
+# 2 modes x 2 start sides.
+FOCUS_ASSERTS = 4 * 6 * 2 * 2 * 10
+# drew + tail + no tail write + widths, 2 modes x (2 preconditions + 2
+# results), no-unknown.
+WIDE_ASSERTS = 4 + 2 * 4 + 1
+# Per (width, mode): drew + tail + no tail write, 2 preconditions + 2
+# results, no-unknown.
+REVEAL_ASSERTS = 2 * 2 * (3 + 4 + 1)
 
 
 def test_focus_between_filling_columns_scrolls_nothing(tmp_path):
@@ -675,12 +689,13 @@ def test_one_pixel_clipped_column_is_revealed(tmp_path):
     assert n == REVEAL_ASSERTS, out[-400:]
 
 
-# Per (set, width, gutter, dx): drew + tail + exact fill, live fill, edge,
-# release ran, release == drag, no-unknown = 8; 2x1/2 has 1 gutter, 3x1/3 2.
-DRAG_ASSERTS = 2 * 4 * (1 + 2) * 8
-# Per width: drew + tail + exact fill, precondition, stale removed,
-# release == drag, no-unknown.
-STALE_ASSERTS = 2 * (3 + 4)
+# Per (set, width, gutter, dx): drew + tail + exact fill + no tail write,
+# live fill, edge, release ran, release == drag, no-unknown = 9; 2x1/2 has
+# 1 gutter, 3x1/3 2.
+DRAG_ASSERTS = 2 * 4 * (1 + 2) * 9
+# Per width: drew + tail + exact fill + no tail write, precondition, stale
+# removed, release == drag, no-unknown.
+STALE_ASSERTS = 2 * (4 + 4)
 
 
 def test_gutter_drag_and_release_relayout_agree(tmp_path):
@@ -693,9 +708,9 @@ def test_gutter_drag_ignores_a_stale_deferred_column(tmp_path):
     assert n == STALE_ASSERTS, out[-400:]
 
 
-# Per (pair, width, dx): drew + tail, fracs in (0,1], release ran,
-# release == drag, no-unknown; 3 pairs x 2 widths x 4 dx.
-RECONCILE_ASSERTS = 3 * 2 * 4 * 6
+# Per (pair, width, dx): drew + tail + no tail write, fracs in (0,1],
+# release ran, release == drag, no-unknown; 3 pairs x 2 widths x 4 dx.
+RECONCILE_ASSERTS = 3 * 2 * 4 * 7
 
 
 def test_gutter_drag_wider_pair_survives_the_real_reconcile(tmp_path):
