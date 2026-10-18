@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 83
+EXPECTED_ASSERTS = 87
 
 _PRELUDE = r"""
 'use strict';
@@ -1181,6 +1181,57 @@ async function stackListKeys() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackMenu() {
+    // ---- SM3-SM5 / MV3b: the stack entry's own menu -----------------------
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    function seed() {
+        return { stacks: [{ id: 'S1', name: 'dev' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] };
+    }
+    function stackMenuOf(w) {
+        const d = w.stackDot('S1');
+        if (!d) return null;
+        const n = w.menus.length;
+        fire(d, 'contextmenu', { clientX: 7, clientY: 8 });
+        return w.menus.length > n ? w.lastMenu() : null;
+    }
+    let w = buildWorld(seed());
+    let m = stackMenuOf(w);
+    const lbl = m ? m.items.filter(function (it) { return !it.sep; }).map(function (it) { return it.label; }) : [];
+    ok(!!m && J(lbl) === J(['Stack 2 — dev (2)', 'Rename stack…', 'Colour…', 'Move left', 'Move right'])
+        && !m.items[0].enabled,
+        'SM3 right-clicking a stack opens its own menu: name, rename, colour, move');
+
+    w.promptAnswer = '  build  ';
+    await act(w.item(m, /^Rename stack/));
+    const named = w.st().stacks[0].name;
+    m = stackMenuOf(w);
+    w.promptAnswer = '   ';
+    await act(w.item(m, /^Rename stack/));
+    ok(named === 'build' && !('name' in w.st().stacks[0]) && w.spies.prompt.length === 2
+        && w.spies.prompt[1].value === 'build',
+        'SM4 Rename stack… names the stack (trimmed); a blank name clears it');
+
+    w = buildWorld(seed());
+    m = stackMenuOf(w);
+    act(w.item(m, /^Colour…$/));
+    const pal = w.lastMenu();
+    act(w.item(pal, new RegExp(PALETTE[3])));
+    const sd = w.stackDot('S1');
+    ok(!!m && pal !== m && w.st().stacks[0].color === PALETTE[3]
+        && w.st().list[1].color === undefined && !!sd && sd.style.getPropertyValue('--ws-color') === PALETTE[3],
+        'SM5 Colour… on a stack colours the stack, not its members');
+
+    w = buildWorld(seed());
+    m = stackMenuOf(w);
+    act(w.item(m, /^Move right$/));
+    ok(!!m && ids(w) === 'W1,W4,W2,W3', 'MV3b Move right on a stack moves the whole stack past the next entry');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1198,6 +1249,7 @@ _EPILOGUE = r"""
     await stackEntry();
     await stackDrag();
     await stackListKeys();
+    await stackMenu();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1405,6 +1457,13 @@ def test_stack_list_keyboard_and_focus(scenario_run):
     _ok(scenario_run, "SL8 a pick does not drag focus back to the old element")
     _ok(scenario_run, "SL9 precondition: the pager is hidden")
     _ok(scenario_run, "SL9 with the pager hidden the list anchors to the taskbar")
+
+
+def test_stack_menu(scenario_run):
+    _ok(scenario_run, "SM3 right-clicking a stack opens its own menu: name, rename, colour, move")
+    _ok(scenario_run, "SM4 Rename stack… names the stack (trimmed); a blank name clears it")
+    _ok(scenario_run, "SM5 Colour… on a stack colours the stack, not its members")
+    _ok(scenario_run, "MV3b Move right on a stack moves the whole stack past the next entry")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

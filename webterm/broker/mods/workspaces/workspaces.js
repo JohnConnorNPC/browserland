@@ -608,6 +608,11 @@
                 if (s.color) { d.classList.add('tinted'); d.style.setProperty('--ws-color', s.color); }
                 wireEntryDrag(d, e.key);
                 d.addEventListener('click', () => openStackList(s.id));
+                d.addEventListener('contextmenu', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    buildStackMenu(s.id, ev.clientX, ev.clientY);
+                });
                 d.addEventListener('mouseenter', () => showWsPreview(e.flat + e.members.indexOf(wsStackShown(e)), d));
                 d.addEventListener('mouseleave', hideWsPreview);
                 return d;
@@ -1006,6 +1011,45 @@
                 wsStore();
                 wsMoved();
                 return true;
+            }
+            // A stack's own name and colour (its members keep theirs).
+            function wsStackRow(sid) { return (wsStore().stacks || []).find(s => s.id === sid) || null; }
+            function renameStackById(sid, name) {
+                const s = wsStackRow(sid);
+                if (!s) return false;
+                const t = String(name).trim().slice(0, 40);
+                if (t) s.name = t; else delete s.name;
+                wsMoved();
+                return true;
+            }
+            function setStackColorById(sid, color) {
+                const s = wsStackRow(sid), c = wsPickColor(color);
+                if (!s || c === undefined) return false;
+                if (c === null) delete s.color; else s.color = c;
+                wsMoved();
+                return true;
+            }
+            // The stack entry's menu: its name, colour and place, by id.
+            function buildStackMenu(sid, x, y) {
+                const e = wsPagerEntries().find(en => en.stack && en.stack.id === sid);
+                if (!e) return;
+                const key = e.key;
+                renderMenu([
+                    { label: 'Stack ' + e.num + (e.stack.name ? ' — ' + e.stack.name : '')
+                        + ' (' + e.members.length + ')', enabled: false },
+                    { label: 'Rename stack…', enabled: true, action: async () => {
+                        const s = wsStackRow(sid);
+                        if (!s) return;
+                        const name = await openTextPrompt({ title: 'Rename stack', label: 'Name',
+                            value: s.name || '', placeholder: 'blank = use the number', okLabel: 'Rename' });
+                        if (name !== null) renameStackById(sid, name);
+                    } },
+                    { label: 'Colour…', enabled: true, action: () => openColorMenu(
+                        (wsStackRow(sid) || {}).color, x, y, (c) => setStackColorById(sid, c)) },
+                    { sep: true },
+                    { label: 'Move left', enabled: wsCanMove(key, -1), action: () => moveEntry(key, -1) },
+                    { label: 'Move right', enabled: wsCanMove(key, 1), action: () => moveEntry(key, 1) },
+                ], x, y);
             }
             // "Stack with…": every OTHER pager entry, resolved at click.
             function openStackWithMenu(wsId, x, y) {
