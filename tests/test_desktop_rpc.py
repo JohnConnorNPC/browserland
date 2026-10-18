@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 72
+EXPECTED_ASSERTS = 79
 
 _HARNESS = r"""
 'use strict';
@@ -81,6 +81,9 @@ let pushImmediate = true;
 // #262: every openWindow call, by key (the open itself is observed as the
 // windows map growing; this log says how often and for which key).
 let openCalls = [];
+// #262: every refreshSessionsFor call; state.catchUp (when set) runs inside
+// it, the way a real catch-up merges a fresh /sessions answer.
+let catchUps = [];
 
 function findKeyInLayout(key) {
     for (let ci = 0; ci < L.columns.length; ci++) {
@@ -120,6 +123,7 @@ function resetWorld() {
     pushCalls = 0; pushImmediate = true; state.deactivated = false;
     state.tiling = true; state.detached = false; state.openHusk = false;
     state.forcePlace = null; openCalls = [];
+    state.catchUp = null; catchUps = [];
     mk('local:7', null, { title: 'agent 7' });
     mk('local:9', null, { title: 'agent 9' });
     mk('local:12', { tiled: false,
@@ -219,6 +223,13 @@ const env = {
     openWindow: openWindowStub,
     isTilingMode: function () { return state.tiling; },
     isDetachedSurface: function () { return state.detached; },
+    refreshSessionsFor: function (hid, ms) {
+        catchUps.push({ hid: hid, ms: ms });
+        const f = state.catchUp;
+        return Promise.resolve().then(function () {
+            return f ? f(hid) : undefined;
+        });
+    },
 };
 Object.defineProperty(env, '_deactivated', {
     get: function () { return state.deactivated; },
@@ -823,6 +834,64 @@ function countMut(name) {
         'W5 a live window takes the old path (no list call, no open)');
     execNext = null;
 
+    // ---- U: #262 one catch-up refresh for an id not polled yet ------------
+    function lands(key) {
+        return function () { sessions.set(key, { title: 'late ' + key }); };
+    }
+    resetWorld();
+    state.catchUp = lands('local:50');
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 50, visible: null } });
+    ok(r && r.ok === true && windows.has('local:50') && catchUps.length === 1
+        && catchUps[0].hid === 'local' && catchUps[0].ms === 2000,
+        'U1 an id the page has not polled yet is caught up once, then opened');
+    resetWorld();
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 51, visible: null } });
+    ok(r && r.error === 'unknown_window' && catchUps.length === 1,
+        'U2 a catch-up that finds nothing answers unknown_window after exactly one try');
+    chips();
+    await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 7, visible: null } });
+    await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 30, visible: null } });
+    execNext = { ok: false, reason: 'absent' };
+    await drive('local', { rid: freshRid(), op: 'get', args: { visible: null } });
+    execNext = null;
+    ok(catchUps.length === 0,
+        'U3 a polled id, a chip and a get never wait for a catch-up');
+    resetWorld();
+    state.catchUp = function () {
+        sessions.set('local:50', { title: 'late' });
+        state.deactivated = true;
+    };
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 50, visible: null } });
+    state.deactivated = false;
+    ok(r && r.error === 'lost_lease' && openCalls.length === 0,
+        'U4 a lease lost during the catch-up answers lost_lease and opens nothing');
+    resetWorld();
+    state.catchUp = lands('local:52');
+    execNext = wsMod(TWO_WS);
+    r = await drive('local', { rid: freshRid(), op: 'workspaces:send-window',
+        args: { win: 52, target: 1 } });
+    execNext = null;
+    ok(r && r.ok === true && windows.has('local:52') && catchUps.length === 1,
+        'U5 send-window catches up an id not polled yet, then opens and sends it');
+    resetWorld();
+    state.catchUp = function () { throw new Error('poll exploded'); };
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 51, visible: null } });
+    ok(r && r.error === 'unknown_window' && catchUps.length === 1,
+        'U6 a catch-up that rejects still answers unknown_window, never an error');
+    chips();
+    state.catchUp = lands('local:53');
+    r = await drive('local', { rid: freshRid(), op: 'tab_into',
+        args: { id: 30, target: 53, visible: null } });
+    ok(r && r.ok === true && windows.has('local:30') && windows.has('local:53')
+        && catchUps.length === 1,
+        'U7 an unpolled tab_into target is caught up too');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1080,6 +1149,19 @@ def test_262_send_window_opens_a_chip_after_validating(scenario_run):
     _ok(scenario_run, "W3 a send to a workspace that does not exist opens nothing")
     _ok(scenario_run, "W4 a lease lost during the list await opens nothing")
     _ok(scenario_run, "W5 a live window takes the old path (no list call, no open)")
+
+
+def test_262_one_catch_up_for_an_id_not_polled_yet(scenario_run):
+    # Right after launch_terminal returns, the page may not have polled the
+    # new window yet: the op waits for ONE bounded catch-up (2 s), then
+    # answers -- never a loop, never for an id it already knows or for get.
+    _ok(scenario_run, "U1 an id the page has not polled yet is caught up once, then opened")
+    _ok(scenario_run, "U2 a catch-up that finds nothing answers unknown_window after exactly one try")
+    _ok(scenario_run, "U3 a polled id, a chip and a get never wait for a catch-up")
+    _ok(scenario_run, "U4 a lease lost during the catch-up answers lost_lease and opens nothing")
+    _ok(scenario_run, "U5 send-window catches up an id not polled yet, then opens and sends it")
+    _ok(scenario_run, "U6 a catch-up that rejects still answers unknown_window, never an error")
+    _ok(scenario_run, "U7 an unpolled tab_into target is caught up too")
 
 
 # ---- the catch-all ---------------------------------------------------------------

@@ -1085,6 +1085,10 @@
         const _desktopInflight = new Map();
         const _desktopRunlessEpoch = new Map();     // hostId -> int
         const _DESKTOP_RID_CACHE_MAX = 128;
+        // #262: the one catch-up refresh an op may wait for when it names a
+        // window this page has not polled yet -- well inside the broker's 10 s
+        // end-to-end deadline (DESKTOP_RPC_TIMEOUT_S).
+        const DESKTOP_REFRESH_MS = 2000;
         function _desktopRememberRid(key, payload) {
             _desktopAppliedRids.delete(key);
             _desktopAppliedRids.set(key, payload);
@@ -1206,6 +1210,18 @@
             if (role === true) return true;
             if (role === false) return false;
             return isTilingMode();
+        }
+        // #262: whether an op names an int id that does not resolve here yet.
+        // For a non-admin every named id already passed the broker's own
+        // check (live, in scope, not off), so waiting for a refresh on it
+        // tells the caller nothing new; an admin's unknown id costs the
+        // catch-up, then the same 404.
+        function _desktopUnpolled(hid, ids) {
+            for (const id of ids) {
+                if (Number.isInteger(id)
+                        && resolveDesktopWinKey(hid, id) === null) return true;
+            }
+            return false;
         }
         // A winKey's int id on THIS connection's broker, or null when the
         // key belongs to another namespace (app windows, other brokers).
@@ -1623,7 +1639,18 @@
                                     value: desktopSnapshot(hid, visible, wsr) };
                         }
                     } else {
-                        out = desktopCoreOp(hid, msg.op, args, visible);
+                        // #262: one bounded catch-up for an id this page has
+                        // not polled yet, then the lease is re-checked.
+                        const named = (msg.op === 'tab_into'
+                            || msg.op === 'split')
+                            ? [args.id, args.target] : [args.id];
+                        if (_desktopUnpolled(hid, named)) {
+                            try {
+                                await refreshSessionsFor(hid, DESKTOP_REFRESH_MS);
+                            } catch (_) {}
+                        }
+                        out = lost() ? { ok: false, error: 'lost_lease' }
+                            : desktopCoreOp(hid, msg.op, args, visible);
                         if (out.ok) {
                             // Flush before ack: success means the /state
                             // write was attempted under our lease.
@@ -1646,9 +1673,20 @@
                         let r = null;
                         if (msg.op === 'workspaces:send-window') {
                             // The wire's `win` int resolves in THIS
-                            // connection's namespace before dispatch.
-                            const k = resolveDesktopWinKey(hid, args.win);
-                            if (k === null) {
+                            // connection's namespace before dispatch, after
+                            // one catch-up if it is not polled yet (#262).
+                            if (_desktopUnpolled(hid, [args.win])) {
+                                try {
+                                    await refreshSessionsFor(hid,
+                                                             DESKTOP_REFRESH_MS);
+                                } catch (_) {}
+                            }
+                            const gone = lost();
+                            const k = gone ? null
+                                : resolveDesktopWinKey(hid, args.win);
+                            if (gone) {
+                                out = { ok: false, error: 'lost_lease' };
+                            } else if (k === null) {
                                 out = { ok: false, error: 'unknown_window' };
                             } else if (!windows.get(k) && _desktopCanOpen(k)) {
                                 // #262: a chip-only window opens first, but

@@ -202,6 +202,12 @@
         // every manual gesture that refreshes early-return while it is held, so
         // a run that wedges freezes the desktop's whole heartbeat until F5.
         const REFRESH_WATCHDOG_MS = POLL_MS * 5;
+        // #262: the promise of the run that holds the mutex (null when none
+        // does), so a caller that must SEE a refresh land can wait for it
+        // instead of taking the coalesced no-op. Owned like the mutex: only
+        // the current run's own `finally` (or the watchdog retiring it)
+        // clears it.
+        let refreshRunPromise = null;
         async function refreshTaskbar() {
             // Coalesce overlapping calls: a slow /sessions response from the
             // 2s tick must not race a fast-poll tick during auto-open.
@@ -217,22 +223,73 @@
             // moment it stops being the current run, so it must bail at its next
             // await whether or not a newer run has started yet — and its
             // `finally` must no longer clear a mutex someone else may hold.
+            let run = null;
             const watchdog = setTimeout(() => {
                 if (refreshSeq === seq && refreshInFlight) {
                     refreshSeq += 1;
                     refreshInFlight = false;
+                    if (refreshRunPromise === run) refreshRunPromise = null;
                 }
             }, REFRESH_WATCHDOG_MS);
             try {
-                await refreshTaskbarInner(seq);
+                run = refreshTaskbarInner(seq);
+                refreshRunPromise = run;
+                await run;
             } finally {
                 clearTimeout(watchdog);
                 // Only the run that still OWNS the mutex may release it: after a
                 // watchdog force-release a newer run holds it, and clearing it
                 // here would let a third run in alongside that one.
                 if (refreshSeq === seq) refreshInFlight = false;
+                if (refreshRunPromise === run) refreshRunPromise = null;
             }
         }
+
+        // #262: one bounded catch-up for a desktop op that names a window this
+        // page has not polled yet (an MCP launch the 2 s tick has not seen).
+        // It polls that host, then lets ONE refresh merge the answer into
+        // `sessions`. Before and after its own refreshTaskbar() call it waits
+        // for whichever run holds the mutex, because a run already in flight
+        // may have merged before the poll landed, and a run that took the
+        // mutex first turns its own call into the coalesced no-op. Every wait
+        // races the one deadline (its timer cleared either way). It never
+        // throws and never loops, and concurrent callers for one host share
+        // one catch-up. The poll and refresh it gives up on are the ordinary
+        // heartbeat's work, so they are left to finish.
+        const _sessionsCatchUp = new Map();     // hostId -> in-flight promise
+        function refreshSessionsFor(hostId, budgetMs) {
+            const have = _sessionsCatchUp.get(hostId);
+            if (have) return have;
+            const p = _catchUpSessions(hostId, budgetMs)
+                .catch(() => {})
+                .then(() => {
+                    if (_sessionsCatchUp.get(hostId) === p) {
+                        _sessionsCatchUp.delete(hostId);
+                    }
+                });
+            _sessionsCatchUp.set(hostId, p);
+            return p;
+        }
+        async function _catchUpSessions(hostId, budgetMs) {
+            if (_deactivated) return;
+            const host = hostById(hostId);
+            if (!host) return;
+            const until = Date.now() + budgetMs;
+            const within = (p) => {
+                let timer = null;
+                const capped = new Promise((res) => {
+                    timer = setTimeout(res, Math.max(0, until - Date.now()));
+                });
+                return Promise.race([Promise.resolve(p).catch(() => {}), capped])
+                    .then(() => { clearTimeout(timer); });
+            };
+            const st = pollStateFor(hostId);
+            await within(st.pollPromise || pollHostOnce(host));
+            if (refreshRunPromise) await within(refreshRunPromise);
+            await within(refreshTaskbar());
+            if (refreshRunPromise) await within(refreshRunPromise);
+        }
+        // ---- end #262 session catch-up
 
         async function pollHost(host) {
             const st = pollStateFor(host.id);
