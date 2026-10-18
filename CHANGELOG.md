@@ -249,6 +249,16 @@ story behind anything named below.
 
 ### Fixed
 
+- **Two ½ columns no longer scroll the strip when focus moves between them**
+  (#259). Each column's width was rounded on its own, so on a strip whose
+  usable width is odd two ½ columns came out 1 px wider than the strip, and
+  focusing one and then the other scrolled it back and forth by that pixel;
+  three ⅓ columns could end 1 px over or under. Columns are now sized from
+  rounded cumulative edges, so presets that fill the screen (two ½, three ⅓,
+  ⅓ + ⅔) fill it exactly, and the column-gutter drag uses the same sizing, so
+  the drag and the relayout after it agree to the pixel. The drag also keeps
+  each side of the pair at most the full strip width, so releasing never snaps
+  a column back.
 - **Adding a workspace after a reload could do nothing** (#258, fixed along
   the way). The new workspace could get the id of an existing workspace, and
   was then dropped as a duplicate straight away. New workspaces (and stacks)
