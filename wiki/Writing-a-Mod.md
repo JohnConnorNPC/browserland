@@ -170,8 +170,7 @@ Field by field:
   omitting it means "pin nothing". The contract is at `1`, and every capability
   added to `ctx` since has been additive — so **feature-detect**
   (`if (ctx.theme)`) rather than declaring a higher number. Within 1.x,
-  `ctxVersion` stays 1 and the surface only grows: members are added, never
-  removed or changed ([[Upgrading#what-10-promises]]).
+  `ctxVersion` stays 1, with additions only ([[Upgrading#what-10-promises]]).
 - **`defaultEnabled`** — `false` ships the mod off until the operator opts in.
   Absent means on. Mirrored in `registerMod`. For an **installed** mod this
   field is accepted and then ignored: the broker always reports

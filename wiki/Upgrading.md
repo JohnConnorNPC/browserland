@@ -23,7 +23,7 @@ Edge and Firefox.
   fields.
 
 A change that would break one of these three waits for 2.0. Anything not listed
-here can change in a 1.x release; when it does, it is written up on this page.
+here can change in a 1.x release.
 
 ---
 
