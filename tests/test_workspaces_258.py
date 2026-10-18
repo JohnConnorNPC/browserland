@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 103
+EXPECTED_ASSERTS = 104
 
 _PRELUDE = r"""
 'use strict';
@@ -1440,6 +1440,22 @@ async function stackWithGone() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackWithTargets() {
+    // ---- SM1: Stack with… lists every OTHER pager entry ---------------------
+    const w = buildWorld({ stacks: [{ id: 'S1', name: 'dev' }], list: [
+        { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+        { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] });
+    const m = w.openWsMenu('W2');                          // a member: its own stack is excluded
+    const sw = w.item(m, /^Stack with…$/);
+    if (sw) sw.action();
+    const tm = w.lastMenu();
+    const labels = (tm && tm !== m) ? tm.items.map(function (it) { return it.label; }) : null;
+    ok(J(labels) === J(['Workspace 1', 'Workspace 3']),
+        'SM1 Stack with… lists every other pager entry, never the workspace\'s own stack');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1466,6 +1482,7 @@ _EPILOGUE = r"""
     await dotClickById();
     await badgeColourCleared();
     await stackWithGone();
+    await stackWithTargets();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1720,6 +1737,10 @@ def test_badge_colour_is_cleared(scenario_run):
 
 def test_stack_with_a_vanished_target(scenario_run):
     _ok(scenario_run, "SM6 Stack with… onto a workspace that vanished meanwhile says so and changes nothing")
+
+
+def test_stack_with_lists_the_other_entries(scenario_run):
+    _ok(scenario_run, "SM1 Stack with… lists every other pager entry, never the workspace's own stack")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
