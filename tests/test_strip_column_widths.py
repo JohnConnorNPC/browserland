@@ -127,10 +127,344 @@ function helperCase() {
        'C1d widthFrac 0.4 overrides the preset');
     ok(H.colCurrentFrac({ widthPreset: '2/3' }) === 2 / 3,
        'C1d no widthFrac uses the preset');
-    console.log(JSON.stringify({ gutter: H.STRIP_GUTTER_W }));
 }
 
-const CASES = { helper: helperCase };
+// ---- the whole 61 fragment in a sandbox ---------------------------------
+// Every identifier the fragment reads from outside itself comes from ENV
+// below. The `with` scope is a Proxy that THROWS on any other name, so a
+// missing stub can't read as undefined and let a check pass vacuously.
+// Built-ins the fragment uses are passed through by name.
+const BUILTINS = ['Math', 'Array', 'Map', 'Set', 'Number', 'String', 'Object',
+    'JSON', 'Error', 'console', 'undefined', 'NaN', 'Infinity', 'isFinite'];
+const GUTTER_CSS_W = 6;     // .strip-col-gutter { flex: 0 0 6px } (C1e pins it)
+
+class FakeEl {
+    constructor(tag) {
+        this.tagName = tag; this.children = []; this.parentElement = null;
+        this.dataset = {}; this.style = {}; this._cls = new Set();
+        this.listeners = {};
+        const cls = this._cls;
+        this.classList = {
+            add: c => cls.add(c), remove: c => cls.delete(c),
+            contains: c => cls.has(c),
+            toggle: (c, f) => {
+                const on = f === undefined ? !cls.has(c) : !!f;
+                if (on) cls.add(c); else cls.delete(c);
+                return on;
+            },
+        };
+    }
+    set className(v) {
+        this._cls.clear();
+        String(v).split(/\s+/).filter(Boolean).forEach(c => this._cls.add(c));
+    }
+    get className() { return Array.from(this._cls).join(' '); }
+    get firstChild() { return this.children[0] || null; }
+    get nextSibling() {
+        const p = this.parentElement;
+        return p ? (p.children[p.children.indexOf(this) + 1] || null) : null;
+    }
+    get isConnected() {
+        let e = this;
+        while (e.parentElement) e = e.parentElement;
+        return e.isRoot === true;
+    }
+    insertBefore(el, ref) {
+        if (el === ref) return el;
+        if (el.parentElement) el.remove();
+        const i = ref ? this.children.indexOf(ref) : -1;
+        if (ref && i < 0) throw new Error('insertBefore: ref is not a child');
+        if (i < 0) this.children.push(el); else this.children.splice(i, 0, el);
+        el.parentElement = this;
+        return el;
+    }
+    appendChild(el) { return this.insertBefore(el, null); }
+    remove() {
+        const p = this.parentElement;
+        if (!p) return;
+        p.children.splice(p.children.indexOf(this), 1);
+        this.parentElement = null;
+    }
+    addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); }
+    querySelector(sel) {
+        const m = /^\.strip-col\[data-col-id="(.*)"\]$/.exec(sel);
+        if (!m) throw new Error('querySelector: unsupported ' + sel);
+        return this.children.find(c => c._cls.has('strip-col')
+            && c.dataset.colId === m[1]) || null;
+    }
+    querySelectorAll(sel) {
+        const m = /^(?::scope > )?\.([\w-]+)$/.exec(sel);
+        if (!m) throw new Error('querySelectorAll: unsupported ' + sel);
+        return this.children.filter(c => c._cls.has(m[1]));
+    }
+    // Layout: a column is its inline width, a gutter the CSS 6px; offsets
+    // run left to right from the strip's padding edge (no padding/margins).
+    get offsetWidth() {
+        if (this._cls.has('strip-col-gutter')) return GUTTER_CSS_W;
+        const w = parseInt(this.style.width, 10);
+        return Number.isFinite(w) ? w : 0;
+    }
+    get offsetLeft() {
+        let x = 0;
+        for (const c of this.parentElement.children) {
+            if (c === this) return x;
+            x += c.offsetWidth;
+        }
+        throw new Error('offsetLeft: detached');
+    }
+}
+
+// A strip whose real (layout) width is wf: clientWidth is that rounded, and
+// scrollLeft clamps like a browser to [0, content - wf]. Every write is
+// logged, so "nothing scrolled" is observed, not inferred.
+function makeStrip(wf) {
+    const strip = new FakeEl('div');
+    strip.id = 'strip';
+    let sl = 0;
+    strip.writes = [];
+    strip.contentW = () => strip.children.reduce((a, c) => a + c.offsetWidth, 0);
+    Object.defineProperty(strip, 'clientWidth', { get: () => Math.round(wf) });
+    Object.defineProperty(strip, 'scrollWidth', {
+        get: () => Math.max(Math.round(wf), strip.contentW()) });
+    Object.defineProperty(strip, 'scrollLeft', {
+        get: () => sl,
+        set: v => {
+            strip.writes.push(v);
+            sl = Math.max(0, Math.min(Math.max(0, strip.contentW() - wf), v));
+        },
+    });
+    return strip;
+}
+
+// cols: [{id, preset?, frac?, live}] in layout order. A col with live:false
+// has only dead keys, so relayoutStrip leaves it DORMANT (not drawn) while
+// visibleColumns() still lists it: visible index != drawn index.
+function makeSandbox(wf, cols, opts) {
+    opts = opts || {};
+    const root = new FakeEl('html'); root.isRoot = true;
+    const body = new FakeEl('body'); root.appendChild(body);
+    const desktop = new FakeEl('div'); desktop.id = 'desktop';
+    Object.defineProperty(desktop, 'clientWidth', { get: () => Math.round(wf) });
+    body.appendChild(desktop);
+    const strip = makeStrip(wf);
+    desktop.appendChild(strip);
+    const docListeners = {};
+    const document = {
+        body,
+        activeElement: null,
+        getElementById: id => (id === 'strip' ? strip : id === 'desktop' ? desktop : null),
+        createElement: tag => new FakeEl(tag),
+        addEventListener: (t, fn) => { (docListeners[t] = docListeners[t] || []).push(fn); },
+        removeEventListener: (t, fn) => {
+            docListeners[t] = (docListeners[t] || []).filter(f => f !== fn);
+        },
+    };
+    const windows = new Map();
+    const layout = { mode: 'tiling', focusedCol: 0, columns: cols.map(c => {
+        const key = 'local:' + c.id;
+        if (c.live) windows.set(key, { id: key, disposed: false, minimized: false, hostId: 'local' });
+        const col = { id: c.id, widthPreset: c.preset || '1/2',
+            rows: [{ id: 'r-' + c.id, keys: [key], mode: 'single' }] };
+        if (c.frac !== undefined) col.widthFrac = c.frac;
+        return col;
+    }) };
+    let rafQ = [], rafId = 0, ts = 1000;
+    const settings = { slideScreenMs: opts.slideMs || 0 };
+    const t = { strip, desktop, layout, settings, docListeners, resized: 0,
+                liveIds: cols.filter(c => c.live).map(c => c.id) };
+    const ENV = {
+        document,
+        window: { getSelection: () => ({ isCollapsed: true, rangeCount: 0 }) },
+        windows,
+        getLayout: () => layout,
+        visibleColumns: () => layout.columns,
+        hostHidden: () => false,
+        rowKeys: row => row.keys,
+        layoutColumnRows: () => {},          // no rows drawn: widths only
+        cellTileEls: new Map(),
+        scheduleResize: () => { t.resized++; },
+        updateStripScrollbar: () => {},
+        reorderTaskbarItems: () => {},
+        getSettings: () => settings,
+        savePrefs: () => {},
+        requestRelayout: () => { t.relayouts = (t.relayouts || 0) + 1; t.api.relayoutStrip(); },
+        requestAnimationFrame: cb => { rafQ.push({ id: ++rafId, cb }); return rafId; },
+        cancelAnimationFrame: id => { rafQ = rafQ.filter(r => r.id !== id); },
+    };
+    const unknown = [];
+    const scope = new Proxy(ENV, {
+        has: (o, k) => typeof k === 'string',
+        get: (o, k) => {
+            if (typeof k !== 'string') return undefined;   // Symbol.unscopables
+            if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
+            if (BUILTINS.indexOf(k) !== -1) return globalThis[k];
+            unknown.push(k);
+            throw new ReferenceError('sandbox: unstubbed identifier ' + k);
+        },
+        set: (o, k) => { throw new Error('sandbox: write to outer ' + String(k)); },
+    });
+    t.api = new Function('env', 'with (env) {\n' + presetSrc + S61 +
+        '\nreturn { relayoutStrip, scrollColumnIntoView, columnPixelWidths };\n}\n')(scope);
+    t.unknown = unknown;
+    // rAF callbacks run with strictly increasing timestamps until none remain.
+    t.flush = () => {
+        for (let guard = 0; rafQ.length; guard++) {
+            if (guard > 10000) throw new Error('rAF never settles');
+            const q = rafQ; rafQ = []; ts += 16;
+            for (const r of q) r.cb(ts);
+        }
+    };
+    t.colEls = () => strip.children.filter(c => c._cls.has('strip-col'));
+    t.gutters = () => strip.children.filter(c => c._cls.has('strip-col-gutter'));
+    t.fire = (type, ev) => (docListeners[type] || []).slice().forEach(fn => fn(ev));
+    return t;
+}
+
+// Draw the layout, settle its own focus scroll, then clear the write log.
+// Asserts the sandbox really drew the columns (widths written) and that
+// they fill the strip exactly when the set fills it.
+function drawn(t, label, filling) {
+    t.api.relayoutStrip();
+    t.flush();
+    const els = t.colEls();
+    ok(els.map(e => e.dataset.colId).join() === t.liveIds.join()
+       && els.every(e => /^\d+px$/.test(e.style.width)),
+       label + ' relayoutStrip drew ' + els.map(e => e.dataset.colId) + ' sized');
+    ok(t.resized === t.liveIds.length, label + ' relayout tail ran (' + t.resized + ' resizes)');
+    if (filling) {
+        ok(t.strip.contentW() === t.strip.clientWidth,
+           label + ' columns+gutters ' + t.strip.contentW() + ' == clientWidth ' +
+           t.strip.clientWidth + ' (' + els.map(e => e.style.width).join(',') + ')');
+    }
+    t.strip.writes.length = 0;
+}
+function visibleIndexOf(t, id) {
+    return t.layout.columns.findIndex(c => c.id === id);
+}
+function noUnknown(t, label) {
+    ok(t.unknown.length === 0, label + ' sandbox read no unstubbed name ' + t.unknown);
+}
+
+// C2: focus moving between columns that fill the strip scrolls nothing.
+// 1919 and 1365 make 1/2 a non-integer; 1535.2/1535.6 are a fractional
+// strip whose clientWidth rounds down / up. Dormant '2/3' columns sit before
+// and between the drawn ones, so visibleColumns() indices differ from drawn
+// order and a frac taken from the wrong list changes the widths.
+function focusCase() {
+    const sets = {
+        '2x1/2': ['1/2', '1/2'], '3x1/3': ['1/3', '1/3', '1/3'],
+        '1/3+2/3': ['1/3', '2/3'], '2/3+1/3': ['2/3', '1/3'],
+    };
+    for (const name in sets) {
+        for (const wf of [1919, 1920, 1365, 1366, 1535.2, 1535.6]) {
+            for (const smooth of [false, true]) {
+                const cols = [{ id: 'd0', preset: '2/3', live: false }];
+                sets[name].forEach((p, i) => {
+                    cols.push({ id: 'c' + i, preset: p, live: true });
+                    if (i === 0) cols.push({ id: 'd1', preset: '2/3', live: false });
+                });
+                const t = makeSandbox(wf, cols, { slideMs: smooth ? 350 : 0 });
+                const vis = t.liveIds.map(id => visibleIndexOf(t, id));
+                t.layout.focusedCol = vis[0];
+                const label = 'C2 ' + name + ' W=' + wf + (smooth ? ' smooth' : ' instant');
+                drawn(t, label, true);
+                const sl0 = t.strip.scrollLeft;
+                const seq = vis.length === 2 ? [1, 0, 1, 0] : [1, 2, 1, 0];
+                for (const k of seq) {
+                    t.api.scrollColumnIntoView(vis[k], smooth);
+                    t.flush();
+                    ok(t.strip.scrollLeft === sl0 && t.strip.writes.length === 0,
+                       label + ' focus col ' + k + ': scrollLeft ' + sl0 + ' -> ' +
+                       t.strip.scrollLeft + ' (' + t.strip.writes.length + ' writes)');
+                }
+                // Control in the same fixture: the last column 1px wider DOES
+                // scroll when focused, so the 0 writes above were observed.
+                const els = t.colEls(), last = els[els.length - 1];
+                last.style.width = (parseInt(last.style.width, 10) + 1) + 'px';
+                t.api.scrollColumnIntoView(vis[vis.length - 1], smooth);
+                t.flush();
+                ok(t.strip.writes.length > 0 && t.strip.scrollLeft > sl0,
+                   label + ' control: a 1px-over last column scrolls');
+                noUnknown(t, label);
+            }
+        }
+    }
+}
+
+// C4: a column wider than the viewport ("viewport narrowed after layout":
+// reconcile drops a widthFrac > 1, so it is injected past getLayout here).
+// Wholly off-screen it is brought in at its left edge; partly on-screen it
+// is left alone.
+function wideCase() {
+    const t = makeSandbox(1920, [{ id: 'w', frac: 1.5, live: true },
+        { id: 'a', live: true }, { id: 'b', live: true }, { id: 'c', live: true }]);
+    t.layout.focusedCol = 0;
+    const label = 'C4 viewport narrowed after layout';
+    drawn(t, label, false);
+    const els = t.colEls();
+    ok(els.map(e => e.style.width).join() === '2853px,951px,951px,951px',
+       label + ' widths ' + els.map(e => e.style.width));
+    const w = els[0];
+    for (const smooth of [false, true]) {
+        t.settings.slideScreenMs = smooth ? 350 : 0;
+        const l = label + (smooth ? ' smooth' : ' instant');
+        t.strip.scrollLeft = 3804;
+        t.strip.writes.length = 0;
+        ok(w.offsetWidth > t.strip.clientWidth
+           && w.offsetLeft + w.offsetWidth <= t.strip.scrollLeft,
+           l + ' precondition: wide column wholly off the left');
+        t.api.scrollColumnIntoView(0, smooth);
+        t.flush();
+        ok(t.strip.scrollLeft === 0, l + ' wholly off -> scrollLeft ' + t.strip.scrollLeft);
+        t.strip.scrollLeft = 2000;
+        t.strip.writes.length = 0;
+        ok(w.offsetLeft + w.offsetWidth > 2000 && w.offsetLeft < 2000,
+           l + ' precondition: wide column partly on screen');
+        t.api.scrollColumnIntoView(0, smooth);
+        t.flush();
+        ok(t.strip.scrollLeft === 2000 && t.strip.writes.length === 0,
+           l + ' partly on -> scrollLeft ' + t.strip.scrollLeft +
+           ' (' + t.strip.writes.length + ' writes)');
+    }
+    noUnknown(t, label);
+}
+
+// C5: a column clipped by exactly 1px is still revealed, by exactly 1px.
+function revealCase() {
+    for (const wf of [1919, 1920]) {
+        for (const smooth of [false, true]) {
+            // Four halves, so the strip can scroll past col 1's left edge.
+            const t = makeSandbox(wf, [{ id: 'a', live: true }, { id: 'b', live: true },
+                { id: 'c', live: true }, { id: 'd', live: true }],
+                { slideMs: smooth ? 350 : 0 });
+            t.layout.focusedCol = 0;
+            const label = 'C5 4x1/2 W=' + wf + (smooth ? ' smooth' : ' instant');
+            drawn(t, label, false);
+            const els = t.colEls(), cw = t.strip.clientWidth;
+            const right = els[2].offsetLeft + els[2].offsetWidth;
+            t.strip.scrollLeft = right - cw - 1;
+            t.strip.writes.length = 0;
+            ok(t.strip.scrollLeft + cw === right - 1,
+               label + ' precondition: col 2 overhangs the right edge by 1px');
+            t.api.scrollColumnIntoView(2, smooth);
+            t.flush();
+            ok(t.strip.scrollLeft === right - cw,
+               label + ' right reveal -> scrollLeft ' + t.strip.scrollLeft + ' want ' + (right - cw));
+            t.strip.scrollLeft = els[1].offsetLeft + 1;
+            t.strip.writes.length = 0;
+            ok(t.strip.scrollLeft === els[1].offsetLeft + 1,
+               label + ' precondition: col 1 overhangs the left edge by 1px');
+            t.api.scrollColumnIntoView(1, smooth);
+            t.flush();
+            ok(t.strip.scrollLeft === els[1].offsetLeft,
+               label + ' left reveal -> scrollLeft ' + t.strip.scrollLeft);
+            noUnknown(t, label);
+        }
+    }
+}
+
+const CASES = { helper: helperCase, focus: focusCase, wide: wideCase,
+                reveal: revealCase };
 CASES[process.argv[2]]();
 console.log('COUNT ' + pass + ' ' + fail);
 """
@@ -183,3 +517,27 @@ def test_gutter_width_matches_the_css():
     jm = re.findall(r"const STRIP_GUTTER_W = (\d+);", js)
     assert len(jm) >= 1, "STRIP_GUTTER_W missing"
     assert set(jm) == {m.group(1)}, (jm, m.group(1))
+
+
+# Per (set, width, mode): drew + tail + exact fill, 4 focus steps, the
+# control, no-unknown = 9; 4 sets x 6 widths x 2 modes.
+FOCUS_ASSERTS = 4 * 6 * 2 * 9
+# drew + tail + widths, 2 modes x (2 preconditions + 2 results), no-unknown.
+WIDE_ASSERTS = 3 + 2 * 4 + 1
+# Per (width, mode): drew + tail, 2 preconditions + 2 results, no-unknown.
+REVEAL_ASSERTS = 2 * 2 * (2 + 4 + 1)
+
+
+def test_focus_between_filling_columns_scrolls_nothing(tmp_path):
+    out, n = _run(tmp_path, "focus")
+    assert n == FOCUS_ASSERTS, out[-400:]
+
+
+def test_wide_column_still_scrolls_into_view(tmp_path):
+    out, n = _run(tmp_path, "wide")
+    assert n == WIDE_ASSERTS, out[-400:]
+
+
+def test_one_pixel_clipped_column_is_revealed(tmp_path):
+    out, n = _run(tmp_path, "reveal")
+    assert n == REVEAL_ASSERTS, out[-400:]

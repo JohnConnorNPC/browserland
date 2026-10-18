@@ -223,16 +223,13 @@
                 }
                 if (liveRows.length) renderCols.push({ col, liveRows });
             }
-            // Width budget: the (n-1) 6px inter-column gutters (task 9) are real
-            // flex items, so sizing each column as round(frac*stripW) overflowed
-            // the strip by gutterCount*6px once >1 column rendered (3×⅓ left a
-            // stray scrollbar). Reserve the gutter width up front so equal
-            // presets tile exactly. (A custom widthFrac may still overflow ->
-            // scroll, which is intended.)
-            const STRIP_GUTTER_W = 6;   // keep in sync with .strip-col-gutter
-            const gutterReserve =
-                Math.max(0, renderCols.length - 1) * STRIP_GUTTER_W;
-            const availW = Math.max(1, stripW - gutterReserve);
+            // Width budget: columnPixelWidths reserves the (n-1) 6px gutters
+            // (task 9) and splits the rest by rounded cumulative edges, so
+            // presets that fill the screen tile it to the pixel and focusing
+            // one of them never scrolls the strip (#259). (A custom widthFrac
+            // may still overflow -> scroll, which is intended.)
+            const colWidths = columnPixelWidths(
+                renderCols.map(rc => colCurrentFrac(rc.col)), stripW);
             // Tiling class = tiling mode OR any rendered tiled column. Keying
             // off the mode (not just the column count) keeps the strip
             // interactive on an empty active workspace (so you can switch
@@ -257,7 +254,7 @@
             const usedEls = new Set();
             const placedCols = [];          // [{col, colEl}] in render order
             let prevEl = null;
-            for (const { col, liveRows } of renderCols) {
+            for (const [ci, { col, liveRows }] of renderCols.entries()) {
                 let colEl = existing.get(col.id);
                 if (!colEl) {
                     colEl = document.createElement('div');
@@ -266,10 +263,9 @@
                 }
                 usedEls.add(colEl);
                 // A custom widthFrac (free horizontal resize, task 9) overrides
-                // the preset; both are fractions of the strip width.
-                const frac = (typeof col.widthFrac === 'number' && col.widthFrac > 0)
-                    ? col.widthFrac : presetFraction(col.widthPreset);
-                colEl.style.width = Math.round(frac * availW) + 'px';
+                // the preset (colCurrentFrac); both are fractions of the width
+                // left after the gutters.
+                colEl.style.width = colWidths[ci] + 'px';
                 // Position colEl right after prevEl (keeps column order).
                 const want = prevEl ? prevEl.nextSibling : strip.firstChild;
                 if (colEl.parentElement !== strip || colEl !== want) {
