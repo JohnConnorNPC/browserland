@@ -1181,11 +1181,11 @@ taskbar). The list is core's, not a caller's — each cache registers itself
 beside its own declaration — so the eight this build has (the per-host state
 cache and its save chain, the auth-prompt latch, the poll record, the `/control`
 socket, and three config caches) *and* whatever the next fragment adds are
-covered by the one call. The cautionary example is in the tree:
-`mods/host-registry/` still carries its own hand-maintained copy of that list,
-and its own comment calls that copy "a known latent gap". A list kept by a
-stranger is right on the day it is written and nothing makes it stay right —
-call this instead.
+covered by the one call. The cautionary example is in the tree's history:
+`mods/host-registry/` used to carry its own hand-maintained copy of that list,
+and its own comment called that copy "a known latent gap"; it calls this now
+(#214). A list kept by a stranger is right on the day it is written and nothing
+makes it stay right — call this instead.
 
 It returns `true` when it ran and `false` for a blank / non-string id (nothing
 to forget, and no repaint owed) or an internal failure — **never a throw**, so
