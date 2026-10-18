@@ -18,7 +18,7 @@ An operator who wants a gate taken out of the GUI's hands entirely puts its matc
 
 The taskbar chip is one **aggregate** showing the worst state across all configured brokers, with a tooltip listing every broker and its own state. With a single broker configured it looks exactly as it did before. The chip reads **"up to date" only when every configured broker actually answered and every one is current.** A broker that could not be checked never counts as current, so the phrase "up to date" means the whole fleet is known to be clean.
 
-The chip has three states. **Up to date** means every broker's commit matches upstream. **N behind** (or **N ahead**, or **N unchecked**) means some brokers have that issue — the count is shown because different brokers can be in different states at the same time. **Version ?** means at least one broker could not be checked, and the window explains why for each one.
+With one broker the chip shows that broker's state alone: **up to date**, **N behind**, **ahead**, or **version ?** when it could not be checked. With several, the chip reads *N brokers ·* followed by the counts: **up to date** when every broker's commit matches upstream, otherwise **N behind**, **N ahead** and **N unchecked** for whichever apply — the counts are shown because different brokers can be in different states at the same time. A broker that could not be checked is counted as unchecked, and the window explains why for each one.
 
 By default the chip hides itself while the build is current across every broker, so it only takes up taskbar space when there is something to say; an unknown never hides.
 
