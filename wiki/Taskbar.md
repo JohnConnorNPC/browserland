@@ -17,7 +17,7 @@ From left to right, the taskbar contains:
 | Clipboard chip | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
-On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a running record button stay. On touch screens up to 900 px wide the title-bar buttons are larger.
+On a screen 520 px wide or less (a phone, or a very narrow window) the clock chip is hidden and title bars drop the window-id badge, the color button and an idle ⏺ record button so titles stay readable; the MCP button, minimize, × and a record button that is recording or paused stay. On touch screens up to 900 px wide the title-bar buttons are larger.
 
 ## Window buttons
 
@@ -57,7 +57,7 @@ A terminal tagged with an MCP scope (see [[MCP-and-AI-Agents]]) shows the scope 
 
 ### Items for other workspaces
 
-By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Windows → Workspaces. This setting governs your browser.
+By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Windows → Workspaces. It is saved with the broker serving the page, so it applies to every browser viewing that broker.
 
 ## The launch button (+)
 
