@@ -1763,9 +1763,9 @@ def _lifecycle(app) -> str:
 def _refuse_if_quiescing(app, what: str):
     """A 503 when the broker has stopped accepting new work, else None.
 
-    Only ``/file/upload_begin``, ``/recording/begin`` and ``/launch`` consult
-    this: they are the three entry points that CREATE something the drain would
-    then have to wait for or throw away. The chunk/commit/abort halves stay open
+    Its callers are the entry points that CREATE something the drain would
+    then have to wait for or throw away, and the update-policy write; grep for
+    the call sites rather than trusting a list here. The chunk/commit/abort halves stay open
     on purpose — refusing those would strand exactly the in-flight sessions the
     drain is trying to let finish.
 
