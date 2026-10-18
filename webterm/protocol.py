@@ -550,6 +550,8 @@ def mcp_activity_frame(kind: str) -> str:
 #                      "bootId": <str>}
 #                     {"type": "terminal_control", ...}  (#238, below)
 #                     {"type": "pong", "n": <int|null>, + the status fields}
+#                     {"type": "session_launched", "id": <int>, "gen": <int>,
+#                      "bootId": <str>}  (#262, lease holder only, below)
 #   client -> broker: {"type": "become_active"}
 #                     {"type": "ping", "n": <int>}  (#248)
 # ---------------------------------------------------------------------------
@@ -610,6 +612,18 @@ def desktop_rpc_frame(rid: int, op: str,
     if boot_id is not None:
         frame["bootId"] = str(boot_id)
     return json.dumps(frame)
+
+
+def session_launched_frame(window_id: int, gen: int, boot_id: str) -> str:
+    """Broker -> ONE /control socket of the lease holder (#262), after a
+    successful ``POST /mcp/launch``: open window ``window_id`` on your
+    desktop. Fire-and-forget (no rid, no answer). ``gen`` is the lease
+    generation it was sent under and ``bootId`` the broker run, so a page
+    that has since lost the lease, or talks to another run, drops it. A page
+    that predates the frame ignores it (the window stays a taskbar chip,
+    which any desktop op opens)."""
+    return json.dumps({"type": "session_launched", "id": int(window_id),
+                       "gen": int(gen), "bootId": str(boot_id)})
 
 
 # ---------------------------------------------------------------------------

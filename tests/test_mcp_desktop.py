@@ -533,6 +533,16 @@ def test_desktop_rpc_frame_shape():
     assert frame["args"] == {}
 
 
+def test_262_session_launched_frame_shape():
+    """#262: the protocol pin for the launch announcement -- exact JSON:
+    the new window's id, the lease generation and the broker run."""
+    import webterm.protocol as protocol
+    frame = json.loads(protocol.session_launched_frame(4503599627370497, 7,
+                                                        "boot-abc"))
+    assert frame == {"type": "session_launched", "id": 4503599627370497,
+                     "gen": 7, "bootId": "boot-abc"}
+
+
 def test_relay_sends_to_one_designated_holder_socket(tmp_path, monkeypatch):
     """#244 [c18]: a clientId may own several /control sockets (tabs); the
     rpc goes to exactly ONE of them -- the others never see the frame, so
