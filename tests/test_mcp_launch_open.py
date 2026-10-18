@@ -65,7 +65,7 @@ LA_END = "function layoutRemoveKey(key) {"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 38
+EXPECTED_ASSERTS = 40
 
 _HARNESS = r"""
 'use strict';
@@ -262,6 +262,14 @@ const life = new Function('env',
 const zSrc = cut(fs.readFileSync(__SRC66__, 'utf8'), __Z_A__, __Z_Z__)
     .slice(0, -'function updateTaskbarActive() {'.length);
 const Z = { rafs: [], focused: [], scrolls: 0, L: null };
+// The document as withoutFocus sees it: activeElement, <body>, and elements
+// whose focus() is recorded.
+const zBody = { id: 'body', isConnected: true };
+function zEl(name) {
+    return { id: name, isConnected: true,
+             focus: function () { Z.focused.push(name); zDoc.activeElement = this; } };
+}
+const zDoc = { body: zBody, activeElement: zBody };
 function zWin(key, tiled) {
     return { id: key, type: 'terminal', tiled: tiled, minimized: false,
              controlled: false, hostId: 'local',
@@ -286,6 +294,7 @@ const envZ = {
     scrollColumnIntoView: function () { Z.scrolls++; },
     updateTaskbarActive: function () {},
     floatZIndex: function () { return 777; },
+    document: zDoc,
 };
 const zApi = new Function('env',
     'with (env) {\n' + zSrc + '\n' +
@@ -295,7 +304,7 @@ const zApi = new Function('env',
 function zReset() {
     // Run (never drop) earlier scopes' pending clears, so no key stays quiet.
     for (let i = 0; i < 4 && Z.rafs.length; i++) zFlush();
-    Z.focused = []; Z.scrolls = 0;
+    Z.focused = []; Z.scrolls = 0; zDoc.activeElement = zBody;
     Z.L = { focusedCol: 0, columns: [
         { id: 'c0', rows: [{ keys: ['local:1'], mode: 'single' }] },
         { id: 'c1', rows: [{ keys: ['local:2'], mode: 'single' }] } ] };
@@ -627,6 +636,30 @@ function laReset(quiet) {
     const stillQuiet = zApi.focusIsQuiet('local:2');
     ok(stillQuiet === false,
         'Z6 overlapping scopes on one key all clear');
+    // A mutator that reparents the focused window's node drops focus to
+    // <body>: it is given back, now or when the keys are released.
+    zReset();
+    const xa = zEl('X');
+    zDoc.activeElement = xa;
+    zApi.withoutFocus(['local:2'], function () { zDoc.activeElement = zBody; });
+    const backNow = zDoc.activeElement === xa;
+    zDoc.activeElement = xa;
+    zApi.withoutFocus(['local:2'], function () {
+        envZ.requestAnimationFrame(function () { zDoc.activeElement = zBody; });
+    });
+    zFlush(); zFlush();
+    ok(backNow && zDoc.activeElement === xa,
+        'Z7 focus a moved node dropped to <body> is given back, at once or a frame later');
+    zReset();
+    const xb = zEl('X'), other = zEl('O');
+    zDoc.activeElement = xb;
+    zApi.withoutFocus(['local:2'], function () { zDoc.activeElement = other; });
+    zFlush(); zFlush();
+    const keptOther = zDoc.activeElement === other;
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});   // nothing had focus
+    ok(keptOther && zDoc.activeElement === zBody && Z.focused.length === 0,
+        'Z8 focus the user moved elsewhere (or none at all) is never taken back');
 
     // ---- LA: layoutAddColumn keeps the focused column when quiet ----------
     laReset(false);
@@ -794,6 +827,8 @@ def test_an_open_the_user_did_not_ask_for_takes_no_focus(scenario_run):
     _ok(scenario_run, "Z4 a bringToFront deferred to the next frame stays quiet; a later one focuses")
     _ok(scenario_run, "Z5 a throwing scope still ends: other windows focus again at once")
     _ok(scenario_run, "Z6 overlapping scopes on one key all clear")
+    _ok(scenario_run, "Z7 focus a moved node dropped to <body> is given back, at once or a frame later")
+    _ok(scenario_run, "Z8 focus the user moved elsewhere (or none at all) is never taken back")
     _ok(scenario_run, "LA1 a quiet new column keeps the focused column (an insert before it shifts the index)")
 
 

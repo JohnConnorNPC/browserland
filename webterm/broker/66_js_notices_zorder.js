@@ -58,23 +58,40 @@
         // runs fn with bringToFront (and layoutAddColumn's focusedCol) held
         // QUIET, and keeps `keys` quiet for the next two frames as well, for
         // the bringToFront a mutator defers to the next frame (a tab switch
-        // re-enters after its relayout). A quiet float still stacks.
+        // re-enters after its relayout). A quiet float still stacks. A
+        // mutator that MOVES the focused window's node (float <-> tile
+        // reparents it) makes the browser drop focus to <body>; the element
+        // that had focus gets it back, at the end of fn and again when the
+        // keys are released -- but never once focus moved somewhere else.
         // Synchronous by contract: fn must not await.
         let _focusQuiet = 0;
         const _quietKeys = new Map();          // key -> pending clears
         function withoutFocus(keys, fn) {
             const held = (keys || []).filter(k => typeof k === 'string');
             for (const k of held) _quietKeys.set(k, (_quietKeys.get(k) || 0) + 1);
+            const prev = document.activeElement;
+            const giveBack = () => {
+                try {
+                    const now = document.activeElement;
+                    if (prev && prev !== document.body && prev !== now
+                            && prev.isConnected
+                            && (!now || now === document.body)) {
+                        prev.focus({ preventScroll: true });
+                    }
+                } catch (_) {}
+            };
             _focusQuiet++;
             try {
                 return fn();
             } finally {
                 _focusQuiet--;
+                giveBack();
                 requestAnimationFrame(() => requestAnimationFrame(() => {
                     for (const k of held) {
                         const n = (_quietKeys.get(k) || 0) - 1;
                         if (n > 0) _quietKeys.set(k, n); else _quietKeys.delete(k);
                     }
+                    giveBack();
                 }));
             }
         }
