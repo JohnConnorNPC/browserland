@@ -323,12 +323,17 @@ def compute_state(*, mode: str, local_version: Optional[str],
                   ) -> Dict[str, Any]:
     """Reduce the fetch results to one state. The honesty rules live here:
 
-    * No local sha -> ``unknown(no-git)``. NEVER compare a bare ``1.0.0``
-      against ``1.0.0`` and call it current -- two different builds share that
-      string, which is what the ``build_version()`` docstring warns about.
-    * A compare that is not a 200 -> ``unknown``, with the reason distinguishing
-      rate-limited / offline / compare-unavailable. Ahead and behind are read
-      from the 200 body and nowhere else.
+    * Release mode (a GitHub Release exists) compares the release's tag with
+      ``local_version`` and nothing else: no sha is consulted, so every build
+      at that version or newer reads current.
+    * Commit mode, no local sha -> ``unknown(no-git)``. NEVER compare a bare
+      ``1.0.0`` against ``1.0.0`` and call it current -- two different builds
+      share that string, which is what the ``build_version()`` docstring
+      warns about.
+    * Commit mode reads ahead and behind from local git (``ancestry``) when it
+      answered, else from a 200 compare body and nowhere else; a compare that
+      is not a 200 -> ``unknown``, with the reason distinguishing rate-limited
+      / offline / compare-unavailable.
     """
     if mode == "release":
         data = (release_result or {}).get("data") or {}
