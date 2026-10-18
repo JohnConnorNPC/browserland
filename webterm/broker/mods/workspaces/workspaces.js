@@ -486,9 +486,37 @@
             // ---- workspace labels + the pager dots ----------------------------
             function wsLabel(ws, i) {
                 if (wsLabelMode() === 'name') {
-                    return (ws && ws.name) ? ws.name : ('WS' + (i + 1));
+                    return (ws && ws.name) ? ws.name : ('WS' + wsNumber(ws.id));
                 }
-                return String(i + 1);
+                return wsNumber(ws.id);
+            }
+            // #258 pager entries: one per plain workspace, one per stack (its
+            // members are contiguous -- the heal guarantees it). The entry
+            // number N is what the number keys and the number labels count;
+            // a stack member reads N.k. With no stacks N is the flat index+1.
+            function wsPagerEntries() {
+                const st = wsStore();
+                const rows = new Map();
+                for (const s of (Array.isArray(st.stacks) ? st.stacks : [])) rows.set(s.id, s);
+                const out = [];
+                st.list.forEach(function (w, i) {
+                    const prev = out[out.length - 1];
+                    if (w.stack && prev && prev.stack && prev.stack.id === w.stack) {
+                        prev.members.push(w);
+                        return;
+                    }
+                    const s = (w.stack && rows.get(w.stack)) || null;
+                    out.push({ key: s ? 's:' + s.id : 'w:' + w.id, stack: s,
+                               ws: s ? null : w, members: [w], flat: i, num: out.length + 1 });
+                });
+                return out;
+            }
+            function wsNumber(id) {
+                for (const e of wsPagerEntries()) {
+                    const k = e.members.findIndex(function (m) { return m.id === id; });
+                    if (k >= 0) return e.stack ? e.num + '.' + (k + 1) : String(e.num);
+                }
+                return '?';
             }
             // Build the workspace dots (1..n + '+') into a container. The
             // churn-guard sig lives on the container itself, so two containers keep
@@ -524,7 +552,7 @@
                     d.className = 'ws-dot' + (i === active ? ' active' : '')
                         + (mode === 'name' ? ' named' : '');
                     d.textContent = wsLabel(ws, i);
-                    d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + (i + 1)
+                    d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + wsNumber(ws.id)
                         + '  (right-click: rename / remove)';
                     d.addEventListener('click', () => switchWorkspace(i));
                     d.addEventListener('contextmenu', (e) => {
@@ -549,7 +577,7 @@
                 const list = wsList();
                 const mode = wsLabelMode();
                 const items = [
-                    { label: 'Workspace ' + (i + 1)
+                    { label: 'Workspace ' + (list[i] ? wsNumber(list[i].id) : i + 1)
                         + (list[i] && list[i].name ? ' — ' + list[i].name : ''),
                       enabled: false },
                     { label: 'Rename…', enabled: true,
@@ -673,7 +701,7 @@
                 if (hasContent) {
                     const ok = await openConfirmDialog({
                         title: 'Remove workspace',
-                        message: 'Remove workspace ' + (i + 1)
+                        message: 'Remove workspace ' + wsNumber(victim.id)
                             + '? Its windows move to an adjacent workspace.',
                         okLabel: 'Remove',
                         danger: true,
@@ -702,7 +730,7 @@
                 const title = document.createElement('div');
                 title.className = 'wsp-title';
                 title.textContent = (ws.name ? ws.name + '  ' : '')
-                    + '(workspace ' + (i + 1) + ')';
+                    + '(workspace ' + wsNumber(ws.id) + ')';
                 box.appendChild(title);
                 const map = document.createElement('div');
                 map.className = 'wsp-map';
@@ -1070,7 +1098,7 @@
                         el.appendChild(badge);
                     }
                     const ws = list[wsi];
-                    badge.textContent = (ws && ws.name) ? ws.name : ('ws' + (wsi + 1));
+                    badge.textContent = (ws && ws.name) ? ws.name : ('ws' + (ws ? wsNumber(ws.id) : wsi + 1));
                     el.classList.toggle('other-ws', wsi !== active);
                     el.classList.toggle('ws-hidden', hideOther && wsi !== active);
                 });
@@ -1330,7 +1358,7 @@
                     wsList().forEach((ws, wi) => {
                         if (wi === here) return;
                         items.push({ label: 'Send to '
-                                         + (ws.name ? ws.name : 'workspace ' + (wi + 1)),
+                                         + (ws.name ? ws.name : 'workspace ' + wsNumber(ws.id)),
                                      enabled: true,
                                      action: () => sendWindowToWorkspace(win, wi) });
                     });
@@ -1368,7 +1396,7 @@
                         const wsId = ws.id;
                         items.push({
                             label: (wi === cur ? '\u2713 ' : '   ')
-                                + (ws.name ? ws.name : 'Workspace ' + (wi + 1))
+                                + (ws.name ? ws.name : 'Workspace ' + wsNumber(ws.id))
                                 + ' (' + n + ')',
                             enabled: true,
                             action: () => {
@@ -1393,7 +1421,7 @@
                     // out from under us resolves to -1 and does nothing.
                     if (curWs) {
                         const curId = curWs.id;
-                        const what = curWs.name ? curWs.name : 'workspace ' + (cur + 1);
+                        const what = curWs.name ? curWs.name : 'workspace ' + wsNumber(curWs.id);
                         items.push({ sep: true });
                         items.push({ label: '   Rename ' + what + '\u2026',
                                      enabled: true,

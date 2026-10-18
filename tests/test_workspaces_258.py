@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 23
+EXPECTED_ASSERTS = 27
 
 _PRELUDE = r"""
 'use strict';
@@ -550,11 +550,53 @@ async function minting() {
 }
 """
 
+_SCENARIOS += r"""
+async function pagerNumbers() {
+    // ---- PM: numbers count PAGER entries; a stack member reads N.k ---------
+    function stackedSeed() {
+        return { list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }],
+            stacks: [{ id: 'S1' }] };
+    }
+    let w = buildWorld(stackedSeed());
+    const items = w.windowMenu ? w.windowMenu(w.windows.get('local:21')) : [];
+    const sends = items.filter(function (it) { return /^Send to workspace /.test(it.label || ''); })
+        .map(function (it) { return it.label; });
+    ok(J(sends) === J(['Send to workspace 2.1', 'Send to workspace 2.2', 'Send to workspace 3']),
+        'PM1 Send to names stack members N.k and the workspace after the stack by its entry number');
+
+    w = buildWorld(stackedSeed());
+    const rows = (w.desktopMenu ? w.desktopMenu({ tiling: true }) : [])
+        .filter(function (it) { return /Workspace \d/.test(it.label || ''); })
+        .map(function (it) { return it.label.trim(); });
+    ok(J(rows) === J(['✓ Workspace 1 (1)', 'Workspace 2.1 (1)', 'Workspace 2.2 (1)', 'Workspace 3 (0)']),
+        'PM2 the desktop menu numbers rows by pager entry, members as N.k');
+
+    w = buildWorld(stackedSeed());
+    const chip = w.document.getElementById('taskbar-items').appendChild(new Node('div'));
+    chip.className = 'taskbar-item';
+    chip.dataset.sessionId = 'local:23';           // column L3 lives on W3 (2.2)
+    w.render();
+    const badge = chip.querySelector('.ti-ws');
+    ok(!!badge && badge.textContent === 'ws2.2', 'PM3 the taskbar badge names a stack member N.k');
+
+    w = buildWorld(stackedSeed());
+    const d3 = w.dots().filter(function (d) { return d.textContent === '3'; })[0];
+    if (d3) fire(d3, 'mouseenter');
+    const pop = w.pops[w.pops.length - 1];
+    const title = pop && pop.node.children[0] ? pop.node.children[0].textContent : '';
+    ok(!!d3 && /^workspace 3\b/.test(d3.title) && title === '(workspace 3)',
+        'PM4 the workspace after a stack is entry 3 on its dot, tooltip and preview');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
     await heal();
     await minting();
+    await pagerNumbers();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -648,6 +690,13 @@ def test_mint_never_reuses_a_workspace_id(scenario_run):
     _ok(scenario_run, "ID precondition: 57's next mint is the stored workspace id L4")
     _ok(scenario_run, "ID1 + adds a workspace with a fresh id that survives the heal, and switches to it")
     _ok(scenario_run, "ID2 Send to new workspace mints a fresh id and the window's column moves onto it")
+
+
+def test_pager_numbers_count_entries(scenario_run):
+    _ok(scenario_run, "PM1 Send to names stack members N.k and the workspace after the stack by its entry number")
+    _ok(scenario_run, "PM2 the desktop menu numbers rows by pager entry, members as N.k")
+    _ok(scenario_run, "PM3 the taskbar badge names a stack member N.k")
+    _ok(scenario_run, "PM4 the workspace after a stack is entry 3 on its dot, tooltip and preview")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
