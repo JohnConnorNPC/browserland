@@ -1151,17 +1151,32 @@ def workspaces(host: str, op: str, name: str = "", index: int = -1,
                force: bool = False, direction: str = "", color: str = "",
                stack: str = "") -> Dict[str, Any]:
     """Manage the workspaces of a browser's desktop (#244 — ADMIN ONLY;
-    workspace data spans every window, whatever its scope). Ops:
-      - `list` — the workspaces and the active index;
+    workspace data spans every window, whatever its scope). A workspace is
+    addressed by `index`, its place in the flat list (stack members
+    included, in pager order); a stack (#258) by its `stack` id. Ops:
+      - `list` — the workspaces (each with `color` and `stack`), the active
+        index, the `stacks` (id, name, color, last-used member) and the
+        `palette` a colour must come from;
       - `add` `name?`;
-      - `rename` `index` `name`;
+      - `rename` `index` OR `stack`, `name`;
       - `remove` `index` — a NON-EMPTY workspace answers needs_confirm
         unless `force=true` (its windows move to the adjacent workspace; no
         dialog is ever shown); the last workspace is always refused;
         `force` is remove-only — every other op rejects it locally;
       - `switch` `index`;
       - `send-window` `win`=<namespaced window id on this host>
-        `target`=<workspace index>.
+        `target`=<workspace index>;
+      - `move` `index` OR `stack`, `direction`=`left`|`right` — one place in
+        the pager (a whole stack moves as one; a stack member moves inside
+        its stack); answers `{moved, index}`;
+      - `color` `index` OR `stack`, `color`=one of `list`'s `palette`, or
+        `none` to clear;
+      - `stack` `index` `target` — puts workspace `index` into `target`'s
+        stack, or starts a stack at `target`'s place; answers `{stack}`;
+      - `unstack` `index` — out of its stack, just after it (a stack left
+        with one workspace dissolves).
+    `direction`, `color` and `stack` belong to the ops above that take them;
+    anywhere else they are refused locally, like `force`.
     Requires a host whose admin credential this server confirmed at
     startup, and whose relay advertises `allow_desktop`. The op runs on the
     browser holding the control lease, and workspace data belongs to a
