@@ -620,9 +620,36 @@ function reconcileDragCase() {
     }
 }
 
+// C3 with a gutter naming a column the layout no longer has: removed between
+// a mutation and its relayout frame. The drag skips it and still works on
+// the rest, and the release relayout lands on what the drag showed.
+function missingColDragCase() {
+    for (const wf of [1919, 1920]) {
+        const t = makeSandbox(wf, ['a', 'b', 'c'].map(id =>
+            ({ id, preset: '1/3', live: true })));
+        const label = 'C3m missing col W=' + wf;
+        drawn(t, label, true);
+        const els = t.colEls().slice(0, 2);
+        const before = widthsOf(els);
+        t.layout.columns.splice(2, 1);                   // c gone, no relayout yet
+        ok(t.gutters().length === 2 && t.gutters()[1].dataset.rightColId === 'c',
+           label + ' precondition: a gutter still names the removed column');
+        startDrag(t, 0);
+        t.fire('mousemove', mouse(537));
+        const live = widthsOf(els);
+        ok(live !== before, label + ' the drag moved a|b: ' + before + ' -> ' + live);
+        t.fire('mouseup', mouse(537));
+        t.flush();
+        ok(t.relayouts === 1, label + ' release relayout ran');
+        ok(widthsOf(t.colEls()) === live,
+           label + ' release ' + widthsOf(t.colEls()) + ' == drag ' + live);
+        noUnknown(t, label);
+    }
+}
+
 const CASES = { helper: helperCase, focus: focusCase, wide: wideCase,
                 reveal: revealCase, drag: dragCase, stale: staleDragCase,
-                reconcile: reconcileDragCase };
+                reconcile: reconcileDragCase, missing: missingColDragCase };
 CASES[process.argv[2]]();
 console.log('COUNT ' + pass + ' ' + fail);
 """
@@ -731,3 +758,13 @@ RECONCILE_ASSERTS = 3 * 2 * 4 * 7
 def test_gutter_drag_wider_pair_survives_the_real_reconcile(tmp_path):
     out, n = _run(tmp_path, "reconcile")
     assert n == RECONCILE_ASSERTS, out[-400:]
+
+
+# Per width: drew + tail + exact fill + no tail write, precondition, moved,
+# release ran, release == drag, no-unknown.
+MISSING_ASSERTS = 2 * (4 + 5)
+
+
+def test_gutter_drag_skips_a_column_removed_before_its_relayout(tmp_path):
+    out, n = _run(tmp_path, "missing")
+    assert n == MISSING_ASSERTS, out[-400:]

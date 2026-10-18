@@ -68,16 +68,21 @@
             const stripW = strip.clientWidth || 1;
             // The columns relayoutStrip drew, left to right, read off the
             // gutters it rebuilt between them (a stale .strip-col left by a
-            // deferred pass has no gutter, so it is not counted).
+            // deferred pass has no gutter, so it is not counted). A column
+            // removed from the layout since then (its relayout frame hasn't
+            // run yet) is skipped, and the drag works on the rest.
             const gutters = Array.from(
                 strip.querySelectorAll(':scope > .strip-col-gutter'));
             if (!gutters.length) return;
-            const drawnIds = [gutters[0].dataset.leftColId]
-                .concat(gutters.map(x => x.dataset.rightColId));
-            const drawn = drawnIds.map(id => cols.find(c => c.id === id));
-            if (drawn.some(c => !c)) return;
-            const drawnEls = drawnIds.map(id => strip.querySelector(
-                '.strip-col[data-col-id="' + cssEscape(id) + '"]'));
+            const drawn = [], drawnEls = [];
+            for (const id of [gutters[0].dataset.leftColId]
+                    .concat(gutters.map(x => x.dataset.rightColId))) {
+                const col = cols.find(c => c.id === id);
+                if (!col) continue;
+                drawn.push(col);
+                drawnEls.push(strip.querySelector(
+                    '.strip-col[data-col-id="' + cssEscape(id) + '"]'));
+            }
             const availW = stripAvailWidth(stripW, drawn.length);
             const startX = e.clientX;
             const startL = colCurrentFrac(leftCol);
