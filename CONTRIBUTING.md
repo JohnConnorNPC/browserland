@@ -1,13 +1,12 @@
  # Contributing to Browserland
 
- Thanks for your interest. Browserland is heading toward its **1.0 release**, and
- right now the most useful way to contribute is by **opening issues — not pull
- requests**. A clear bug report or a real-world feature request is worth far more
- mid-sprint than a PR to wade through.
+ Thanks for your interest. Right now the most useful way to contribute is by
+ **opening issues — not pull requests**. A clear bug report or a real-world
+ feature request is worth far more than a PR to wade through.
 
  An issue is welcome to include code — a snippet, a stack trace, even a suggested
  diff inline — if it makes the point clearer. Just **please don't open a pull
- request yet**; while the maintainer is heads-down on 1.0, issues are the channel.
+ request yet**; for now, issues are the channel.
 
  (`webterm` is the Python package and module name; "Browserland" is the project.)
 
