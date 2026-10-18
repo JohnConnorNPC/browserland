@@ -7,13 +7,13 @@ Browserland has two window modes that change how your windows are placed on the 
 | **Floating** | Free-moving, overlapping windows. You place each window anywhere, drag its title bar to move it, and drag its edges or corners to resize it. Windows can sit on top of one another. |
 | **Tiling** | A niri-style horizontal strip of **non-overlapping columns**. Windows live side by side in columns; nothing overlaps, and the strip scrolls left and right when there are more columns than fit on screen. |
 
-The window mode is a per-host setting (one tab per broker), so each host can be in its own mode.
+The window mode is a per-host setting (one tab per broker), so each host can be in its own mode. A host with no saved mode starts in tiling.
 
 ## Switching modes
 
 You can flip between floating and tiling two ways:
 
-- **Control Panel → Windows → Window mode.** Open the [[Control Panel|Getting-Started]] (right-click the + button and choose **Control panel**, or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), then pick the window mode.
+- **Control Panel → Windows → Window mode.** Open the [[Control Panel|Getting-Started]] (right-click the + button and choose **Control panel**, or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), then tick or untick **Tiling mode** (unticked means floating).
 - **The "Toggle tiling mode" shortcut** — default `Ctrl+Alt+t`.
 
 The shortcut is rebindable like every other keyboard action. See [[Keyboard-Shortcuts]] to change it.
@@ -26,8 +26,8 @@ In tiling mode, windows live in **columns** arranged along a horizontal strip. T
 
 There are three ways to move the strip left and right:
 
-- Use the **strip scrollbar**.
-- **Drag a window near the strip edge** — dragging toward the left or right edge scrolls the strip in that direction.
+- Use the **workspace scrollbar**, a slim bar at the bottom of the strip shown while it can scroll (on by default; **Control Panel → Windows → Workspace scrollbar** turns it off).
+- **Drag a tiled window near the strip edge** — dragging toward the left or right edge scrolls the strip in that direction. Dragging a floating window never scrolls it.
 - Use the **focus-column** and **move-column** shortcuts to bring off-screen columns into view as you focus or move them.
 
 | Action | Default binding |
