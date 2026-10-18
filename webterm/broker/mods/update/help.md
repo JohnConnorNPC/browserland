@@ -106,3 +106,5 @@ After an update applies and the broker restarts, the **last deploy** outcome is 
 ## What this does not claim
 
 The working tree is not inspected: build ids carry no dirty-tree marker, so uncommitted local changes are invisible and the report reflects your last commit only. Each broker is compared with upstream by that broker itself, so one row can be current while another is behind; the upstream build is shown once because it is the same for every row.
+
+The check compares **commits**: GitHub's comparison of a broker's own commit with the head of upstream `main` says how far behind or ahead it is. Browserland publishes version tags (such as `v1.0.0`) but no GitHub Releases. If a GitHub Release is ever published, the check compares that release's tag with each broker's version instead, and a broker on the same or a newer version counts as current.
