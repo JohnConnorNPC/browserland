@@ -12,7 +12,7 @@ If the broker's operator has configured an **admin token**, installing and unins
 
 ## Uninstalling a mod
 
-Every installed mod's row carries an **Uninstall** button. **Shipped mods have no Uninstall button at all** — they are part of the broker's own program and can't be removed this way; only a mod installed at runtime can be. Uninstalling gives you the option to also delete the mod's data stored on that broker; without it, the mod's code and pin are removed but the server-side data it left behind stays.
+Every installed mod's row carries an **Uninstall** button. **Shipped mods have no Uninstall button at all** — they are part of the broker's own program and can't be removed this way; only a mod installed at runtime can be. Uninstalling gives you the option to also delete the mod's data stored on that broker (its `/mod-store` value and its pin); without it, only the mod's code is removed, and that data stays on the broker, where a later install of a mod with the same id picks it up. Data a mod keeps in other browsers is never touched.
 
 ## Reload to finish
 
