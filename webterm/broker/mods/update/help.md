@@ -85,7 +85,7 @@ If all three are enabled and the current state allows applying, clicking **Updat
 
 1. The broker **fetches from the pinned upstream** (a git subprocess to GitHub with the explicit HTTPS URL and explicit ref, never a remote name).
 2. It **verifies** the target commit is now present and that a fast-forward is safe (no local work would be lost).
-3. It **checks dependencies**: if the apply introduces a dependency change (e.g. `pyproject.toml` was edited), the apply is refused with details so you can decide whether to run the installer first.
+3. It **checks dependencies**: if the range of commits being applied changes a dependency manifest (`pyproject.toml`, `setup.py`, `requirements*` and the like), or the changed files cannot be listed, the apply is refused with details so you can decide whether to run the installer first.
 4. It **applies** the commit via git fast-forward with repository hooks disabled, then re-spawns the broker process.
 
 An update may be refused for any of these reasons:
@@ -97,7 +97,7 @@ An update may be refused for any of these reasons:
 - **Already current** — the checkout is already at the upstream head.
 - **Restart is not available** — the broker cannot restart itself (the button shows why).
 - **Apply is not enabled** — this broker's apply gate is off, either because its config has not set `update_apply_enabled: true` or because nobody has granted it yet from the **Allow this broker to update itself** row.
-- **Dependency mismatch** — the apply would introduce new or removed dependencies; install or uninstall them manually first.
+- **Dependency files changed** — the range being applied edits a dependency manifest (or the changed files could not be listed, which refuses too); update the broker by hand and run the installer first.
 
 After an update applies and the broker restarts, the **last deploy** outcome is visible in the next update check — it shows whether the restart succeeded, whether the new build came up, and whether a rollback happened. A build that never comes up is automatically rolled back to the recorded previous commit, visible as a `rolled-back` outcome; the UI shows this so you know why the build changed back rather than forward.
 
