@@ -42,6 +42,7 @@ TOKEN = secrets.token_hex(16)
 WIDS = [259000 + (int(time.time()) % 1000) * 2 + i for i in (0, 1)]
 KEYS = ["local:%d" % w for w in WIDS]
 FAILS = []
+REPRODUCED = []          # base mode: the cases where focus really scrolled
 REFUSED_PORTS = {4445, 4447, 8445, 9222}
 
 
@@ -233,6 +234,8 @@ def focus_run(page, label, expect_scroll):
         check(col_sum == m0["cw"],
               "%s: columns + gutter %s == clientWidth %d" % (label, col_sum, m0["cw"]))
     else:
+        if moved:
+            REPRODUCED.append(label)
         check(moved == expect_scroll,
               "%s: base %s (columns+gutter %s vs clientWidth %d)"
               % (label, "scrolls (bug reproduced)" if expect_scroll else "does not scroll",
@@ -343,6 +346,9 @@ try:
             page.set_viewport_size({"width": w, "height": 1000})
             page.wait_for_timeout(600)
             cw = page.evaluate("document.getElementById('strip').clientWidth")
+            if w == 1919:
+                check((cw - 6) % 2 == 1, "W=1919: clientWidth %d leaves an odd %d after "
+                      "the gutter (the overrun case)" % (cw, cw - 6))
             focus_run(page, "W=%d" % w, None if FIX else predicted_overrun(cw))
         page.set_viewport_size({"width": 1920, "height": 1000})
         for w in FRACTIONAL_CASES:
@@ -360,6 +366,11 @@ try:
         page.evaluate("() => { document.getElementById('desktop').style.width = ''; }")
         page.wait_for_timeout(400)
         wide_run(page)
+        if not FIX:
+            # Without at least one real scroll, base mode never saw the bug
+            # and every "does not scroll" PASS above would be vacuous.
+            check(len(REPRODUCED) > 0, "base: %d case(s) reproduced the bug: %s"
+                  % (len(REPRODUCED), REPRODUCED))
         check(not errors, "no page errors (%s)" % errors[:3])
         browser.close()
 
