@@ -631,6 +631,21 @@ def test_launch_docstrings_match_the_unified_mode_wire():
     assert "handle" in cdoc
 
 
+def test_262_desktop_docstrings_state_open_on_demand():
+    """#262: an agent reads the tool text, not the wiki. arrange_window must
+    say a chip-only window is opened first (and that this reopens a window
+    the user closed), get_desktop must name the `open` row key, and the
+    send-window op line must say it opens a chip too."""
+    from webterm.mcptool import server
+    adoc = " ".join((server.arrange_window.__doc__ or "").split())
+    assert "taskbar chip" in adoc and "is opened first" in adoc
+    assert "reopens a window the user closed" in adoc
+    gdoc = " ".join((server.get_desktop.__doc__ or "").split())
+    assert "`open`" in gdoc and "false for a terminal that is only a" in gdoc
+    wdoc = " ".join((server.workspaces.__doc__ or "").split())
+    assert "taskbar chip is opened first" in wdoc
+
+
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
 
 def _paced_capture(monkeypatch):

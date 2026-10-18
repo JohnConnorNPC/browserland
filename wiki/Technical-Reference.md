@@ -1149,13 +1149,31 @@ browser keys the answers it has given on host, run and rid (#250).
   op (opened before an update and not reloaded since) does not know that op
   and answers it **400 `bad_op`**, the same bytes as the broker's own
   allowlist refusal: reload that tab.
+* **Chip-only windows (#262).** A terminal can be live on the broker but
+  only a taskbar chip on that desktop: in its session list with no window
+  (launched over MCP, or closed by the user). Every window op except `get`,
+  and `workspaces:send-window`, opens such a window first with the same
+  `openWindow` a chip click runs, then applies. The open happens only
+  after the op's arguments and the visibility gate pass (and, for
+  `send-window`, the mod answers `workspaces:list` and the target is one of
+  its workspaces), so a refused op opens nothing; `tab_into`/`split` check
+  that both windows can open before opening either. `move_column`/
+  `set_width` on a chip that would open floating answer `bad_args`
+  `not_tiled`, and `set_geometry` on one that would open tiled
+  `not_floating`, without opening it. An op can therefore reopen a window
+  the user closed. A layout entry with no session is never opened. An op
+  naming an int id the page has not polled yet (just after
+  `launch_terminal`) first waits for one session refresh, bounded at 2 s,
+  then answers.
 
 **`GET /mcp/desktop`** — op `get`; answers `200 {"ok": true, …snapshot}`.
 The snapshot (as the lease-holding browser produces it, after the broker's
 registry re-identification) carries `viewport`, `mode`, `focused_column`,
 `workspaces` + `active_workspace` (`null` with the mod off), `home` (whether
-that browser's home is this broker), and one row per live terminal of this broker (app windows and other hosts'
-windows are left out): `id` (an int), `title`, `kind`, `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
+that browser's home is this broker), and one row per terminal of this broker that the desktop shows, as a
+window or as a taskbar chip with no window yet (app windows and other hosts'
+windows are left out): `id` (an int), `title`, `kind`, `open` (`true` for a window, `false` for a chip, which
+carries no placement; absent from a page that predates #262), `tiled`, `column`, `row`, `tabIndex`, `width_preset` (+`widthFrac`
 for a custom width), `tabbed`/`split`, `minimized`, `workspace`, and
 `geometry` (`{x,y,w,h}` when floating — **per-browser pixel geometry, as that
 browser sees it**; never stored on the broker; absent when tiled).
