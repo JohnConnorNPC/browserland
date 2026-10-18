@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 49
+EXPECTED_ASSERTS = 54
 
 _HARNESS = r"""
 'use strict';
@@ -536,6 +536,58 @@ function countMut(name) {
         && prefsObj['local:12'].geom.height === 222,
         'R1 set_geometry persists the box AS APPLIED, not as asked');
 
+    // ---- RL: the #258 workspace ops ride the same relay --------------------
+    const NEW_OPS = ['workspaces:move', 'workspaces:color', 'workspaces:stack',
+                     'workspaces:unstack'];
+    let relayed = 0, homeOnly = 0, flushed = 0, refused = 0;
+    for (const op of NEW_OPS) {
+        resetWorld();
+        execCalls = [];
+        execNext = { ok: true, value: { done: op } };
+        r = await drive('local', { rid: freshRid(), op: op, args: { index: 0 } });
+        if (r && r.ok === true && r.value && r.value.done === op
+            && execCalls.length === 1 && execCalls[0].op === op) relayed++;
+        execCalls = [];
+        r = await drive('remoteX', { rid: freshRid(), op: op, args: { index: 0 } });
+        if (r && r.ok === false && r.error === 'not_home' && execCalls.length === 0) homeOnly++;
+        rearmPush(false);
+        const wsN = mkSock();
+        const pN = api.handleDesktopRpc('local', { ws: wsN }, wsN,
+            { rid: freshRid(), op: op, args: { index: 0 } });
+        await Promise.resolve();
+        await Promise.resolve();
+        const early = wsN.sent.length;
+        pushResolve();
+        await pN;
+        if (early === 0 && wsN.sent.length === 1 && wsN.sent[0].ok === true) flushed++;
+        rearmPush(true);
+        execNext = { ok: true, value: { refusal: 'bad_args' } };
+        r = await drive('local', { rid: freshRid(), op: op, args: {} });
+        if (r && r.ok === false && r.error === 'bad_args') refused++;
+    }
+    execNext = null;
+    ok(relayed === 4, 'RL1 move, color, stack and unstack relay to the workspaces mod');
+    ok(homeOnly === 4, 'RL2 the new workspace ops answer not_home off the home broker');
+    ok(flushed === 4, 'RL3 the new mutating ops reply only after the state flush');
+    ok(refused === 4, 'RL5 a refusal from each new op reaches the wire as bad_args');
+    resetWorld();
+    const SST = [{ id: 'S1', name: 'dev', color: '#5fbf7f', last: 'W2' }];
+    execNext = { ok: true, value: { active: 0, items: [
+        { index: 0, id: 'W1', name: null, color: null, stack: null },
+        { index: 1, id: 'W2', name: null, color: '#e96d6d', stack: 'S1' }],
+        columnWs: {}, floatWs: {}, stacks: SST } };
+    r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: null } });
+    const withStacks = r && r.value;
+    execNext = { ok: true, value: { active: 0, items: [{ index: 0, id: 'W1', name: null }],
+        columnWs: {}, floatWs: {} } };
+    r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: null } });
+    const oldMod = r && r.value;
+    ok(!!withStacks && JSON.stringify(withStacks.stacks) === JSON.stringify(SST)
+        && withStacks.workspaces[1].stack === 'S1' && withStacks.workspaces[1].color === '#e96d6d'
+        && !!oldMod && !('stacks' in oldMod),
+        'RL4 the snapshot carries the mod\'s stacks, and leaves the key out when the mod sent none');
+    execNext = null;
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -755,6 +807,15 @@ def test_set_geometry_persists_the_applied_box(scenario_run):
 
 
 # ---- the catch-all ---------------------------------------------------------------
+
+
+def test_258_workspace_ops_ride_the_relay(scenario_run):
+    # #258: the four new ops share the workspaces branch's guards and flush.
+    _ok(scenario_run, "RL1 move, color, stack and unstack relay to the workspaces mod")
+    _ok(scenario_run, "RL2 the new workspace ops answer not_home off the home broker")
+    _ok(scenario_run, "RL3 the new mutating ops reply only after the state flush")
+    _ok(scenario_run, "RL5 a refusal from each new op reaches the wire as bad_args")
+    _ok(scenario_run, "RL4 the snapshot carries the mod's stacks, and leaves the key out when the mod sent none")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

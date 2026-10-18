@@ -1059,7 +1059,10 @@
         const _DESKTOP_WS_OPS = Object.create(null);
         ['workspaces:list', 'workspaces:add', 'workspaces:rename',
          'workspaces:remove', 'workspaces:switch',
-         'workspaces:send-window'].forEach(function (k) {
+         'workspaces:send-window',
+         // #258: reorder, colour and stack (same not_home guard and flush).
+         'workspaces:move', 'workspaces:color', 'workspaces:stack',
+         'workspaces:unstack'].forEach(function (k) {
             _DESKTOP_WS_OPS[k] = true;
         });
         // The call's identity -> the desktop_result payload already sent. The
@@ -1262,11 +1265,13 @@
         function desktopSnapshot(hid, visible, wsResult) {
             const L = getLayout();
             let items = null, active = null, columnWs = null, floatWs = null;
+            let stacks = null;
             const wsv = (wsResult && wsResult.ok
                 && wsResult.value && typeof wsResult.value === 'object')
                 ? wsResult.value : null;
             if (wsv) {
                 items = Array.isArray(wsv.items) ? wsv.items : null;
+                stacks = Array.isArray(wsv.stacks) ? wsv.stacks : null;
                 active = (typeof wsv.active === 'number') ? wsv.active : null;
                 columnWs = (wsv.columnWs && typeof wsv.columnWs === 'object'
                     && !Array.isArray(wsv.columnWs)) ? wsv.columnWs : null;
@@ -1333,7 +1338,7 @@
                 }
                 rows.push(row);
             }
-            return {
+            const snap = {
                 viewport: { w: window.innerWidth, h: window.innerHeight },
                 mode: L.mode,
                 focused_column: L.focusedCol,
@@ -1342,6 +1347,10 @@
                 home: hid === homeHostId(),
                 windows: rows,
             };
+            // #258: only when the mod sent them, so an absent field stays
+            // absent all the way to the MCP caller.
+            if (stacks) snap.stacks = stacks;
+            return snap;
         }
         // One core (non-workspaces) op. Pure dispatcher over the EXISTING
         // mutators: validates and gates BEFORE the first mutator call, and
