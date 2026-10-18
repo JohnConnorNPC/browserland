@@ -14,6 +14,23 @@ story behind anything named below.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-19
+
+The first stable release. 1.0 supports Windows and Linux, Python 3.10 or
+newer, and current Chrome, Edge and Firefox. Within 1.x the mod API stays at
+`ctxVersion: 1` with additions only, `/state` blobs written by a 1.x release
+are read by every later 1.x release, and MCP tool names stay while their
+arguments only gain optional fields — see
+[What 1.0 promises](wiki/Upgrading.md#what-10-promises). 1.0.0 is a git tag
+(`v1.0.0`), not a GitHub Release, so the Update window keeps comparing commits
+on `main`.
+
+**Upgrading from 0.8.0:** read [`wiki/Upgrading.md`](wiki/Upgrading.md) from
+*Python 3.10 is the minimum* down to *Publishing passwords needs https,
+localhost or encryption off*. The Update window will not apply this update,
+because it changes `pyproject.toml`: update each broker by hand once —
+`git pull`, `pip install -e .` plus your extras, then restart it.
+
 ### Added
 
 - **Workspaces can be moved, coloured and stacked** (#258). Drag a pager dot to
