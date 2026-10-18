@@ -11,13 +11,15 @@ A tiled column can be sized to one of four widths from the window's title-bar ri
 | `⅓` | One third of the strip |
 | `½` | Half of the strip |
 | `⅔` | Two thirds of the strip |
-| `max` | Maximum width |
+| `max` | The full width of the strip |
 
 To set a preset, right-click the window's title bar and pick a width under the **Column width** heading.
 
+Widths are measured on the strip minus the thin gutters between columns, and presets that add up to the whole strip (two `½`, three `⅓`, `⅓` + `⅔`) fill it exactly, to the pixel, so moving focus between them never scrolls the strip.
+
 ### Fine-tune by dragging
 
-For a width between the presets, drag a column's **side gutter** — the seam between two columns — left or right. This resizes the column to a custom width; the neighbour gives up or takes the same width, so the rest of the strip stays put. Picking a preset afterwards drops the custom width. (The check keeps showing the last preset you picked.)
+For a width between the presets, drag a column's **side gutter** — the seam between two columns — left or right. This resizes the column to a custom width; the neighbour gives up or takes the same width, so the rest of the strip stays put. Neither of the two can shrink below 12% of the strip (or half of what they share, if that is less), and neither can grow past the full strip width, so next to a `max` column the drag can only make that column narrower. The gutter follows the mouse; it does not respond to touch, so on a touch screen use the presets. Picking a preset afterwards drops the custom width. (The check keeps showing the last preset you picked.)
 
 ## Move & focus columns
 
