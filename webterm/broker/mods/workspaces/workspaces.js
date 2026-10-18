@@ -567,7 +567,7 @@
                     d.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        buildWorkspaceMenu(i, e.clientX, e.clientY);
+                        buildWorkspaceMenu(ws.id, e.clientX, e.clientY);
                     });
                     d.addEventListener('mouseenter', () => showWsPreview(i, d));
                     d.addEventListener('mouseleave', hideWsPreview);
@@ -582,17 +582,28 @@
             }
 
             // ---- workspace rename / remove / label-mode (tasks 18, 19) --------
-            function buildWorkspaceMenu(i, x, y) {
+            // #258: built for a workspace ID and every action re-resolves it
+            // at click time -- a menu can sit open across a poll that moves
+            // or removes workspaces. A stack member (opened from its stack's
+            // list) moves up/down inside the stack instead of left/right.
+            function buildWorkspaceMenu(wsId, x, y) {
                 const list = wsList();
+                const ws = list.find(w => w.id === wsId);
+                if (!ws) return;
                 const mode = wsLabelMode();
+                const key = 'w:' + wsId;
+                const at = (fn) => () => { const i = workspaceIndexById(wsId); if (i >= 0) fn(i); };
                 const items = [
-                    { label: 'Workspace ' + (list[i] ? wsNumber(list[i].id) : i + 1)
-                        + (list[i] && list[i].name ? ' — ' + list[i].name : ''),
+                    { label: 'Workspace ' + wsNumber(wsId) + (ws.name ? ' — ' + ws.name : ''),
                       enabled: false },
-                    { label: 'Rename…', enabled: true,
-                      action: () => renameWorkspace(i) },
+                    { label: 'Rename…', enabled: true, action: at(renameWorkspace) },
                     { label: 'Remove workspace', enabled: list.length > 1,
-                      action: () => removeWorkspace(i) },
+                      action: at(removeWorkspace) },
+                    { sep: true },
+                    { label: ws.stack ? 'Move up' : 'Move left', enabled: wsCanMove(key, -1),
+                      action: () => moveEntry(key, -1) },
+                    { label: ws.stack ? 'Move down' : 'Move right', enabled: wsCanMove(key, 1),
+                      action: () => moveEntry(key, 1) },
                     { sep: true },
                     { label: (mode === 'name' ? '✓ ' : '   ') + 'Show names',
                       enabled: true, action: () => setWsLabelMode('name') },
@@ -725,6 +736,18 @@
             // One step (dir -1 / +1): a pager entry passes its neighbouring
             // ENTRY (a plain workspace jumps a whole stack); a stack MEMBER
             // ('w:' of a stacked workspace) swaps inside its stack.
+            // Would moveEntry(key, dir) move anything? (menu enabling only;
+            // the move itself re-checks.)
+            function wsCanMove(key, dir) {
+                const list = wsList();
+                const i = list.findIndex(function (w) { return 'w:' + w.id === key; });
+                if (i >= 0 && list[i].stack) {
+                    return !!list[i + dir] && list[i + dir].stack === list[i].stack;
+                }
+                const es = wsPagerEntries();
+                const p = es.findIndex(function (e) { return e.key === key; });
+                return p >= 0 && p + dir >= 0 && p + dir < es.length;
+            }
             function moveEntry(key, dir) {
                 const st = wsStore();
                 const i = st.list.findIndex(function (w) { return 'w:' + w.id === key; });

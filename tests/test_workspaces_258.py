@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 38
+EXPECTED_ASSERTS = 42
 
 _PRELUDE = r"""
 'use strict';
@@ -694,6 +694,47 @@ async function moving() {
 }
 """
 
+_SCENARIOS += r"""
+async function wsMenu() {
+    // ---- MN: the pager-dot menu, built for an id --------------------------
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    function openMenu(w, wsId) {
+        const d = w.dots().filter(function (x) { return x.dataset.wsId === wsId; })[0];
+        if (!d) return null;
+        fire(d, 'contextmenu', { clientX: 10, clientY: 20 });
+        return w.lastMenu();
+    }
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    let w = buildWorld();
+    let m = openMenu(w, 'W2');
+    const lbls = m ? m.items.filter(function (it) { return !it.sep; }).map(function (it) { return it.label.trim(); }) : [];
+    ok(!!m && lbls[0] === 'Workspace 2' && lbls.indexOf('Rename…') > 0
+        && lbls.indexOf('Remove workspace') > 0 && lbls.indexOf('Move left') > 0
+        && lbls.indexOf('Move right') > 0 && lbls.indexOf('New workspace') > 0,
+        'MN1 a dot\'s menu names its workspace and offers rename, remove, move left/right and new');
+    const mFirst = openMenu(w, 'W1'), mLast = openMenu(w, 'W3');
+    ok(!!mFirst && !!mLast && w.item(mFirst, /^Move left$/) && !w.item(mFirst, /^Move left$/).enabled
+        && w.item(mFirst, /^Move right$/).enabled && !w.item(mLast, /^Move right$/).enabled
+        && w.item(mLast, /^Move left$/).enabled,
+        'MN2 Move left is off on the first entry and Move right on the last');
+    m = openMenu(w, 'W2');
+    act(w.item(m, /^Move right$/));
+    ok(!!m && ids(w) === 'W1,W3,W2', 'MN3 Move right moves the workspace the menu was opened on');
+
+    // The menu sits open while a peer's adopt reorders the list.
+    w = buildWorld();
+    m = openMenu(w, 'W1');
+    const l = w.st().list; const t = l[0]; l[0] = l[1]; l[1] = t;    // W2,W1,W3
+    act(w.item(m, /^Move right$/));
+    const afterMove = ids(w);
+    w.promptAnswer = 'renamed';
+    await act(w.item(m, /^Rename/));
+    ok(!!m && afterMove === 'W2,W3,W1'
+        && w.st().list.filter(function (x) { return x.id === 'W1'; })[0].name === 'renamed',
+        'MN4 an open menu acts on its workspace by id after a peer reorders the list');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -702,6 +743,7 @@ _EPILOGUE = r"""
     await pagerNumbers();
     await signature();
     await moving();
+    await wsMenu();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -831,6 +873,13 @@ def test_move_actions_are_unbound_by_default():
     for aid in ("workspace-move-left", "workspace-move-right"):
         assert f"id: '{aid}'" in ws, f"{aid} is not registered by the mod"
         assert f"'{aid}'" not in store, f"{aid} must stay unbound by default"
+
+
+def test_workspace_menu(scenario_run):
+    _ok(scenario_run, "MN1 a dot's menu names its workspace and offers rename, remove, move left/right and new")
+    _ok(scenario_run, "MN2 Move left is off on the first entry and Move right on the last")
+    _ok(scenario_run, "MN3 Move right moves the workspace the menu was opened on")
+    _ok(scenario_run, "MN4 an open menu acts on its workspace by id after a peer reorders the list")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
