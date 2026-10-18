@@ -841,7 +841,12 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     handle this server keeps in memory (keyed by the returned id) so
     `set_window` can retag this window later; the handle is lost when this
     process restarts (the admin credential or the browser can recover the
-    window)."""
+    window).
+
+    When the host advertises `allow_desktop`, the new window opens on the
+    desktop of the browser holding the control lease, once, without a
+    click; with no such browser it stays a taskbar chip, which any
+    arrange_window op opens. The result does not wait for the browser."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
         profile=profile, cols=cols, rows=rows, title=title, cwd=cwd,

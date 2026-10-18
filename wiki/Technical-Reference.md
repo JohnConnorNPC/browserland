@@ -899,6 +899,13 @@ socket closes, and nobody else is promoted then. Frames the page sends: `{"type"
   nonce (`null` if the ping carried no integer `n`); the rest is the live lease,
   built exactly like a status, so a page whose status went missing re-learns it
   from any ping, and the page runs it through the same path as a status frame.
+* **`{"type": "session_launched", "id": <int>, "gen": <int>, "bootId":
+  "<str>"}`** (#262) — to ONE socket of the lease holder, after a successful
+  `POST /mcp/launch` with `allow_desktop` on: open window `id`. There is no
+  answer. The page parks the id the way its own launch does and opens it once
+  `/sessions` lists it, but only if that page holds the lease at that `gen`
+  and run, its view is fully up, and it has not seen this launch before. A
+  page that predates the frame ignores it.
 * **A repeat `become_active` from the current holder is idempotent.** It bumps no
   generation, closes no socket (no 4409) and tells nobody else: only the sending
   socket gets the status again. A `become_active` from anyone else flips the
@@ -1395,6 +1402,12 @@ Response is the launcher's:
 
 **200** when the agent registered within 10 s, **202** when it spawned but had
 not said `hello` yet (`"registered":false`).
+
+After either (#262), when `allow_desktop` is on, the broker sends the lease
+holder a `session_launched` frame for the new id in a detached task, so the
+browser opens the window by itself. The reply never waits for it, and a launch
+with no lease holder sends nothing (the window stays a chip that any desktop
+op opens). A failed launch sends nothing.
 
 Every **MCP** launch, scoped or not, takes the same path (#243): the window's
 row in `webterm_mcp_windows.json` is written before the agent is spawned, with

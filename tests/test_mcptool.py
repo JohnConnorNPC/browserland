@@ -644,6 +644,9 @@ def test_262_desktop_docstrings_state_open_on_demand():
     assert "`open`" in gdoc and "false for a terminal that is only a" in gdoc
     wdoc = " ".join((server.workspaces.__doc__ or "").split())
     assert "taskbar chip is opened first" in wdoc
+    ldoc = " ".join((server.launch_terminal.__doc__ or "").split())
+    assert ("the new window opens on the desktop of the browser holding the "
+            "control lease") in ldoc
 
 
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
