@@ -179,7 +179,7 @@ The mechanism is a sentinel file and exit code 75: the worker exits 75 (normally
 There is one build id in this project: `webterm.build_version()` — the package
 version from `webterm/__init__.py` (the **single source**; `pyproject.toml`
 declares `dynamic = ["version"]` and reads that attribute) plus the git short
-hash when running from a checkout, e.g. `0.8.0+ba4b62e`. It is derived from the
+hash when running from a checkout, e.g. `1.0.0+ba4b62e`. It is derived from the
 package's own directory (never the process cwd, so a wheel installed inside an
 unrelated repo cannot report that repo's commit), cached per process, and never
 raises.
@@ -188,7 +188,7 @@ It rides the agent hello, `GET /info` and `GET /mcp/info` — and it is baked in
 the served desktop page:
 
 ```html
-<meta name="webterm-build" content="0.8.0+ba4b62e">
+<meta name="webterm-build" content="1.0.0+ba4b62e">
 ```
 
 A broker serves the page it assembled at **import**, so a `git pull` changes
@@ -1212,7 +1212,7 @@ effective mode to permit them.
 | `POST /mcp/desktop` | `allow_desktop` | one desktop op (#244) |
 
 **`GET /mcp/info`** →
-`{"ok":true,"allow_launch":false,"terminals":true,"default_mode":"off","version":"0.8.0+ba4b62e",
+`{"ok":true,"allow_launch":false,"terminals":true,"default_mode":"off","version":"1.0.0+ba4b62e",
 "scope":null,"admin":false,"window_edit":true,"allow_desktop":false}`.
 `terminals` (#253) is `false` on a broker that hosts no terminals: every launch
 is refused with `terminals_disabled` whatever `allow_launch` says. Absent from an
@@ -1251,7 +1251,7 @@ now (see Terminal control); MCP input is not gated by it:
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read","scope":null,
-  "version":"0.8.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
+  "version":"1.0.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
   "controlled":false,"pyte":true}]
 ```
 
