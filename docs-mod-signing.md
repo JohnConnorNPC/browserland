@@ -1,5 +1,7 @@
 # Mod package signing — design note
 
+> Design note; it may not match the current code.
+
 Status: design only. Nothing described here is implemented. This note settles the
 shape so the implementation, when it lands, is not re-argued; it is written
 against the code as it exists today in `webterm/broker/modinstall.py`.

@@ -1,5 +1,7 @@
 # Browserland Mod Support — Current State and Next-Version Requirements
 
+> Design note; it may not match the current code.
+
 > **Dated audit written at 1da9f77 (2026-08-15); not current documentation.**
 > Most of gaps G1–G11 shipped under #189–#225. Read it as the rationale behind
 > that work, not as the current state; the authoring contract is

@@ -1,5 +1,7 @@
 # Terminal funnels: the write / input / resize enumeration (#201, A57)
 
+> Design note; it may not match the current code.
+
 This was the **funnel-completeness precondition** for issue #201: before
 recorder's old `term.write` / `term.resize` patches could be replaced by
 `info.tapOutput` / `info.onResize` (they now are; recorder subscribes through
