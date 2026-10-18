@@ -226,7 +226,10 @@ three fail closed per host (`desktop_unsupported`, no request) while
   `unknown_or_off` 404 as a missing id. An admin host is unrestricted.
 - `workspaces` needs the admin credential as well (workspace changes span
   every window). `force` is **remove-only**: it exists to bypass remove's
-  `needs_confirm` and is refused locally on every other op.
+  `needs_confirm` and is refused locally on every other op. Likewise
+  `direction` (move), `color` (color) and `stack` (move/color/rename — a
+  stack id from `list`) are refused locally anywhere else; `color` is one of
+  `list`'s `palette` colours, or `none`.
 
 A project's `.mcp.json` pins its scope like this:
 

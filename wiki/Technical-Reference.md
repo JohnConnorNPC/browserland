@@ -1105,7 +1105,8 @@ browser keys the answers it has given on host, run and rid (#250).
   `max`), `tile`, `float`, `set_geometry` (`x`,`y`,`w`,`h`, floating only,
   browser-clamped, answered with the **applied** box), `tab_into`
   (`target`), `split` (`target`, `axis` = `row`/`column`). Workspace ops
-  (`workspaces:list`/`add`/`rename`/`remove`/`switch`/`send-window`) are
+  (`workspaces:list`/`add`/`rename`/`remove`/`switch`/`send-window`, and
+  `move`/`color`/`stack`/`unstack` for order, colour and stacks) are
   forwarded to the mod's `ctx.commands`; the mod being off/absent answers
   **200 `{"ok": false, "reason": "inactive"|"absent"}`**, not an error.
 
@@ -1125,7 +1126,11 @@ ints, `mode` a short string, `focused_column`/`active_workspace` int or null,
 a lying or buggy browser cannot smuggle foreign ids or oversized strings
 past the relay. Each workspace row is reduced to `{index, id, name}` with an
 unnamed workspace appearing as `name: null` (only a present, non-string or
-oversized name drops the row).
+oversized name drops the row), plus its `color` (`#rrggbb` or `null`) and
+`stack` (a stack id or `null`) when the browser sent them; a top-level
+`stacks` list (`{id, name, color, last}` rows) appears only when the browser
+sent one. A bad value drops that key, never the row, so an older page's
+snapshot keeps its exact shape.
 
 **`POST /mcp/desktop`** — body `{"op": …, "args": …}` with the op allowlist
 above (else **400 `bad_op`**); op-specific arg errors answer **400
