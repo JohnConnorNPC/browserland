@@ -1,6 +1,45 @@
 <!-- help:tier dev -->
 
-Breaking changes, what they cost you, and how to recover. Newest first.
+What 1.0 supports and promises, then the breaking changes, what they cost you,
+and how to recover, newest first. Coming from 0.8.0, read the entries from
+**Python 3.10 is the minimum** down to **MCP-launched windows start in
+`readwrite`**; the ones below those already shipped in 0.8.0.
+
+---
+
+## What 1.0 promises
+
+**1.0 supports** Windows and Linux, Python 3.10 or newer, and current Chrome,
+Edge and Firefox.
+
+**Within 1.x:**
+
+- **Mods:** the mod API stays at `ctxVersion: 1`, with additions only. Check
+  that a newer member exists before you use it
+  ([[Writing a Mod|Writing-a-Mod]]).
+- **Saved state:** `/state` blobs written by a 1.x release are read by every
+  later 1.x release. Going back to an older release is not covered.
+- **MCP tools:** tool names stay, and their arguments only gain optional
+  fields.
+
+A change that would break one of these three waits for 2.0. Anything not listed
+here can change in a 1.x release; when it does, it is written up on this page.
+
+---
+
+## Python 3.10 is the minimum (1.0)
+
+**What changed.** `pyproject.toml` now has `requires-python = ">=3.10"` (it was
+`>=3.9`), so `pip install -e .` refuses a 3.9 interpreter.
+
+**Who is affected.** Anyone running the broker or the agent on Python 3.9. The
+`mcp` extra already needed 3.10.
+
+**What to do.** Install Python 3.10 or newer, then reinstall from the checkout
+(`pip install -e .` plus your extras). The launcher scripts run the checkout
+with whatever `python` or `python3` is on `PATH` and never check its version.
+On Linux, `run-broker.sh` and `run-agent.sh` reuse an existing `.venv`, so
+delete it after installing the newer Python and the next run rebuilds it.
 
 ---
 
