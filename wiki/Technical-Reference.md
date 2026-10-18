@@ -1655,9 +1655,13 @@ catalog + the security rationale: **[[Launch-Profiles]]**.
 ### Mods (browser `auth_token`-gated) — #157 / #163 / #172
 
 The desktop's mod system. Authoring contract, the `ctx` API and the trust model:
-**[[Writing-a-Mod]]**. All of these are **`serve_ui`-gated** — a node
+**[[Writing-a-Mod]]**. All of these except `POST /mods/policy` are **`serve_ui`-gated** — a node
 (`serve_ui: false`) registers none of them and reports `mods: []` — and, like
-`/mcp/config`, they take the **browser** token, never the MCP one. They are
+`/mcp/config`, they take the **browser** token, never the MCP one. With a
+config `admin_token` set (#191), install, uninstall, rescan and policy also
+need it in the `X-Webterm-Admin` header (**403 `admin_required`** without it,
+**400 `admin_token_in_url`** if it rides the query); `/mods/installed` needs
+the page token only. They are
 deliberately **not** lease-gated: this is broker configuration, and the point is
 being able to administer a broker somebody else is using right now.
 
@@ -1666,9 +1670,12 @@ and can reach `/file/*`, `/session/*`, `/state` and `/mcp/*` directly; `ctx`
 grants it nothing it lacks. So the trust event is the **token-gated install**,
 not the fetch that follows.
 
-**`POST /mods/policy`** — this broker's mod *pins*, `{modId: bool}`, applied to
-every browser that loads its page (an absent id leaves the choice to that
-browser). Stored in the `webterm_mod_policy.json` sidecar beside the `/state`
+**`POST /mods/policy`** — a patch of this broker's mod *pins*,
+`{"set": {modId: true|false|null}}` (`null` clears a pin), applied to every
+browser that loads its page (an absent id leaves the choice to that browser).
+Answers `{"ok":true,"policy":…}`; refuses `bad_set` (400, not a non-empty
+object), `too_many` (413, over 256 pins), `bad_mod_id` and `bad_pin` (400),
+all before any write. Stored in the `webterm_mod_policy.json` sidecar beside the `/state`
 store (override with config `mod_policy_path`); reported by `GET /info` as
 `mod_policy`. Applies on the next page load.
 
@@ -1679,8 +1686,11 @@ validated **entirely in memory** before a byte is written. The mod id must match
 un-prefixed namespace is reserved for shipped mods). `manifest.scripts` is a
 required non-empty list of `.js` names; `entry` and every other unknown key are
 **rejected**, not ignored. Files are text only (`.js`/`.css`/`.md`), UTF-8,
-BOM-free, newline-terminated, ≤ `ui._MAX_LINES` lines; a `.css` may not
-`@import` or reference an absolute `url(http…)`. Caps: 32 mods, 32 files/mod,
+BOM-free, newline-terminated, ≤ `ui._MAX_LINES` lines; a `.css` may not use
+`@import`, contain `http://` or `https://` anywhere outside a comment, or start
+a `url()` argument or string with `//`. A manifest `permissions` list (from
+`clipboard`, `egress`, `file`, `remote-admin`, `session`, #193) must declare
+what the source uses. Caps: 32 mods, 32 files/mod,
 256 KiB/file, 512 KiB/mod. Returns
 `{"ok":true,"id","gen","replaced","adopts_existing_state":{"mod_store","pin"},
 "mod":{…},"applies":"next_page_load"}`. Errors (each distinct): `too_large`
@@ -1688,7 +1698,8 @@ BOM-free, newline-terminated, ≤ `ui._MAX_LINES` lines; a `.css` may not
 (409), `bad_file_name`, `reserved_file_name`, `too_many_files`, `file_too_large`
 (413), `total_too_large` (413), `bad_encoding`, `bad_scripts`, `bad_styles`,
 `bad_requires`, `bad_manifest_field`, `unknown_manifest_key`,
-`css_external_reference`, `too_many_mods` (409), `write_failed` (500).
+`css_external_reference`, `undeclared_capability` (the source uses what
+`permissions` omits), `too_many_mods` (409), `write_failed` (500).
 
 **`POST /mods/uninstall`** — `{"id": "x-notes", "purge": false}`. `purge:true`
 also clears this broker's `/mod-store/<id>` and its pin (lock order
@@ -1823,9 +1834,16 @@ error paths and preflights, sanic-ext neutralized, relay invariants,
 (token bootstrap/mint/adopt, a router-enumerating guard that every non-public
 route answers 401 `auth_required`, and the WS 4401 gates on loopback),
 non-loopback auth negatives + CORS positives via the box's LAN IP, plus the
-newer surfaces: the MCP tools (read/reset/flush/pace),
-the file API, session recording, the status-fetch proxy, the textgrid
-fallback renderer, and UI asset assembly.
+newer surfaces: the MCP tools (read/reset/flush/pace, scopes, launch handles
+and `/mcp/window`, the admin credential, the desktop relay), broker roles,
+terminal control and the `/control` lease, `/state` sync, update check/apply,
+restart and the supervisor, the peer proxy and its sockets, mod install and
+policy, the admin gate, the CSP and egress pins, the host registry, the
+workspaces mod, the file API, session recording, the status-fetch proxy and
+its gate, the textgrid fallback renderer, and UI asset assembly. The
+`playwright_*.py` files are live-browser scripts, not part of the pytest run.
+The test dependencies are listed under [Linux deployment](#linux-deployment)
+(`sanic-testing` is not in the `dev` extra).
 
 `pyte` is optional: `pip install pyte`. It is required only for
 `--snapshot-mode pyte` (`raw` starts without it), but installing it also
