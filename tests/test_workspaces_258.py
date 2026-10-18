@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 102
+EXPECTED_ASSERTS = 103
 
 _PRELUDE = r"""
 'use strict';
@@ -1421,6 +1421,25 @@ async function badgeColourCleared() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackWithGone() {
+    // ---- SM6: Stack with… onto a target that vanished says so, changes nothing
+    const w = buildWorld();
+    const m = w.openWsMenu('W1');
+    const sw = w.item(m, /^Stack with…$/);
+    if (sw) sw.action();
+    const tm = w.lastMenu();
+    const target = (tm && tm !== m) ? w.item(tm, /^Workspace 3$/) : null;
+    w.st().list.splice(2, 1);                            // a peer removed W3 meanwhile
+    w.render();
+    const before = J(w.st()), saves = w.spies.save, notices = w.spies.notice.length;
+    if (target) target.action();
+    ok(!!target && J(w.st()) === before && w.spies.save === saves
+        && w.spies.notice.length === notices + 1 && /gone/.test(w.spies.notice[notices]),
+        'SM6 Stack with… onto a workspace that vanished meanwhile says so and changes nothing');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1446,6 +1465,7 @@ _EPILOGUE = r"""
     await modOff();
     await dotClickById();
     await badgeColourCleared();
+    await stackWithGone();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1696,6 +1716,10 @@ def test_pager_dot_click_resolves_by_id(scenario_run):
 
 def test_badge_colour_is_cleared(scenario_run):
     _ok(scenario_run, "CS7 clearing a workspace's colour removes it from its taskbar badges")
+
+
+def test_stack_with_a_vanished_target(scenario_run):
+    _ok(scenario_run, "SM6 Stack with… onto a workspace that vanished meanwhile says so and changes nothing")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

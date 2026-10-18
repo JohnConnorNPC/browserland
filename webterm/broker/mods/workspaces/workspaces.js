@@ -1075,7 +1075,10 @@
                 for (const e of wsPagerEntries()) {
                     if (e.members.some(m => m.id === wsId)) continue;
                     const k = e.key;
-                    items.push({ enabled: true, action: () => stackWith(wsId, k),
+                    items.push({ enabled: true, action: () => {
+                        // A peer can remove either side while the menu sits open.
+                        if (!stackWith(wsId, k)) showNotice('cannot stack: that workspace is gone');
+                    },
                         label: e.stack ? 'Stack ' + (e.stack.name || e.num) + ' (' + e.members.length + ')'
                                        : (e.ws.name || 'Workspace ' + e.num) });
                 }
