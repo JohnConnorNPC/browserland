@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 62
+EXPECTED_ASSERTS = 67
 
 _PRELUDE = r"""
 'use strict';
@@ -364,11 +364,32 @@ function buildWorld(seed) {
     w.dots = function () { return w.pager().querySelectorAll('.ws-dot:not(.add)'); };
     w.render = function () { if (w.layoutRender) w.layoutRender(); };
     w.lastMenu = function () { return w.menus[w.menus.length - 1] || null; };
-    // A workspace's own menu, by id: right-click its pager dot.
+    // A stack's entry dot, and the row of a member in its open list.
+    w.stackDot = function (sid) {
+        return w.dots().filter(function (x) { return x.dataset.stackId === sid; })[0] || null;
+    };
+    w.openList = function (sid) {
+        const d = w.stackDot(sid);
+        if (!d) return null;
+        fire(d, 'click');
+        const p = w.pops[w.pops.length - 1];
+        return (p && p.open && p.node.classList.contains('ws-stack-list')) ? p : null;
+    };
+    w.row = function (pop, wsId) {
+        return pop ? pop.node.querySelectorAll('.wsl-row').filter(function (b) { return b.dataset.wsId === wsId; })[0] || null : null;
+    };
+    // A workspace's own menu, by id: right-click its pager dot, or -- for a
+    // stack member -- its row in the stack's list.
     w.openWsMenu = function (wsId) {
         const d = w.dots().filter(function (x) { return x.dataset.wsId === wsId; })[0];
-        if (!d) return null;
-        fire(d, 'contextmenu', { clientX: 10, clientY: 20 });
+        if (d) {
+            fire(d, 'contextmenu', { clientX: 10, clientY: 20 });
+            return w.lastMenu();
+        }
+        const ws = w.st().list.filter(function (x) { return x.id === wsId; })[0];
+        const r = w.row(ws && ws.stack ? w.openList(ws.stack) : null, wsId);
+        if (!r) return null;
+        fire(r, 'contextmenu', { clientX: 10, clientY: 20 });
         return w.lastMenu();
     };
     w.item = function (menu, re) {
@@ -962,6 +983,135 @@ async function stackMembers() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackEntry() {
+    // ---- SE / TN3 / SG4-SG7 / SL1-SL4: the stack's pager entry and its list --
+    function seed(active, extra) {
+        return Object.assign({ activeId: active || 'W1',
+            stacks: [{ id: 'S1', name: 'dev', color: '#5fbf7f' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1', color: '#e96d6d' },
+            { id: 'W3', focusedCol: 0, stack: 'S1', name: 'api' }, { id: 'W4', focusedCol: 0 }] }, extra || {});
+    }
+    function own(d) { return d ? d._text : ''; }
+    let w = buildWorld(seed());
+    let dots = w.dots();
+    let sd = w.stackDot('S1');
+    const cnt = sd ? sd.querySelector('.ws-count') : null;
+    ok(dots.length === 3 && !!sd && dots[1] === sd && own(sd) === '2' && !!cnt && cnt.textContent === '2'
+        && dots[2].dataset.wsId === 'W4' && dots[2].textContent === '3',
+        'SE1 a stack is ONE pager entry with its number and member count');
+    ok(!!sd && /stack 2 of 2 workspaces/.test(sd.title) && /^dev — /.test(sd.title)
+        && !sd.classList.contains('active'),
+        'SE3 the stack entry\'s tooltip names the stack and its size');
+    ok(!!sd && sd.classList.contains('tinted') && sd.style.getPropertyValue('--ws-color') === '#5fbf7f',
+        'TN3 the stack entry is tinted with the STACK\'s colour, not a member\'s');
+
+    w = buildWorld(seed('W3'));
+    sd = w.stackDot('S1');
+    ok(!!sd && sd.classList.contains('active') && own(sd) === '2.2',
+        'SE2 when you are on a member the stack entry is current and names it N.k');
+    w.labelMode = 'name'; w.render();
+    sd = w.stackDot('S1');
+    ok(!!sd && own(sd) === 'dev › api', 'SE2 in names mode it reads stack › member');
+
+    // SG4-SG7: each stack-level field rebuilds the entry with its visible effect.
+    w = buildWorld(seed('W1', { labelMode: 'name' }));
+    let before = w.stackDot('S1');
+    w.st().stacks[0].name = 'ops'; w.render();
+    let after = w.stackDot('S1');
+    ok(!!before && own(before) === 'dev' && !!after && after !== before && own(after) === 'ops',
+        'SG4 renaming a stack rebuilds its entry with the new name');
+    w = buildWorld(seed());
+    before = w.stackDot('S1');
+    w.st().stacks[0].color = '#b78bf0'; w.render();
+    after = w.stackDot('S1');
+    ok(!!before && !!after && after !== before && after.style.getPropertyValue('--ws-color') === '#b78bf0',
+        'SG5 recolouring a stack rebuilds its entry with the new tint');
+    w = buildWorld(seed('W2'));
+    before = w.stackDot('S1');
+    w.st().activeId = 'W3'; w.render();                 // an adopt moved you to the other member
+    after = w.stackDot('S1');
+    ok(!!before && own(before) === '2.1' && !!after && own(after) === '2.2',
+        'SG7 a switch between members of one stack repaints which member is current');
+
+}
+async function stackList() {
+    // ---- SL1-SL4: a stack's list --------------------------------------------
+    function seed(active) {
+        return { activeId: active || 'W1',
+            stacks: [{ id: 'S1', name: 'dev', color: '#5fbf7f' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1', color: '#e96d6d' },
+            { id: 'W3', focusedCol: 0, stack: 'S1', name: 'api' }, { id: 'W4', focusedCol: 0 }] };
+    }
+    let w, sd;
+    w = buildWorld(seed('W3'));
+    sd = w.stackDot('S1');
+    let pop = w.openList('S1');
+    const rows = pop ? pop.node.querySelectorAll('.wsl-row') : [];
+    ok(!!pop && pop.anchor === sd && rows.length === 2 && rows[0].dataset.wsId === 'W2'
+        && rows[0].tagName === 'BUTTON' && /2\.1$/.test(rows[0].textContent)
+        && rows[1].textContent === '✓ 2.2  api' && rows[1].classList.contains('current')
+        && w.pops.filter(function (p) { return p.open; }).length === 1,
+        'SL1 clicking a stack opens one list of its members, anchored to it, the current one checked');
+    const sw = rows[0] ? rows[0].querySelector('.wsl-swatch') : null;
+    ok(!!sw && sw.style.background === '#e96d6d' && sw.getAttribute('aria-hidden') === 'true',
+        'SL1 each row carries its member\'s colour as a decorative swatch');
+    if (rows[0]) fire(rows[0], 'click');
+    ok(!!pop && w.st().activeId === 'W2' && !pop.open, 'SL2 choosing a row switches to it and closes the list');
+
+    w = buildWorld(seed('W1'));
+    pop = w.openList('S1');
+    const r3 = w.row(pop, 'W3');
+    const l = w.st().list; const t = l[1]; l[1] = l[2]; l[2] = t;     // a peer reorders the stack
+    if (r3) fire(r3, 'click');
+    ok(!!r3 && w.st().activeId === 'W3', 'SL3 a row switches to ITS workspace after a peer reorders the stack');
+
+    w = buildWorld(seed('W1'));
+    pop = w.openList('S1');
+    const r2 = w.row(pop, 'W2');
+    const n0 = w.menus.length;
+    if (r2) fire(r2, 'contextmenu', { clientX: 5, clientY: 6 });
+    const mm = w.menus.length > n0 ? w.lastMenu() : null;
+    ok(!!r2 && !!mm && /^Workspace 2\.1/.test(mm.items[0].label) && !!w.item(mm, /^Move down$/)
+        && !!w.item(mm, /^Remove from stack$/) && !pop.open,
+        'SL4 right-clicking a row closes the list and opens that member\'s menu');
+}
+"""
+
+_SCENARIOS += r"""
+async function stackDrag() {
+    // ---- DR3 / MV3: drags that involve a whole stack ----------------------
+    function ids(w) { return w.st().list.map(function (x) { return x.id; }).join(','); }
+    function seed() {
+        return { stacks: [{ id: 'S1' }], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0 }] };
+    }
+    function place(w) { w.dots().forEach(function (d, i) { d.rect = { left: 100 * i, top: 0, right: 100 * i + 40, bottom: 26, width: 40, height: 26 }; }); }
+    function drag(w, s, t, x) {
+        place(w);
+        if (!s || !t) return false;
+        const dt = mkDT();
+        fire(s, 'dragstart', { dataTransfer: dt });
+        fire(t, 'dragover', { dataTransfer: dt, clientX: x });
+        fire(t, 'drop', { dataTransfer: dt, clientX: x });
+        fire(s, 'dragend', { dataTransfer: dt });
+        return true;
+    }
+    function dot(w, id) { return w.dots().filter(function (d) { return d.dataset.wsId === id; })[0] || null; }
+    let w = buildWorld(seed());
+    let d = drag(w, dot(w, 'W4'), w.stackDot('S1'), 105);   // the stack dot spans 100..140
+    ok(d && ids(w) === 'W1,W4,W2,W3' && w.st().list[2].stack === 'S1',
+        'DR3 dropping on a stack lands beside the whole stack, never inside it');
+    w = buildWorld(seed());
+    d = drag(w, w.stackDot('S1'), dot(w, 'W1'), 5);
+    const saved = JSON.parse(w.spies.saved || '{}').list || [];
+    ok(d && ids(w) === 'W2,W3,W1,W4'
+        && saved.map(function (x) { return x.id; }).join(',') === 'W2,W3,W1,W4',
+        'MV3 dragging a stack moves all its members as one block');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -975,6 +1125,7 @@ _EPILOGUE = r"""
     await colours();
     await stacking();
     await stackMembers();
+    await stackList();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1146,6 +1297,14 @@ def test_remove_a_stack_member(scenario_run):
     _ok(scenario_run, "RS1 removing the first of three members moves its windows to the next one and keeps the stack")
     _ok(scenario_run, "RS2 removing a middle member moves its windows to the member before it")
     _ok(scenario_run, "RS3 removing one of two members dissolves the stack in the saved state")
+
+
+def test_stack_list(scenario_run):
+    _ok(scenario_run, "SL1 clicking a stack opens one list of its members, anchored to it, the current one checked")
+    _ok(scenario_run, "SL1 each row carries its member's colour as a decorative swatch")
+    _ok(scenario_run, "SL2 choosing a row switches to it and closes the list")
+    _ok(scenario_run, "SL3 a row switches to ITS workspace after a peer reorders the stack")
+    _ok(scenario_run, "SL4 right-clicking a row closes the list and opens that member's menu")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

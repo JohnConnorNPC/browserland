@@ -564,7 +564,9 @@
                     }
                     d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + wsNumber(ws.id)
                         + '  (right-click: rename / remove)';
-                    d.addEventListener('click', () => switchWorkspace(i));
+                    // #258: a stack member's dot opens its stack's list.
+                    if (ws.stack) d.dataset.stackId = ws.stack;
+                    d.addEventListener('click', () => ws.stack ? openStackList(ws.stack) : switchWorkspace(i));
                     d.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -582,6 +584,49 @@
                 container.appendChild(add);
             }
 
+            // The stack's list: real buttons in a core popover, one per member.
+            // Every row acts on its member's ID at click time.
+            let _wsStackPop = null;
+            function openStackList(sid) {
+                if (_wsStackPop) _wsStackPop.close();
+                const e = wsPagerEntries().find(x => x.stack && x.stack.id === sid);
+                if (!e || !ctx.popover || typeof ctx.popover.anchor !== 'function') return;
+                hideWsPreview();
+                const box = document.createElement('div');
+                box.className = 'ws-stack-list';
+                const cur = activeWorkspaceId();
+                for (const m of e.members) {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'wsl-row' + (m.id === cur ? ' current' : '');
+                    b.dataset.wsId = m.id;
+                    const sw = document.createElement('span');
+                    sw.className = 'wsl-swatch';
+                    sw.setAttribute('aria-hidden', 'true');
+                    if (m.color) sw.style.background = m.color;
+                    b.appendChild(sw);
+                    const lab = document.createElement('span');
+                    lab.textContent = (m.id === cur ? '\u2713 ' : '') + wsNumber(m.id) + (m.name ? '  ' + m.name : '');
+                    b.appendChild(lab);
+                    const id = m.id;
+                    b.addEventListener('click', () => {
+                        if (_wsStackPop) _wsStackPop.close();
+                        const i = workspaceIndexById(id);
+                        if (i >= 0) switchWorkspace(i);
+                    });
+                    b.addEventListener('contextmenu', (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        if (_wsStackPop) _wsStackPop.close();
+                        buildWorkspaceMenu(id, ev.clientX, ev.clientY);
+                    });
+                    box.appendChild(b);
+                }
+                const anchor = Array.prototype.find.call(pager.querySelectorAll('.ws-dot'),
+                    (d) => d.dataset.stackId === sid) || document.getElementById('taskbar');
+                _wsStackPop = ctx.popover.anchor(box, anchor, { placement: 'top', gap: 8,
+                    onClose: function () { _wsStackPop = null; } });
+            }
             // ---- workspace rename / remove / label-mode (tasks 18, 19) --------
             // #258: built for a workspace ID and every action re-resolves it
             // at click time -- a menu can sit open across a poll that moves
