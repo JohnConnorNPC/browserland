@@ -71,7 +71,7 @@ Focus column left/right and move column left/right shift your focus and your col
 
 ### Workspaces
 
-Previous/next workspace step through your virtual desktops; the "Go to workspace 1–5" actions jump straight to one. Move workspace left/right move the workspace you are on one place in the pager (within its stack, if it is in one); both are unbound by default. See [[Workspaces]] for the pager and sending windows between desktops.
+Previous/next workspace step through your virtual desktops; the "Go to workspace 1–5" actions jump straight to that numbered pager entry (one that is a stack opens its list instead). Move workspace left/right move the workspace you are on one place in the pager (within its stack, if it is in one); both are unbound by default. See [[Workspaces]] for the pager and sending windows between desktops.
 
 These nine come from the **Workspaces** mod (enabled by default), so they leave this list if you turn it off — and your bindings for them come back untouched when you turn it back on.
 
