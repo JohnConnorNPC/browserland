@@ -69,6 +69,17 @@ function helperCase() {
         for (const f of fracs) { s += f; out.push(s); }
         return out;
     }
+    // C1f's oracle: each width is the step between two rounded cumulative
+    // edges, the prefix taken in that same order. Exact, so a helper that
+    // rounds the edges any other way (floor, ceil, last-edge-only) is red.
+    function oracle(fracs, A) {
+        let prev = 0;
+        return prefix(fracs).map(p => {
+            const e = Math.round(A * p), w = e - prev;
+            prev = e;
+            return w;
+        });
+    }
     const filling = {
         '2x1/2': ['1/2', '1/2'].map(P),
         '3x1/3': ['1/3', '1/3', '1/3'].map(P),
@@ -99,6 +110,8 @@ function helperCase() {
                'C1b ' + name + ' W=' + W + ' col ' + i + ' width ' + wi +
                ' vs exact ' + (f[i] * A).toFixed(3)));
             ok(w.length === f.length, 'C1a ' + name + ' W=' + W + ' length');
+            ok(w.join() === oracle(f, A).join(), 'C1f ' + name + ' W=' + W +
+               ' widths ' + w.join('+') + ' == cumulative-round ' + oracle(f, A).join('+'));
         }
         for (const name in nonFilling) {
             const f = nonFilling[name];
@@ -116,6 +129,8 @@ function helperCase() {
             }
             w.forEach((wi, i) => ok(Math.abs(wi - f[i] * A) <= 1 + 1e-9,
                'C1b ' + name + ' W=' + W + ' col ' + i + ' width ' + wi));
+            ok(w.join() === oracle(f, A).join(), 'C1f ' + name + ' W=' + W +
+               ' widths ' + w.join('+') + ' == cumulative-round ' + oracle(f, A).join('+'));
         }
     }
     // C1d: only a finite positive widthFrac overrides the preset.
@@ -636,11 +651,11 @@ def _run(tmp_path, case):
 # Every width 1000..2560 for 6 filling sets (sum + per-column bound + length)
 # and 5 non-filling sets, plus the 10 colCurrentFrac checks. Pinned so a
 # sweep that silently shrinks fails.
-_FILLING_COLS = (2, 3, 2, 2, 3, 4)      # sum + length + one per column
-_NONFILLING_COLS = (2, 2, 1, 1, 1)      # sum + one per column (+ lone width)
+_FILLING_COLS = (2, 3, 2, 2, 3, 4)      # sum + length + oracle + one per column
+_NONFILLING_COLS = (2, 2, 1, 1, 1)      # sum + oracle + one per column (+ lone)
 HELPER_ASSERTS = 1561 * (
-    sum(2 + n for n in _FILLING_COLS)
-    + sum(1 + n + (n == 1) for n in _NONFILLING_COLS)) + 10
+    sum(3 + n for n in _FILLING_COLS)
+    + sum(2 + n + (n == 1) for n in _NONFILLING_COLS)) + 10
 
 
 def test_helper_columns_fill_the_strip_exactly(tmp_path):
