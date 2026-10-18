@@ -61,7 +61,7 @@ So the canonical two-machine setup is:
 ## Single machine
 
 Follow the **[Quick start](https://github.com/JohnConnorNPC/browserland/blob/main/README.md#quick-start)** in the README: install,
-run the broker, open `http://127.0.0.1:4445/`, click **new terminal**. On a
+run the broker, open `http://127.0.0.1:4445/`, click the **+** (new terminal) button. On a
 single loopback machine you need no config file — the defaults work.
 
 A **token is required on every connection**, including loopback, but you do not
