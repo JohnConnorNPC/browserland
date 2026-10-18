@@ -41,6 +41,13 @@ with whatever `python` or `python3` is on `PATH` and never check its version.
 On Linux, `run-broker.sh` and `run-agent.sh` reuse an existing `.venv`, so
 delete it after installing the newer Python and the next run rebuilds it.
 
+**The Update window will not apply this one.** The update to 1.0 changes
+`pyproject.toml`, so applying it from **Update…** is refused, and the window
+says why: "This update changes dependency files -- pyproject.toml -- …". Update that
+broker by hand once: `git pull`, `pip install -e .` plus your extras, then
+restart it. Later updates go through the window again, unless they change a
+dependency file too.
+
 ---
 
 ## The peer proxy needs websockets 15 (#252)
