@@ -199,6 +199,8 @@
                 // otherwise a user who hid the pager would see it again on
                 // every load.
                 applyPagerVisibility(true);
+                // #258: is the pager on screen? (The stack list needs an anchor.)
+                function wsPagerShown() { return pager.style.display !== 'none'; }
             // Set by any wsStore()/adopt heal that mutated the store without
             // saving; adoptUnstampedColumns() is the single place that turns it
             // into one savePrefs().
@@ -671,7 +673,7 @@
                 });
                 // A number key can open this with the pager hidden: no dot to
                 // point at, so the taskbar is the anchor.
-                const dot = pager.style.display !== 'none' && Array.prototype.find.call(
+                const dot = wsPagerShown() && Array.prototype.find.call(
                     pager.querySelectorAll('.ws-dot'), (d) => d.dataset.stackId === sid);
                 _wsStackPop = ctx.popover.anchor(box, dot || document.getElementById('taskbar'), {
                     placement: 'top', gap: 8,
