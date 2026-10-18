@@ -2535,7 +2535,8 @@ That is an authoring judgement, not a rule.
 `x-`; an installed mod's id *must*.**
 
 The id *shape* is the same on both sides — `_MODSTORE_ID_RE` in `app.py` and
-`MOD_ID_RE` in the loader, both `[a-z0-9][a-z0-9-]{0,63}` — and `x-notes`
+`MOD_ID_RE` in the page (`50_js_constants.js`), both
+`[a-z0-9][a-z0-9-]{0,63}` — and `x-notes`
 already matched it before the rule existed. That is the point: the rule is a
 prefix convention layered on top, so **no key a shipped mod owns moves, and
 neither validator has to change.**
@@ -2617,26 +2618,25 @@ So the contract, if you want source that moves in both directions unchanged:
 
 Rules 1, 2 and 4 are enforced by the portable-mod lint in
 `tests/test_ui_assets.py`, and every shipped mod passes them. Rule 3's known
-in-tree exceptions are pinned there too, as an exact set of seven edges:
+in-tree exceptions are pinned there too, as an exact set of three edges:
 
 | top-level name (owner) | reached from |
 |---|---|
 | `openNoteOrEditorWindow` (`editor`) | core `54_js_app_windows_store.js`, `sticky` |
 | `loadCodeMirror` (`editor`) | `scratchpad` |
-| `applyPattern` (`pattern`) | `theme` |
-| `findHelpWindow`, `refreshHelpCorpus` (`help`) | core `86_js_mod_loader.js` |
-| `toggleHelpWindow` (`help`) | core `78_js_keybindings.js` |
 
 The set is a drift guard **both ways** — a stale edge fails as loudly as a new
-one — so decoupling a mod forces it to shrink. It did: #177 retired `agent-docs`
-(see `webterm/broker/mods-deprecated/README.md`), which took two edges with it,
-`editorFile` (`editor`) ← `agent-docs` and `openAgentDocsWindow` (`agent-docs`)
-← `editor`. The surviving call site in `editor.js` is a
-`typeof openAgentDocsWindow === 'function'` guard, which owns no shipped name
-and so is not an edge.
+one — so decoupling a mod forces it to shrink. It has: #177 retired
+`agent-docs` (see `webterm/broker/mods-deprecated/README.md`), which took two
+edges with it, `editorFile` (`editor`) ← `agent-docs` and
+`openAgentDocsWindow` (`agent-docs`) ← `editor`. The surviving call site in
+`editor.js` is a `typeof openAgentDocsWindow === 'function'` guard, which owns
+no shipped name and so is not an edge. #199 moved `applyPattern` (`pattern`)
+← `theme` onto `ctx.provide` / `ctx.consume`, and #213 moved help's three
+edges from core (`findHelpWindow`, `refreshHelpCorpus`, `toggleHelpWindow`)
+onto the `help:refresh-corpus` and `help:toggle` commands.
 
-So `editor`, `help` and `pattern` cannot be republished as
-installable packages unchanged. **Rule 5 is not enforced** — check it yourself.
+So `editor` cannot be republished as an installable package unchanged. **Rule 5 is not enforced** — check it yourself.
 The lint is a floor, not a proof: it reads source text, so it cannot see a
 call hidden inside `registerMod`'s own argument.
 
