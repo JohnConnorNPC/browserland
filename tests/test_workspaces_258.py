@@ -1207,7 +1207,7 @@ async function stackMenu() {
 
     w.promptAnswer = '  build  ';
     await act(w.item(m, /^Rename stack/));
-    const named = w.st().stacks[0].name;
+    const named = (JSON.parse(w.spies.saved || '{}').stacks || [{}])[0].name;   // as SAVED
     m = stackMenuOf(w);
     w.promptAnswer = '   ';
     await act(w.item(m, /^Rename stack/));
