@@ -16,6 +16,22 @@ story behind anything named below.
 
 ### Added
 
+- **Workspaces can be moved, coloured and stacked** (#258). Drag a pager dot to
+  a new place, or use **Move left** / **Move right** in its menu (and two new
+  key actions, unbound by default). **Colour…** gives a workspace a colour from
+  the profile palette, shown on its dot and beside its name; its number or name
+  always stays. **Stack with…** groups workspaces under one pager dot with a
+  count; clicking it (or the number key that lands on it) opens a small list of
+  its workspaces, which works from the keyboard. A stack has its own name and
+  colour, remembers the workspace you used last, and dissolves when one
+  workspace is left; you cannot drag a workspace into or out of a stack. The
+  number keys count pager entries; Previous / Next still step through every
+  workspace. Order, colours and stacks are shared by every browser of the
+  broker, and come back unchanged when the mod is turned off and on. The admin
+  MCP `workspaces` tool gains `move`, `color`, `stack` and `unstack`, `rename`
+  takes a stack id, and `list` and the desktop snapshot report colours and
+  stacks. See [`wiki/Workspaces.md`](wiki/Workspaces.md).
+
 - **The mod platform's near-term work (G1–G15)** (#189–#204). For operators: a
   `status_fetch_enabled` gate on `/status/fetch` (#189), a broader CSP sent
   Report-Only while it soaks (#190), an optional `admin_token` that mod
@@ -232,6 +248,11 @@ story behind anything named below.
   own issue says otherwise.
 
 ### Fixed
+
+- **Adding a workspace after a reload could do nothing** (#258, fixed along
+  the way). The new workspace could get the id of an existing workspace, and
+  was then dropped as a duplicate straight away. New workspaces (and stacks)
+  now always get an id nothing else holds.
 
 - **The Scratchpad's window menu no longer offers Delete note** (#256). The
   item only closed the window: the Scratchpad's notes live on the broker and
