@@ -52,12 +52,13 @@ it stays on the old Python until you rebuild it:
    from the checkout — `python3.10 -m venv .venv`, then
    `.venv/bin/pip install -e .` — and the scripts use it as it is.
 
-**The Update window will not apply this one.** The update to 1.0 changes
-`pyproject.toml`, so applying it from **Update…** is refused, and the window
-says why: "This update changes dependency files -- pyproject.toml -- …". Update that
-broker by hand once: `git pull`, `pip install -e .` plus your extras, then
-restart it. Later updates go through the window again, unless they change a
-dependency file too.
+**Update to 1.0 by hand, once.** A 0.8.0 broker has no Update window, so
+update it by hand: `git pull`, `pip install -e .` plus your extras, then
+restart it. A broker on a later pre-1.0 build that already has the Update
+window refuses this update from **Update…**, because it changes
+`pyproject.toml` ("This update changes dependency files -- pyproject.toml --
+…"), so update it by hand the same way. Later updates go through the window
+again, unless they change a dependency file too.
 
 ---
 

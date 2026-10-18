@@ -26,10 +26,16 @@ arguments only gain optional fields — see
 on `main`.
 
 **Upgrading from 0.8.0:** read [`wiki/Upgrading.md`](wiki/Upgrading.md) from
-*Python 3.10 is the minimum* down to *Publishing passwords needs https,
-localhost or encryption off*. The Update window will not apply this update,
-because it changes `pyproject.toml`: update each broker by hand once —
-`git pull`, `pip install -e .` plus your extras, then restart it.
+*Python 3.10 is the minimum (1.0)* down to *Publishing passwords needs https,
+localhost or encryption off (#175)*.
+
+**Update to 1.0 by hand, once.** A 0.8.0 broker has no Update window, so
+update it by hand: `git pull`, `pip install -e .` plus your extras, then
+restart it. A broker on a later pre-1.0 build that already has the Update
+window refuses this update from **Update…**, because it changes
+`pyproject.toml` ("This update changes dependency files -- pyproject.toml --
+…"), so update it by hand the same way. Later updates go through the window
+again, unless they change a dependency file too.
 
 ### Added
 
