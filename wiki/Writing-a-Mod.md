@@ -980,8 +980,9 @@ name**, a `win._hostRemoved` beside it, Help polling the core-private
 core-private `_deactivated`. Nothing registers those and nothing types them, so
 core cannot refactor its auth form, its host list or its boot sequencing without
 auditing every mod. `ctx.events` is the one channel that replaces all of it —
-and it is the channel to write **new** code against; migrating the remaining
-readers off those private names is still in progress (#204).
+and it is the channel to write **new** code against. Two shipped readers of
+those private names remain: `mods/editor/` still sets `win._onHostAuth`, and
+`mods/workspaces/` still reads `_deactivated`.
 
 ```js
 const off = ctx.events.on('state:adopted', function (payload, meta) {
@@ -1092,8 +1093,9 @@ declaring `needs: ['events']`**, deliberately: a `needs` blocks the whole mod,
 and Help without the bus is missing one corpus refresh, while Help blocked has
 no chip, no window kind and no hotkey. Weigh that trade the same way.
 
-Core still invokes `win._onHostAuth` by name for the three mods #204 has yet to
-migrate. That is legacy, not a pattern — do not add a fourth.
+Core still invokes `win._onHostAuth` by name for the one shipped mod that
+still sets it, `mods/editor/`. That is legacy, not a pattern — do not add
+another.
 
 ### Per-window teardown: `info.onModTeardown` (#195)
 
