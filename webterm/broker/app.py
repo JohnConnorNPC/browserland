@@ -7809,7 +7809,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         "set_geometry", "tab_into", "split"))
     _DESKTOP_WORKSPACE_OPS = frozenset((
         "workspaces:list", "workspaces:add", "workspaces:rename",
-        "workspaces:remove", "workspaces:switch", "workspaces:send-window"))
+        "workspaces:remove", "workspaces:switch", "workspaces:send-window",
+        # #258: reorder, colour and stack -- admin-only like the rest.
+        "workspaces:move", "workspaces:color", "workspaces:stack",
+        "workspaces:unstack"))
     _DESKTOP_OPS = _DESKTOP_WINDOW_OPS | _DESKTOP_WORKSPACE_OPS
     #: Which args keys name broker window ids, per op -- every one of them is
     #: visibility-checked broker-side (tab_into/split name two: a scoped
@@ -7836,6 +7839,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     def _snap_str(value, cap):
         return value if isinstance(value, str) and len(value) <= cap \
             else None
+
+    def _snap_hex(value):
+        # #258: a workspace / stack colour is a canonical "#rrggbb".
+        return isinstance(value, str) \
+            and re.fullmatch(r"#[0-9a-f]{6}", value) is not None
 
     #: Per-key type discipline for the per-window layout extras (round 1
     #: A2): bools/ints/short strs (plus finite numbers for widthFrac and an
@@ -7880,7 +7888,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         not be able to reach the MCP caller (or exhaust it) through a field
         the visibility filter never checks. Wrong-typed fields are dropped
         or nulled; workspaces entries are reduced to {index, id, name} with
-        an int index and bounded strings, at most 64 of them."""
+        an int index and bounded strings, at most 64 of them. #258: an entry's
+        color/stack and the top-level stacks are kept ONLY when the browser
+        sent them (an older page's snapshot keeps its exact shape); a bad
+        value drops that key, never the row."""
         out = {"ok": True}
         viewport = snap.get("viewport")
         if isinstance(viewport, dict):
@@ -7922,8 +7933,33 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     name = _snap_str(name, 64)
                     if name is None:
                         continue
-                items.append({"index": index, "id": ident, "name": name})
+                item = {"index": index, "id": ident, "name": name}
+                if "color" in entry and (entry["color"] is None
+                                         or _snap_hex(entry["color"])):
+                    item["color"] = entry["color"]
+                if "stack" in entry and (entry["stack"] is None
+                                         or _snap_str(entry["stack"], 64)):
+                    item["stack"] = entry["stack"]
+                items.append(item)
             out["workspaces"] = items
+        if "stacks" in snap:
+            stacks = snap.get("stacks")
+            if stacks is None:
+                out["stacks"] = None
+            elif isinstance(stacks, list):
+                rows = []
+                for entry in stacks[:64]:
+                    ident = _snap_str(entry.get("id"), 64) \
+                        if isinstance(entry, dict) else None
+                    if ident is None:
+                        continue
+                    rows.append({
+                        "id": ident,
+                        "name": _snap_str(entry.get("name"), 64),
+                        "color": entry.get("color")
+                        if _snap_hex(entry.get("color")) else None,
+                        "last": _snap_str(entry.get("last"), 64)})
+                out["stacks"] = rows
         return out
 
     def _desktop_visible_ids(request: Request):

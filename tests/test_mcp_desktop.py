@@ -907,3 +907,80 @@ def test_holder_disconnect_mid_rpc_409_lost_lease(broker):
 
     status, body = asyncio.run(script())
     assert (status, body["error"]) == (409, "lost_lease")
+
+
+def test_snapshot_keeps_258_workspace_fields_typed_and_present_only(
+        tmp_path, monkeypatch):
+    """#258 BK1-BK3: an entry's color/stack and the top-level stacks pass the
+    rebuild only when the browser SENT them, typed -- a bad value drops that
+    key, never the row -- and an older page's snapshot keeps its exact
+    shape (no new keys appear)."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    snap = {"active_workspace": 0, "workspaces": [
+        {"index": 0, "id": "L1", "name": None, "color": "#e96d6d", "stack": "S1"},
+        {"index": 1, "id": "L2", "name": None, "color": None, "stack": None},
+        {"index": 2, "id": "L3", "name": "x", "color": "red", "stack": 7},
+        {"index": 3, "id": "L4", "name": None, "color": "#ABCDEF",
+         "stack": "s" * 65},
+    ], "stacks": [
+        {"id": "S1", "name": "dev", "color": "#5fbf7f", "last": "L1"},
+        {"id": "S2", "name": "n" * 65, "color": "blue", "last": 9},
+        {"name": "no id"}, "junk",
+    ]}
+    _holder(app, _reply_ok(snap))
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    assert resp.status == 200
+    assert resp.json["workspaces"] == [
+        {"index": 0, "id": "L1", "name": None, "color": "#e96d6d", "stack": "S1"},
+        {"index": 1, "id": "L2", "name": None, "color": None, "stack": None},
+        {"index": 2, "id": "L3", "name": "x"},
+        {"index": 3, "id": "L4", "name": None},
+    ]
+    assert resp.json["stacks"] == [
+        {"id": "S1", "name": "dev", "color": "#5fbf7f", "last": "L1"},
+        {"id": "S2", "name": None, "color": None, "last": None},
+    ]
+
+    old = _desktop_app(tmp_path, monkeypatch)
+    _holder(old, _reply_ok({"active_workspace": 0, "workspaces": [
+        {"index": 0, "id": "L1", "name": None}]}))
+    _, resp = _mcp(old, "/mcp/desktop", method="GET")
+    assert resp.json["workspaces"] == [{"index": 0, "id": "L1", "name": None}]
+    assert "stacks" not in resp.json
+
+    off = _desktop_app(tmp_path, monkeypatch)
+    _holder(off, _reply_ok({"workspaces": None, "active_workspace": None,
+                            "stacks": None}))
+    _, resp = _mcp(off, "/mcp/desktop", method="GET")
+    assert resp.json["stacks"] is None
+
+
+def test_258_workspace_ops_are_admin_only_and_relayed(tmp_path, monkeypatch):
+    """#258 BK4-BK6: move/color/stack/unstack join the admin-only workspace
+    set (403 before any relay for a non-admin), relay for an admin (never
+    bad_op), and a direct list value with the new fields reaches the caller
+    verbatim."""
+    new_ops = ("workspaces:move", "workspaces:color", "workspaces:stack",
+               "workspaces:unstack")
+    app = _desktop_app(tmp_path, monkeypatch)
+    ws = _holder(app)
+    for op in new_ops:
+        _, resp = _mcp(app, "/mcp/desktop", {"op": op, "args": {"index": 0}})
+        assert (resp.status, resp.json["error"]) == (403, "admin_required"), op
+    assert ws.frames == []
+
+    app2 = _desktop_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    value = {"active": 0, "items": [
+        {"index": 0, "id": "L1", "name": None, "color": "#e96d6d", "stack": "S1"}],
+        "columnWs": {}, "floatWs": {},
+        "stacks": [{"id": "S1", "name": "dev", "color": None, "last": None}],
+        "palette": ["#4aa3ff", "#5fbf7f"]}
+    ws2 = _holder(app2, _reply_ok(value))
+    for op in new_ops:
+        _, resp = _mcp(app2, "/mcp/desktop", {"op": op, "args": {"index": 0}},
+                       admin=ADMIN_TOKEN)
+        assert resp.status == 200, (op, resp.status, resp.json)
+    assert [f["op"] for f in ws2.frames] == list(new_ops)
+    _, resp = _mcp(app2, "/mcp/desktop", {"op": "workspaces:list"},
+                   admin=ADMIN_TOKEN)
+    assert resp.status == 200 and resp.json["value"] == value
