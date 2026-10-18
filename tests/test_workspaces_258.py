@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 98
+EXPECTED_ASSERTS = 100
 
 _PRELUDE = r"""
 'use strict';
@@ -1365,6 +1365,29 @@ async function parityStack() {
 }
 """
 
+_SCENARIOS += r"""
+async function modOff() {
+    // ---- OFF: turning the mod off and on keeps order, colours and stacks ---
+    const seed = { activeId: 'W3', stacks: [{ id: 'S1', name: 'dev', color: '#5fbf7f', lastId: 'W3' }],
+        list: [{ id: 'W4', focusedCol: 0, color: '#e96d6d' }, { id: 'W1', focusedCol: 0 },
+               { id: 'W2', focusedCol: 0, stack: 'S1' }, { id: 'W3', focusedCol: 0, stack: 'S1' }] };
+    let w = buildWorld(seed);
+    const before = J(w.st());
+    const pagerBefore = w.dots().map(function (d) { return d.textContent + '|' + d.className; });
+    const n = w.unloads.length;
+    for (const fn of w.unloads.slice()) fn();
+    ok(n >= 2 && J(w.st()) === before && !w.pager(),
+        'OFF1 turning the mod off removes the pager and leaves the store byte-equal');
+    // Back on: a fresh activation over the same synced store.
+    const again = buildWorld(JSON.parse(before));
+    const pagerAfter = again.dots().map(function (d) { return d.textContent + '|' + d.className; });
+    ok(before === w.seedJson && J(again.st()) === before && J(pagerAfter) === J(pagerBefore)
+        && pagerAfter.length === 3
+        && again.spies.save === 0,
+        'OFF2 turning it back on restores the same order, colours and stacks, saving nothing');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1387,6 +1410,7 @@ _EPILOGUE = r"""
     await colourSurfaces();
     await parityMoveColour();
     await parityStack();
+    await modOff();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1624,6 +1648,11 @@ def test_ui_and_commands_agree_on_move_and_colour(scenario_run):
 
 def test_ui_and_commands_agree_on_stacks(scenario_run):
     _ok(scenario_run, "P5 stacking and unstacking from the menus or by command leave the same store")
+
+
+def test_mod_off_and_on_keeps_order_colours_and_stacks(scenario_run):
+    _ok(scenario_run, "OFF1 turning the mod off removes the pager and leaves the store byte-equal")
+    _ok(scenario_run, "OFF2 turning it back on restores the same order, colours and stacks, saving nothing")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

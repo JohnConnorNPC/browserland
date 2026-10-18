@@ -32,6 +32,7 @@ BROKER_DIR = Path(ui.__file__).resolve().parent
 MOD_JS = BROKER_DIR / "mods" / "workspaces" / "workspaces.js"
 SYNC_JS = BROKER_DIR / "52_js_state_sync.js"
 PREFS_JS = BROKER_DIR / "51_js_prefs.js"
+CONST_JS = BROKER_DIR / "50_js_constants.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -39,7 +40,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 SAVE_START = "        function savePrefs() {"
 SAVE_END = "        function getPref(id) {"
 
-EXPECTED_ASSERTS = 17
+EXPECTED_ASSERTS = 21
 
 _HARNESS = r"""
 'use strict';
@@ -47,6 +48,10 @@ const fs = require('fs');
 const modSrc = fs.readFileSync(__MOD_PATH__, 'utf8');
 const sync = fs.readFileSync(__SYNC_PATH__, 'utf8');
 const prefsSrc = fs.readFileSync(__PREFS_PATH__, 'utf8');
+// #258: the REAL palette, sliced from 50 (colour commands accept only it).
+const constSrc = fs.readFileSync(__CONST_PATH__, 'utf8');
+const PALETTE = new Function(constSrc.slice(constSrc.indexOf('const PALETTE = ['),
+    constSrc.indexOf('];', constSrc.indexOf('const PALETTE = [')) + 2) + ' return PALETTE;')();
 const a = prefsSrc.indexOf(__SAVE_START__), b = prefsSrc.indexOf(__SAVE_END__);
 if (a < 0 || b < a) throw new Error('savePrefs boundary missing');
 const savePrefsSrc = prefsSrc.slice(a, b);
@@ -65,7 +70,10 @@ async function flush() {
 // ---- DOM stubs (the mod's pager/taskbar chrome) -----------------------------
 function mkNode(tag) {
     const node = {
-        tagName: tag || 'div', style: {}, dataset: {}, children: [],
+        tagName: tag || 'div', dataset: {}, children: [],
+        // #258: a coloured dot sets --ws-color, as in a browser.
+        style: { setProperty: function () {}, removeProperty: function () {} },
+        setAttribute: function () {},
         textContent: '', title: '', className: '',
         classList: { add: function () {}, remove: function () {},
                      toggle: function () {}, contains: function () { return false; } },
@@ -250,6 +258,7 @@ function mkTab(name, withMod) {
         firstLiveKeyInColumn: function (c) {
             const k = columnKeys(c); return k.length ? k[0] : null; },
         reorderTaskbarItems: function () {},
+        PALETTE: PALETTE,
     };
     Object.defineProperty(modEnv, '_deactivated',
         { get: function () { return t.deactivated; } });
@@ -393,6 +402,62 @@ function mkTab(name, withMod) {
     ok(A.L().focusedCol === 2 && A.localSaves === localBefore && !A.sync.st().timer,
         'F6 lease lost: the clamp still applies, nothing is saved');
 
+    // ---- #258 SY: order, colours and stacks sync across tabs ----------------
+    server.rev = 1; server.settings = {}; server.layout = clone(SEED);
+    puts.length = 0;
+    const C2 = mkTab('C2'), D2 = mkTab('D2');
+    await C2.boot();
+    await D2.boot();
+    const run = function (t, id, args) { const c = t.cmds[id]; return c ? c.run(args) : null; };
+    const wsOf = function (L) { return J(L && L.mods && L.mods.workspaces); };
+    run(C2, 'move', { index: 0, direction: 'right' });           // W2,W1,W3
+    run(C2, 'color', { index: 0, color: PALETTE[2] });           // W2
+    const sk = run(C2, 'stack', { index: 1, target: 2 });        // W1 -> W3: W2,W3,W1
+    const sid = sk && sk.stack;
+    run(C2, 'rename', { stack: sid, name: 'dev' });
+    run(C2, 'color', { stack: sid, color: PALETTE[3] });
+    run(C2, 'switch', { index: 1 });                             // W3, a member: lastId
+    await C2.firePush();
+    const sent = puts.length ? puts[puts.length - 1].layout.mods.workspaces : null;
+    ok(puts.length === 1 && !!sent && typeof sid === 'string'
+        && sent.list.map(function (w) { return w.id + (w.stack ? '@' : '') + (w.color || ''); }).join(',')
+            === 'W2' + PALETTE[2] + ',W3@,W1@'
+        && J(sent.stacks) === J([{ id: sid, name: 'dev', color: PALETTE[3], lastId: 'W3' }]),
+        'SY1 a reorder, colours, a stack and its last-used member reach the broker in ONE push');
+    const putsC = puts.length;
+    await D2.tick();
+    ok(wsOf(D2.L()) === wsOf(server.layout) && puts.length === putsC && D2.clean()
+        && !D2.sync.st().timer,
+        'SY2 the second tab adopts them and saves nothing back');
+
+    // A browser with the mod OFF writes the layout: the workspaces store rides along.
+    const E2 = mkTab('E2', false);
+    await E2.boot();
+    E2.L().columns[0].widthPreset = '1/3';                    // a real, workspace-blind edit
+    E2.sync.savePrefs();
+    await E2.firePush();
+    const keptByOff = puts.length === putsC + 1 && server.layout.columns[0].widthPreset === '1/3'
+        && wsOf(server.layout) === wsOf(C2.L());
+    await C2.tick();
+    await D2.tick();
+    ok(keptByOff && puts.length === putsC + 1 && wsOf(C2.L()) === wsOf(server.layout)
+        && wsOf(D2.L()) === wsOf(server.layout) && C2.clean() && D2.clean(),
+        'SY3 a mods-off browser\'s save keeps the order, colours and stacks, and both tabs adopt it silently');
+
+    // SY6: D's own edit loses a 409 to C's; D yields to the stacked winner.
+    run(D2, 'switch', { index: 0 });                             // D's edit, not yet sent
+    run(C2, 'unstack', { index: 2 });                            // C wins the race
+    await C2.firePush();
+    const putsWin = puts.length;
+    await D2.firePush();                                         // 409 -> adopt C's state
+    const inOneTrip = wsOf(D2.L()) === wsOf(server.layout);     // converged in the 409 itself
+    if (D2.renderQueued) D2.frame();
+    await D2.firePush();
+    await D2.tick();
+    ok(inOneTrip && puts.length === putsWin + 1 && puts[puts.length - 1].baseRev < server.rev
+        && wsOf(D2.L()) === wsOf(server.layout) && D2.clean(),
+        'SY6 a tab whose edit lost a 409 adopts the stacked winner and sends nothing more');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exit(fail ? 1 : 0);
 })().catch(function (e) {
@@ -418,6 +483,7 @@ def scenario_run(tmp_path_factory):
         .replace("__MOD_PATH__", json.dumps(str(MOD_JS)))
         .replace("__SYNC_PATH__", json.dumps(str(SYNC_JS)))
         .replace("__PREFS_PATH__", json.dumps(str(PREFS_JS)))
+        .replace("__CONST_PATH__", json.dumps(str(CONST_JS)))
         .replace("__SAVE_START__", json.dumps(SAVE_START))
         .replace("__SAVE_END__", json.dumps(SAVE_END)),
         encoding="utf-8")
@@ -491,6 +557,16 @@ def test_the_workspace_entry_is_recorded_where_it_is_read(scenario_run):
 
 def test_lease_lost_never_saves(scenario_run):
     _ok(scenario_run, "F6 lease lost: the clamp still applies, nothing is saved")
+
+
+def test_258_order_colours_and_stacks_sync_without_ping_pong(scenario_run):
+    # #258: the new fields ride the same synced store under the #246/#247
+    # rules -- one push, an adopting tab never writes back, a mods-off peer
+    # keeps them, and a 409 loser yields to the stacked winner.
+    _ok(scenario_run, "SY1 a reorder, colours, a stack and its last-used member reach the broker in ONE push")
+    _ok(scenario_run, "SY2 the second tab adopts them and saves nothing back")
+    _ok(scenario_run, "SY3 a mods-off browser's save keeps the order, colours and stacks, and both tabs adopt it silently")
+    _ok(scenario_run, "SY6 a tab whose edit lost a 409 adopts the stacked winner and sends nothing more")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
