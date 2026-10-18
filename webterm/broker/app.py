@@ -7826,10 +7826,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #: The layout attributes the broker passes through from the browser's
     #: snapshot row. Identity (id/title) NEVER comes from the browser -- the
     #: registry is authoritative -- and unknown-to-the-broker extras pass
-    #: through verbatim only within this whitelist.
+    #: through verbatim only within this whitelist. #262: ``open`` is false
+    #: for a terminal that is only a taskbar chip on that desktop (no window
+    #: yet; any arrange op opens it); a browser that predates it sends no
+    #: ``open`` and its rows stay without one.
     _DESKTOP_LAYOUT_KEYS = ("tiled", "column", "row", "width_preset",
                             "geometry", "workspace", "kind", "minimized",
-                            "tabIndex", "tabbed", "split", "widthFrac")
+                            "tabIndex", "tabbed", "split", "widthFrac",
+                            "open")
 
     def _snap_int(value):
         # A REAL int (bool excluded -- True aliases 1), or None.
@@ -7850,7 +7854,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #: all-int dict for geometry). A value of the wrong type drops the KEY,
     #: never the row: a lying browser can misreport only its own layout.
     _DESKTOP_LAYOUT_TYPES = {
-        "tiled": "bool", "minimized": "bool", "tabbed": "bool",
+        "tiled": "bool", "minimized": "bool", "tabbed": "bool", "open": "bool",
         "column": "int", "row": "int", "tabIndex": "int", "workspace": "int",
         "width_preset": "str32", "kind": "str32", "split": "str32",
         "widthFrac": "num", "geometry": "geom",

@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 79
+EXPECTED_ASSERTS = 83
 
 _HARNESS = r"""
 'use strict';
@@ -892,6 +892,30 @@ function countMut(name) {
         && catchUps.length === 1,
         'U7 an unpolled tab_into target is caught up too');
 
+    // ---- K: #262 get lists chip-only terminals as open:false --------------
+    chips();
+    sessions.set('remoteX:60', { title: 'remote chip' });
+    L.columns[0].rows.push({ height: 0.2, keys: ['local:40'], mode: 'single' });
+    execNext = { ok: false, reason: 'absent' };
+    r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: null } });
+    const kRows = (r && r.value) ? r.value.windows : [];
+    const kBy = {};
+    for (const row of kRows) kBy[row.key] = row;
+    ok(kBy['local:30'] && kBy['local:30'].open === false && kBy['local:30'].id === 30
+        && kBy['local:30'].title === 'chip 30' && kBy['local:30'].column === null
+        && kBy['local:30'].geometry === null && kBy['local:30'].tiled === false,
+        'K1 a chip-only terminal is listed open:false with no placement');
+    ok(kBy['local:7'] && kBy['local:7'].open === true
+        && kBy['local:12'] && kBy['local:12'].open === true,
+        'K2 every live window is listed open:true');
+    ok(!kBy['local:40'] && !kBy['remoteX:60'] && openCalls.length === 0,
+        'K3 a dormant key with no session and another broker\'s chip are left out, and get opens nothing');
+    r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: [7, 31] } });
+    const kIds = ((r && r.value) ? r.value.windows : []).map(function (x) { return x.id; });
+    ok(kIds.length === 2 && kIds.indexOf(7) !== -1 && kIds.indexOf(31) !== -1,
+        'K4 a non-admin get lists only the chips it can see');
+    execNext = null;
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1162,6 +1186,17 @@ def test_262_one_catch_up_for_an_id_not_polled_yet(scenario_run):
     _ok(scenario_run, "U5 send-window catches up an id not polled yet, then opens and sends it")
     _ok(scenario_run, "U6 a catch-up that rejects still answers unknown_window, never an error")
     _ok(scenario_run, "U7 an unpolled tab_into target is caught up too")
+
+
+def test_262_get_lists_chip_only_terminals(scenario_run):
+    # An agent must be able to FIND a window before any click: a terminal
+    # that is only a taskbar chip is a row with open:false (and no
+    # placement); live windows say open:true. Same visibility rule, this
+    # broker's namespace only, and listing never opens anything.
+    _ok(scenario_run, "K1 a chip-only terminal is listed open:false with no placement")
+    _ok(scenario_run, "K2 every live window is listed open:true")
+    _ok(scenario_run, "K3 a dormant key with no session and another broker's chip are left out, and get opens nothing")
+    _ok(scenario_run, "K4 a non-admin get lists only the chips it can see")
 
 
 # ---- the catch-all ---------------------------------------------------------------

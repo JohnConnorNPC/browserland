@@ -1307,11 +1307,15 @@
                          ? r.reason : 'error' };
         }
         // `get`'s snapshot, as THIS browser sees the desktop. Rows: every
-        // live window (minimized and host-hidden included; app windows with
-        // id:null; dormant layout keys excluded -- no live window, nothing
-        // to arrange). A non-admin caller keeps only rows whose id is in its
-        // visible set (the broker re-filters as a belt). Geometry is the
-        // live floating box; the broker relabels identity from its registry.
+        // live window, open:true (minimized and host-hidden included; app
+        // windows with id:null), then -- #262 -- every terminal of THIS
+        // broker that is only a taskbar chip (in `sessions`, no live
+        // window: an MCP launch, or a window the user closed), open:false
+        // with no placement, which any arrange op opens. Dormant layout keys
+        // with no session stay excluded -- nothing to open. A non-admin
+        // caller keeps only rows whose id is in its visible set (the broker
+        // re-filters as a belt). Geometry is the live floating box; the
+        // broker relabels identity from its registry.
         function desktopSnapshot(hid, visible, wsResult) {
             const L = getLayout();
             let items = null, active = null, columnWs = null, floatWs = null;
@@ -1355,6 +1359,7 @@
                     id: id,
                     title: (sess && sess.title) || win.name || key,
                     kind: (win.type === 'app') ? 'app' : 'terminal',
+                    open: true,
                     tiled: !!win.tiled,
                     minimized: !!win.minimized,
                     column: (loc && vci !== -1) ? vci : null,
@@ -1387,6 +1392,22 @@
                     row.workspace = wsField(wsId);
                 }
                 rows.push(row);
+            }
+            for (const ent of sessions) {
+                const key = ent[0], sess = ent[1];
+                const win = windows.get(key);
+                if (win && !win.disposed) continue;      // listed above
+                const id = _desktopIntId(hid, key);
+                if (id === null) continue;               // another broker's
+                if (visible !== null && visible.indexOf(id) === -1) continue;
+                rows.push({
+                    key: key, id: id,
+                    title: (sess && sess.title) || key,
+                    kind: 'terminal', open: false,
+                    tiled: false, minimized: false,
+                    column: null, row: null, tabIndex: null,
+                    width_preset: null, geometry: null, workspace: null,
+                });
             }
             const snap = {
                 viewport: { w: window.innerWidth, h: window.innerHeight },

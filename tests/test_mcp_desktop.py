@@ -464,6 +464,37 @@ def test_desktop_get_rebuilds_identity_from_registry(tmp_path, monkeypatch):
     assert resp.json["home"] is True
 
 
+def test_262_desktop_get_passes_open_through_typed(tmp_path, monkeypatch):
+    """#262: a chip-only terminal's row carries open:false through the
+    rebuild; a live row's open:true too. A non-bool open drops the KEY, not
+    the row, and a row from a browser that predates the key stays without
+    one (additive: old callers see no change)."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    for wid in (5, 6, 7, 8):
+        _live(app, wid, mcp_mode="readwrite")
+    snap = {"windows": [
+        {"id": 5, "open": False, "tiled": False, "column": None,
+         "geometry": None, "kind": "terminal"},
+        {"id": 6, "open": True, "tiled": True},
+        {"id": 7, "open": "no", "tiled": True},
+        {"id": 8, "tiled": True},
+    ]}
+    _holder(app, _reply_ok(snap))
+    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    assert resp.status == 200
+    rows = {r["id"]: r for r in resp.json["windows"]}
+    assert rows[5]["open"] is False
+    assert rows[5]["tiled"] is False and "column" not in rows[5]
+    assert rows[6]["open"] is True
+    assert "open" not in rows[7] and rows[7]["tiled"] is True
+    assert "open" not in rows[8]
+    # ...and the MCP tool's id namespacing keeps the key for the agent.
+    from webterm.mcptool import server
+    out = server._namespace_snapshot("h", {"windows": [rows[5]]})
+    assert out["windows"][0]["id"] == "h:5"
+    assert out["windows"][0]["open"] is False
+
+
 def test_desktop_get_filters_rows_by_scope_and_mode(tmp_path, monkeypatch):
     """#244: after the identity rebuild the caller's visibility applies -- a
     scoped non-admin sees only its own windows; an admin keeps every row in
