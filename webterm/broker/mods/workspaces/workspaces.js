@@ -1913,7 +1913,8 @@
                         const items = wsList().map(function (w, i) {
                             return { index: i, id: w.id,
                                      name: (typeof w.name === 'string')
-                                         ? w.name : null };
+                                         ? w.name : null,
+                                     color: w.color || null, stack: w.stack || null };
                         });
                         // colId -> wsId (healed: unstamped/dangling read as
                         // the active workspace, the same rule the filter
@@ -1924,8 +1925,15 @@
                         for (const col of getLayout().columns) {
                             columnWs[col.id] = columnWsId(col, st);
                         }
+                        // #258, additive: the stacks (addressed by id) and
+                        // the palette a colour must come from.
+                        const stacks = (st.stacks || []).map(function (s) {
+                            return { id: s.id, name: s.name || null,
+                                     color: s.color || null, last: s.lastId || null };
+                        });
                         return { active: activeWorkspaceIndex(), items: items,
-                                 columnWs: columnWs, floatWs: floatWsMap() };
+                                 columnWs: columnWs, floatWs: floatWsMap(),
+                                 stacks: stacks, palette: wsPalette() };
                     } });
                     ctx.commands.register('add', { run: function (args) {
                         const a = (args && typeof args === 'object') ? args : {};
@@ -1941,6 +1949,16 @@
                     } });
                     ctx.commands.register('rename', { run: function (args) {
                         const a = (args && typeof args === 'object') ? args : {};
+                        // #258: {stack, name} renames a stack (an older mod
+                        // has no int index here and answers bad_args).
+                        if (a.stack !== undefined) {
+                            if (a.index !== undefined || typeof a.stack !== 'string'
+                                    || typeof a.name !== 'string' || !wsStackRow(a.stack)) {
+                                return { refusal: 'bad_args' };
+                            }
+                            renameStackById(a.stack, a.name);
+                            return { renamed: true };
+                        }
                         if (!Number.isInteger(a.index) || a.index < 0
                                 || a.index >= wsList().length
                                 || typeof a.name !== 'string') {
@@ -2022,6 +2040,22 @@
                         if (!t || c === undefined) return { refusal: 'bad_args' };
                         const done = t.ws ? setWorkspaceColorById(t.ws.id, c) : setStackColorById(t.sid, c);
                         return done ? { color: c } : { refusal: 'unknown_window' };
+                    } });
+                    const wsCmdIndex = (i) => Number.isInteger(i) && i >= 0 && i < wsList().length;
+                    // Stack `index` with `target` (both flat): joins the
+                    // target's stack, or forms one at the target's place.
+                    ctx.commands.register('stack', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (!wsCmdIndex(a.index) || !wsCmdIndex(a.target)) {          // itself: stackWith refuses
+                            return { refusal: 'bad_args' };
+                        }
+                        const sid = stackWith(wsList()[a.index].id, 'w:' + wsList()[a.target].id);
+                        return sid ? { stack: sid } : { refusal: 'bad_args' };
+                    } });
+                    ctx.commands.register('unstack', { run: function (args) {
+                        const a = (args && typeof args === 'object') ? args : {};
+                        if (!wsCmdIndex(a.index)) return { refusal: 'bad_args' };
+                        return { unstacked: unstackById(wsList()[a.index].id) };
                     } });
                 } else {
                     // Same-bundle ctx.commands is a guarantee (86h registers

@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 97
+EXPECTED_ASSERTS = 98
 
 _PRELUDE = r"""
 'use strict';
@@ -1340,6 +1340,31 @@ async function parityMoveColour() {
 }
 """
 
+_SCENARIOS += r"""
+async function parityStack() {
+    // ---- P5: Stack with… / Remove from stack and the commands agree --------
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    function cmd(w, id, args) { const c = (w.commands || {})[id]; return c ? c.run(args) : null; }
+    function seed() {
+        return { stacks: [{ id: 'S1' }], list: [
+            { id: 'W1', focusedCol: 0, stack: 'S1' }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0 }, { id: 'W4', focusedCol: 0 }] };
+    }
+    const a = buildWorld(seed()), b = buildWorld(seed());
+    // W1 leaves S1 (which dissolves) to stack with W4; then W3 leaves the new stack again.
+    const m = a.openWsMenu('W1');
+    act(a.item(m, /^Stack with…$/));
+    act(a.item(a.lastMenu(), /^Workspace 3$/));             // W4 is pager entry 3 now
+    const r1 = cmd(b, 'stack', { index: 0, target: 3 });
+    const m2 = a.openWsMenu('W4');
+    act(a.item(m2, /^Remove from stack$/));
+    const r2 = cmd(b, 'unstack', { index: b.st().list.findIndex(function (x) { return x.id === 'W4'; }) });
+    ok(!!m && !!m2 && r1 && typeof r1.stack === 'string' && r2 && r2.unstacked === true
+        && J(a.st()) === J(b.st()) && J(a.st().stacks) === J([]),
+        'P5 stacking and unstacking from the menus or by command leave the same store');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1361,6 +1386,7 @@ _EPILOGUE = r"""
     await numberKeys();
     await colourSurfaces();
     await parityMoveColour();
+    await parityStack();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1594,6 +1620,10 @@ def test_colour_on_every_surface(scenario_run):
 
 def test_ui_and_commands_agree_on_move_and_colour(scenario_run):
     _ok(scenario_run, "P4 moving and colouring from the menu or by command leave the same store")
+
+
+def test_ui_and_commands_agree_on_stacks(scenario_run):
+    _ok(scenario_run, "P5 stacking and unstacking from the menus or by command leave the same store")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

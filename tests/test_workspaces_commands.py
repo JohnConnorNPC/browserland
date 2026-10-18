@@ -37,7 +37,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 32
+EXPECTED_ASSERTS = 39
 
 _HARNESS = r"""
 'use strict';
@@ -279,7 +279,7 @@ function storeShape(world) {
     // ---- registration ------------------------------------------------------
     let world = buildWorld({ floatWs: { 'local:9': 'W2' } });
     const expectedIds = ['list', 'add', 'rename', 'remove', 'switch',
-                         'send-window', 'move', 'color'];
+                         'send-window', 'move', 'color', 'stack', 'unstack'];
     ok(expectedIds.every(function (id) { return !!world.commandsCaps[id]; })
         && Object.keys(world.commandsCaps).length === expectedIds.length,
         'R1 exactly the workspaces commands register');
@@ -460,6 +460,52 @@ function storeShape(world) {
         && r4 && r4.color === PALETTE[0] && world.L.mods.workspaces.stacks[0].color === PALETTE[0],
         'MC7 color refuses a non-palette or missing colour; null clears; a stack id colours the stack');
 
+    // ---- #258 stack / unstack / rename a stack / list ---------------------------
+    const J = JSON.stringify;
+    world = buildWorld();
+    r = await world.run('stack', { index: 0, target: 1 });
+    let st = world.L.mods.workspaces;
+    ok(r && typeof r.stack === 'string' && order(world) === 'W2,W1,W3'
+        && st.list[0].stack === r.stack && st.list[1].stack === r.stack && !st.list[2].stack
+        && st.stacks.length === 1 && st.stacks[0].id === r.stack,
+        'MC8 stack forms a stack with the target at the target\'s place');
+    const sid = r && r.stack;
+    r = await world.run('stack', { index: 2, target: 0 });        // W3 joins W2's stack
+    ok(r && r.stack === sid && order(world) === 'W2,W1,W3'
+        && world.L.mods.workspaces.list.every(function (x) { return x.stack === sid; }),
+        'MC9 stack with a stacked target joins its stack');
+    const b1 = await world.run('stack', { index: 0, target: 0 });
+    const b2 = await world.run('stack', { index: 0 });
+    const b3 = await world.run('stack', { index: 0, target: 7 });
+    const b4 = await world.run('unstack', { index: 9 });
+    ok(b1 && b1.refusal === 'bad_args' && b2 && b2.refusal === 'bad_args'
+        && b3 && b3.refusal === 'bad_args' && b4 && b4.refusal === 'bad_args',
+        'MC10 stack and unstack refuse bad_args: itself, a missing or out-of-range index');
+    r = await world.run('unstack', { index: 0 });
+    st = world.L.mods.workspaces;
+    ok(r && r.unstacked === true && order(world) === 'W1,W3,W2' && !st.list[2].stack
+        && st.list[0].stack === sid && st.list[1].stack === sid,
+        'MC11 unstack puts the workspace just after its stack');
+    r = await world.run('unstack', { index: 2 });
+    ok(r && r.unstacked === false, 'MC12 unstack of a workspace in no stack reports unstacked:false');
+
+    r = await world.run('rename', { stack: sid, name: '  ops ' });
+    const nm = ((world.L.mods.workspaces.stacks || [])[0] || {}).name;
+    const rb1 = await world.run('rename', { stack: 'S-none', name: 'x' });
+    const rb2 = await world.run('rename', { stack: sid, index: 0, name: 'x' });
+    ok(r && r.renamed === true && nm === 'ops' && rb1 && rb1.refusal === 'bad_args'
+        && rb2 && rb2.refusal === 'bad_args',
+        'MC13 rename with a stack id names the stack; an unknown stack, or both stack and index, is bad_args');
+
+    world.L.mods.workspaces.list[2].color = PALETTE[5];
+    if ((world.L.mods.workspaces.stacks || [])[0]) world.L.mods.workspaces.stacks[0].color = PALETTE[6];
+    r = await world.run('list');
+    ok(r && r.items[0].stack === sid && r.items[2].stack === null && r.items[2].color === PALETTE[5]
+        && r.items[0].color === null
+        && J(r.stacks) === J([{ id: sid, name: 'ops', color: PALETTE[6], last: null }])
+        && J(r.palette) === J(PALETTE),
+        'MC14 list carries each workspace\'s colour and stack, the stacks and the palette');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -572,6 +618,17 @@ def test_ui_and_commands_share_the_primitives(scenario_run):
     _ok(scenario_run, "P1 UI rename and command rename produce identical store state")
     _ok(scenario_run, "P2 UI remove (confirm) and command remove (force) agree")
     _ok(scenario_run, "P3 a refused confirm leaves the workspace in place")
+
+
+def test_stack_unstack_rename_and_list(scenario_run):
+    # #258: the stack ops and the additive list fields.
+    _ok(scenario_run, "MC8 stack forms a stack with the target at the target's place")
+    _ok(scenario_run, "MC9 stack with a stacked target joins its stack")
+    _ok(scenario_run, "MC10 stack and unstack refuse bad_args: itself, a missing or out-of-range index")
+    _ok(scenario_run, "MC11 unstack puts the workspace just after its stack")
+    _ok(scenario_run, "MC12 unstack of a workspace in no stack reports unstacked:false")
+    _ok(scenario_run, "MC13 rename with a stack id names the stack; an unknown stack, or both stack and index, is bad_args")
+    _ok(scenario_run, "MC14 list carries each workspace's colour and stack, the stacks and the palette")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
