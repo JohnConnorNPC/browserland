@@ -1604,6 +1604,24 @@ rewrites the file.
 **Precedence.** Token: env `WEB_TERMINAL_MCP_TOKEN` > sidecar `token` > config
 `mcp_token`. Effective mode: per-window override > global `default_mode`.
 
+**The Control Panel's per-host tabs (#255).** The Control Panel edits these
+routes, the host's `/state` settings and `/profiles/config` for one host at a
+time: the host of the open tab, held as `settingsTarget` (the Browser tab
+keeps the previous host's target). Two seams are safe by construction rather
+than by a check, and a change there must keep them so. First, four families
+of writers resolve `settingsTarget` alone when they fire, with no tab check:
+the MCP access settings (`saveMcpConfig`), the size / strip / close / confirm
+/ snap / slide / tiling inputs, the default-profile select, and keybinding
+Set / Clear. While a remote tab loads, the target is `null` and they do
+nothing; on the Browser tab it is still the previous host, and they are safe
+only because their pane is hidden there. Second, only a tab switch closes an
+open profile Add / Edit dialog (`cancelProfileDialog`, called from
+`blankHostSections`); removing its host or closing the Control Panel leaves
+it open. Its Save then goes through `profileHostIsCurrent`: after a removal
+the open tab has fallen back to the local host, so the save is refused; after
+a Control Panel close the tab still names the dialog's host, so the save
+lands there, as it would have with the panel open.
+
 ### Launch-profile editor (browser `auth_token`-gated) — #70
 
 The Control Panel edits the launch-profile allow-list here. Same mandatory
