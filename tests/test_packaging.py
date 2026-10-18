@@ -166,3 +166,17 @@ def test_build_version_extends_the_single_source():
     local = v[len(webterm.__version__):]
     assert local == "" or re.fullmatch(r"\+[0-9a-f]{7,40}", local), \
         f"unexpected build_version() suffix: {local!r}"
+
+
+def test_version_is_the_newest_release_in_the_changelog():
+    # #260: a release bumps __version__ AND cuts its CHANGELOG section, and
+    # nothing else ties the two. The first `## [...]` heading below
+    # [Unreleased] must be exactly __version__; a missing file raises, and no
+    # released heading at all fails rather than passing vacuously.
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    heads = [h for h in re.findall(r"^## \[([^\]]+)\]", text, re.M)
+             if h != "Unreleased"]
+    assert heads, "CHANGELOG.md has no released ## [x.y.z] heading"
+    assert heads[0] == webterm.__version__, \
+        f"newest CHANGELOG release {heads[0]!r} != __version__ " \
+        f"{webterm.__version__!r}"
