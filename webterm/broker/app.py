@@ -7540,7 +7540,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         A client that disconnects during the shielded pre-spawn write can
         leave an unclaimed row on an id nothing was spawned for: it tags no
         window, it is pruned after 7 days, and a launch that rolls its id
-        meanwhile takes the dead-row path above."""
+        meanwhile takes the dead-row path above.
+
+        #262: after a successful launch (200 or 202) with allow_desktop on,
+        the lease-holding browser is told to open the new window, in a
+        detached task the reply never waits for (_announce_launch)."""
         err = _mcp_auth_error(request)
         if err is not None:
             return err
@@ -7659,6 +7663,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             if tagged:
                 await _untag(tagged[0])
             return sanic_json(exc.payload, status=exc.status)
+        # #262: with the desktop relay on, ask the lease holder to open the
+        # new window -- detached (bg_tasks), so the reply never waits on a
+        # browser, holder or not; see _announce_launch.
+        wid = payload.get("id") if isinstance(payload, dict) else None
+        if (app.ctx.mcp_cfg["allow_desktop"] and isinstance(wid, int)
+                and not isinstance(wid, bool)):
+            task = asyncio.ensure_future(app.ctx.announce_launch(wid))
+            app.ctx.bg_tasks.add(task)
+            task.add_done_callback(app.ctx.bg_tasks.discard)
         return sanic_json(dict(payload, scope=scope, mode=mode,
                                handle=handle), status=status)
 
@@ -8117,6 +8130,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                            status=504)}
         finally:
             ctxd.desktop_rpcs.pop(rid, None)
+
+    async def _announce_launch(wid: int) -> None:
+        """#262: tell the lease-holding browser that window ``wid`` was just
+        launched over MCP, so it opens it on its desktop (the frame is
+        protocol.session_launched_frame). ``_mcp_launch`` runs this as a
+        detached bg_tasks task, so the launch reply never waits for it, and
+        it swallows every error. Exactly ONE socket of the holder gets the
+        frame, like ``_desktop_relay``: the lease snapshot is taken under
+        ``lease_lock`` (no await between it and the send loop), the send
+        loop stops at the first send that succeeds, an instant failure moves
+        to a sibling socket, and a send that does not finish within
+        CONTROL_SEND_TIMEOUT closes that socket 1012 (the page re-dials) as
+        ``_push_terminal_control`` does. No holder: nothing to send, the
+        window stays a taskbar chip, and any desktop op opens it. The frame
+        is dropped once the lease generation has moved on."""
+        ctxd = app.ctx
+        try:
+            async with ctxd.lease_lock:
+                holder = ctxd.active_client_id
+                generation = ctxd.lease_generation
+                sockets = (list(ctxd.control_clients.get(holder, ()))
+                           if holder is not None else [])
+            frame = protocol.session_launched_frame(wid, generation,
+                                                    ctxd.boot_id)
+            for sock in sockets:
+                if ctxd.lease_generation != generation:
+                    return
+                try:
+                    await _bounded(sock.send(frame), CONTROL_SEND_TIMEOUT)
+                    return
+                except asyncio.TimeoutError:
+                    ctxd.registry.close_soon(sock, 1012,
+                                             "launch announce timed out")
+                except Exception:
+                    continue
+        except Exception as exc:
+            LOGGER.debug("launch announce for window %s failed: %r", wid, exc)
+
+    app.ctx.announce_launch = _announce_launch
 
     def _desktop_outcome_response(outcome):
         """Map a resolved desktop_result envelope to its HTTP answer. The
