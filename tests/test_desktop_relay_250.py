@@ -263,6 +263,8 @@ def _run(harness_src, cut, scenarios, start_end=None):
     assert harness_src.count(cut) == 1, f"harness cut {cut!r} not unique"
     src = harness_src[:harness_src.index(cut)]
     src = src.replace("__SRC_PATH__", json.dumps(str(rpc.SRC_JS)))
+    # #262 review round 1: the rpc world also loads 58's real decideTiled.
+    src = src.replace("__SRC58_PATH__", json.dumps(str(rpc.SRC_58)))
     if start_end:
         src = (src.replace("__START__", json.dumps(start_end[0]))
                   .replace("__END__", json.dumps(start_end[1])))

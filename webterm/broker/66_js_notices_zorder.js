@@ -56,16 +56,22 @@
         // focus: whatever had it keeps it, lastTermId and frontId do not
         // move, and the strip does not scroll to the window. withoutFocus
         // runs fn with bringToFront (and layoutAddColumn's focusedCol) held
-        // QUIET, and keeps `keys` quiet for the next two frames as well, for
-        // the bringToFront a mutator defers to the next frame (a tab switch
-        // re-enters after its relayout). A quiet float still stacks. A
-        // mutator that MOVES the focused window's node (float <-> tile
-        // reparents it) makes the browser drop focus to <body>; the element
-        // that had focus gets it back, at the end of fn and again when the
-        // keys are released -- but never once focus moved somewhere else.
-        // Synchronous by contract: fn must not await.
-        let _focusQuiet = 0;
-        const _quietKeys = new Map();          // key -> pending clears
+        // QUIET for `keys` only -- every other window focuses as usual --
+        // and keeps them quiet a little longer, for the bringToFront a
+        // mutator defers to the next frame (a tab switch re-enters after its
+        // relayout): until two frames have passed or QUIET_RELEASE_MS has,
+        // whichever is first, so a hidden tab (rAF paused) releases too. A
+        // quiet float still stacks. Quiet never swallows a focus somebody
+        // asked for: the `focus` op releases its key first
+        // (clearFocusQuiet), and a click or key press inside a quiet window
+        // releases that window. A mutator that MOVES the focused window's
+        // node (float <-> tile reparents it) makes the browser drop focus to
+        // <body>; the element that had focus gets it back, at the end of fn
+        // and again at the release -- but never once focus moved somewhere
+        // else (a deliberate blur to <body> inside that short window is
+        // undone too: accepted). Synchronous by contract: fn must not await.
+        const QUIET_RELEASE_MS = 50;
+        const _quietKeys = new Map();          // key -> pending releases
         function withoutFocus(keys, fn) {
             const held = (keys || []).filter(k => typeof k === 'string');
             for (const k of held) _quietKeys.set(k, (_quietKeys.get(k) || 0) + 1);
@@ -80,23 +86,47 @@
                     }
                 } catch (_) {}
             };
-            _focusQuiet++;
+            let released = false;
+            const release = () => {
+                if (released) return;
+                released = true;
+                for (const k of held) {
+                    const n = (_quietKeys.get(k) || 0) - 1;
+                    if (n > 0) _quietKeys.set(k, n); else _quietKeys.delete(k);
+                }
+                giveBack();
+            };
             try {
                 return fn();
             } finally {
-                _focusQuiet--;
                 giveBack();
-                requestAnimationFrame(() => requestAnimationFrame(() => {
-                    for (const k of held) {
-                        const n = (_quietKeys.get(k) || 0) - 1;
-                        if (n > 0) _quietKeys.set(k, n); else _quietKeys.delete(k);
-                    }
-                    giveBack();
-                }));
+                requestAnimationFrame(() => requestAnimationFrame(release));
+                setTimeout(release, QUIET_RELEASE_MS);
             }
         }
         function focusIsQuiet(id) {
-            return _focusQuiet > 0 || _quietKeys.has(String(id));
+            return _quietKeys.has(String(id));
+        }
+        function clearFocusQuiet(id) {
+            _quietKeys.delete(String(id));
+        }
+        // The user acting INSIDE a quiet window (a click, a key press) asked
+        // for it: release it before its own handlers run (capture phase).
+        function _releaseQuietAt(ev) {
+            if (!_quietKeys.size || !ev || !ev.target) return;
+            for (const k of Array.from(_quietKeys.keys())) {
+                const win = windows.get(k);
+                try {
+                    if (win && win.dom && win.dom.contains(ev.target)) {
+                        _quietKeys.delete(k);
+                    }
+                } catch (_) {}
+            }
+        }
+        if (typeof document !== 'undefined' && document.addEventListener) {
+            document.addEventListener('pointerdown', _releaseQuietAt, true);
+            document.addEventListener('mousedown', _releaseQuietAt, true);
+            document.addEventListener('keydown', _releaseQuietAt, true);
         }
         // Focus a window's content: the xterm for terminals, the textarea for
         // app windows. Tolerant of either being absent.

@@ -1224,11 +1224,12 @@
             if (role === false) return false;
             return isTilingMode();
         }
-        // #262: whether an op names an int id that does not resolve here yet.
-        // For a non-admin every named id already passed the broker's own
-        // check (live, in scope, not off), so waiting for a refresh on it
-        // tells the caller nothing new; an admin's unknown id costs the
-        // catch-up, then the same 404.
+        // #262: whether an op names an int id that does not resolve here yet,
+        // for ANY caller -- the main case is a scoped launcher's first op on
+        // its own just-launched window. The wait leaks nothing to a
+        // non-admin: every id it names already passed the broker's own check
+        // (live, in scope, not off) before the relay. An admin's unknown id
+        // costs the catch-up, then the same 404.
         function _desktopUnpolled(hid, ids) {
             for (const id of ids) {
                 if (Number.isInteger(id)
@@ -1320,15 +1321,17 @@
                          ? r.reason : 'error' };
         }
         // `get`'s snapshot, as THIS browser sees the desktop. Rows: every
-        // live window, open:true (minimized and host-hidden included; app
-        // windows with id:null), then -- #262 -- every terminal of THIS
+        // live window (minimized and host-hidden included; app windows with
+        // id:null; dormant layout keys excluded -- no live window, nothing
+        // to arrange). #262: `chips` separately lists every terminal of THIS
         // broker that is only a taskbar chip (in `sessions`, no live
-        // window: an MCP launch, or a window the user closed), open:false
-        // with no placement, which any arrange op opens. Dormant layout keys
-        // with no session stay excluded -- nothing to open. A non-admin
-        // caller keeps only rows whose id is in its visible set (the broker
-        // re-filters as a belt). Geometry is the live floating box; the
-        // broker relabels identity from its registry.
+        // window: an MCP launch, or a window the user closed) as {id, title}
+        // -- any arrange op opens one. A separate list, so the rows keep
+        // their pre-#262 shape for every client, and an older broker drops
+        // the unknown key whole. A non-admin caller keeps only rows and
+        // chips whose id is in its visible set (the broker re-filters as a
+        // belt). Geometry is the live floating box; the broker relabels
+        // identity from its registry.
         function desktopSnapshot(hid, visible, wsResult) {
             const L = getLayout();
             let items = null, active = null, columnWs = null, floatWs = null;
@@ -1372,7 +1375,6 @@
                     id: id,
                     title: (sess && sess.title) || win.name || key,
                     kind: (win.type === 'app') ? 'app' : 'terminal',
-                    open: true,
                     tiled: !!win.tiled,
                     minimized: !!win.minimized,
                     column: (loc && vci !== -1) ? vci : null,
@@ -1406,21 +1408,15 @@
                 }
                 rows.push(row);
             }
+            const chips = [];
             for (const ent of sessions) {
                 const key = ent[0], sess = ent[1];
                 const win = windows.get(key);
-                if (win && !win.disposed) continue;      // listed above
+                if (win && !win.disposed) continue;      // a row above
                 const id = _desktopIntId(hid, key);
                 if (id === null) continue;               // another broker's
                 if (visible !== null && visible.indexOf(id) === -1) continue;
-                rows.push({
-                    key: key, id: id,
-                    title: (sess && sess.title) || key,
-                    kind: 'terminal', open: false,
-                    tiled: false, minimized: false,
-                    column: null, row: null, tabIndex: null,
-                    width_preset: null, geometry: null, workspace: null,
-                });
+                chips.push({ id: id, title: (sess && sess.title) || key });
             }
             const snap = {
                 viewport: { w: window.innerWidth, h: window.innerHeight },
@@ -1430,6 +1426,7 @@
                 active_workspace: active,
                 home: hid === homeHostId(),
                 windows: rows,
+                chips: chips,
             };
             // #258: only when the mod sent them, so an absent field stays
             // absent all the way to the MCP caller.
@@ -1468,11 +1465,16 @@
                 if (!live && !chip) return unknown();
                 // Focus arranges nothing: only the named window gates (N4) --
                 // refusing because an invisible sibling shares the column
-                // would be over-strict.
-                const g = refuseGate([key], true);
+                // would be over-strict. #262: opening a chip DOES arrange (a
+                // dormant chip mounts into its layout column), so a chip
+                // gates like tile: its whole column.
+                const g = refuseGate([key], !chip);
                 if (g) return g;
                 const w = live || _desktopOpenChip(key);
                 if (!w) return unknown();
+                // #262: the caller asked for focus -- an earlier quiet open
+                // or op on this window must not swallow it.
+                clearFocusQuiet(key);
                 revealAndFocusWindow(key);
                 return { ok: true, value: {
                     focused_column: getLayout().focusedCol,

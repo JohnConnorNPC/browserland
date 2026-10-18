@@ -634,14 +634,15 @@ def test_launch_docstrings_match_the_unified_mode_wire():
 def test_262_desktop_docstrings_state_open_on_demand():
     """#262: an agent reads the tool text, not the wiki. arrange_window must
     say a chip-only window is opened first (and that this reopens a window
-    the user closed), get_desktop must name the `open` row key, and the
+    the user closed), get_desktop must name the `chips` list, and the
     send-window op line must say it opens a chip too."""
     from webterm.mcptool import server
     adoc = " ".join((server.arrange_window.__doc__ or "").split())
     assert "taskbar chip" in adoc and "is opened first" in adoc
     assert "reopens a window the user closed" in adoc
     gdoc = " ".join((server.get_desktop.__doc__ or "").split())
-    assert "`open`" in gdoc and "false for a terminal that is only a" in gdoc
+    assert "`chips` lists the terminals that are only a taskbar chip" in gdoc
+    assert "`windows` never holds them" in gdoc
     wdoc = " ".join((server.workspaces.__doc__ or "").split())
     assert "taskbar chip is opened first" in wdoc
     ldoc = " ".join((server.launch_terminal.__doc__ or "").split())

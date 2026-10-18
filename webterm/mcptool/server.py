@@ -845,7 +845,8 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
 
     When the host advertises `allow_desktop`, the new window opens on the
     desktop of the browser holding the control lease, once, without a
-    click and without taking the user's keyboard focus; with no such browser it stays a taskbar chip, which any
+    click and without taking the user's keyboard focus; with no such
+    browser (or one that cannot open it) it stays a taskbar chip, which any
     arrange_window op opens. The result does not wait for the browser."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
@@ -1005,19 +1006,24 @@ def _require_desktop(client: BrowserlandClient, host: str) -> None:
 
 
 def _namespace_snapshot(name: str, snap: Any) -> Any:
-    """Rewrite each window row's integer `id` to the namespaced
-    "<host>:<int>" form list_terminals uses; null ids stay null."""
+    """Rewrite each window row's (and #262 chip's) integer `id` to the
+    namespaced "<host>:<int>" form list_terminals uses; null ids stay null."""
     if not isinstance(snap, dict) or not isinstance(snap.get("windows"), list):
         return snap
-    rows = []
-    for row in snap["windows"]:
-        if (isinstance(row, dict) and isinstance(row.get("id"), int)
-                and not isinstance(row["id"], bool)):
-            row = dict(row)
-            row["id"] = f"{name}:{row['id']}"
-        rows.append(row)
+
+    def _ns(items):
+        out = []
+        for row in items:
+            if (isinstance(row, dict) and isinstance(row.get("id"), int)
+                    and not isinstance(row["id"], bool)):
+                row = dict(row)
+                row["id"] = f"{name}:{row['id']}"
+            out.append(row)
+        return out
     snap = dict(snap)
-    snap["windows"] = rows
+    snap["windows"] = _ns(snap["windows"])
+    if isinstance(snap.get("chips"), list):
+        snap["chips"] = _ns(snap["chips"])
     return snap
 
 
@@ -1025,10 +1031,11 @@ def _namespace_snapshot(name: str, snap: Any) -> Any:
 def get_desktop(host: str = "") -> Dict[str, Any]:
     """Read a browser's desktop (#244): every window with its layout
     (tiled column/row/width preset, or floating x/y/w/h), the viewport, the
-    focused column, and the workspaces when the workspaces mod is on. Rows
-    carry `open`: true for a window, false for a terminal that is only a
-    taskbar chip on that desktop (no position; arrange_window opens it).
-    A browser that predates `open` sends rows without it. Each
+    focused column, and the workspaces when the workspaces mod is on.
+    `chips` lists the terminals that are only a taskbar chip on that
+    desktop, as `{id, title}` (no window yet; arrange_window opens one);
+    `windows` never holds them. A browser or broker that predates it sends
+    no `chips`. Each
     window's `id` is the namespaced "<host>:<int>" form (the one
     list_terminals, arrange_window and workspaces use); a window with no
     broker id keeps `id` null. The
@@ -1081,12 +1088,12 @@ def arrange_window(id: str, op: str, to: str = "", preset: str = "",
     `target` must be a window id on the SAME host as `id`. Ops apply on the
     browser holding the control lease (window placement is per-browser
     render, so any holder works) and are applied instantly. A window that
-    is only a taskbar chip on that desktop (get_desktop lists it with
-    `open: false`: just launched, or closed by the user) is opened first,
-    the way a chip click opens it, and then the op applies; this reopens a
-    window the user closed. A refused op opens nothing, and `move_column` /
-    `set_width` on a chip that would open floating answer not_tiled without
-    opening it. Only `focus` moves keyboard focus; every other op (and the
+    is only a taskbar chip on that desktop (get_desktop lists it under
+    `chips`: just launched, or closed by the user) is opened first, the way
+    a chip click opens it, and then the op applies; this reopens a window
+    the user closed. An op refused for its arguments or the caller's scope
+    opens nothing, and `move_column` / `set_width` on a chip that would open
+    floating answer not_tiled without opening it. Only `focus` moves keyboard focus; every other op (and the
     open it may do) leaves the user's focus where it was. Fails closed when
     the host does not advertise `allow_desktop` on /mcp/info."""
     if op not in _ARRANGE_OPS:

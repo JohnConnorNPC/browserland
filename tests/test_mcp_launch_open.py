@@ -65,7 +65,7 @@ LA_END = "function layoutRemoveKey(key) {"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 40
+EXPECTED_ASSERTS = 48
 
 _HARNESS = r"""
 'use strict';
@@ -269,13 +269,19 @@ function zEl(name) {
     return { id: name, isConnected: true,
              focus: function () { Z.focused.push(name); zDoc.activeElement = this; } };
 }
-const zDoc = { body: zBody, activeElement: zBody };
+const zDoc = { body: zBody, activeElement: zBody, listeners: {},
+               addEventListener: function (t, fn) {
+                   (zDoc.listeners[t] = zDoc.listeners[t] || []).push(fn); } };
+function zUser(type, key) {            // a user event inside window `key`
+    for (const fn of (zDoc.listeners[type] || [])) fn({ target: { owner: key } });
+}
 function zWin(key, tiled) {
     return { id: key, type: 'terminal', tiled: tiled, minimized: false,
              controlled: false, hostId: 'local',
              term: { focus: function () { Z.focused.push(key); } },
              dom: { classList: { contains: function () { return false; } },
-                    style: {} } };
+                    style: {},
+                    contains: function (t) { return !!t && t.owner === key; } } };
 }
 const envZ = {
     windows: new Map(), frontId: null, lastTermId: null,
@@ -299,7 +305,7 @@ const envZ = {
 const zApi = new Function('env',
     'with (env) {\n' + zSrc + '\n' +
     'var __exports = { withoutFocus: withoutFocus, bringToFront: bringToFront,\n' +
-    '  focusIsQuiet: focusIsQuiet };\n' +
+    '  focusIsQuiet: focusIsQuiet, clearFocusQuiet: clearFocusQuiet };\n' +
     '}\nreturn __exports;\n')(envZ);
 function zReset() {
     // Run (never drop) earlier scopes' pending clears, so no key stays quiet.
@@ -547,6 +553,33 @@ function laReset(quiet) {
     try { pageL.noteSessionLaunched('local', REC, {}, frame(95)); }
     catch (_) { threwL = true; }
     ok(!threwL, 'L13 a failing seed never throws out of the frame handler');
+    // Review round 1 (R4): the remote-broker arm opens too.
+    resetPage();
+    P.remote.remoteX = { everOk: true, ok: true, leaseInactive: false };
+    pageL.noteSessionLaunched('remoteX', { leaseBoot: 'b9', leaseGen: 2 }, {},
+                              frame(70, { gen: 2, bootId: 'b9' }));
+    poll(['remoteX:70']);
+    ok(openedCount('remoteX:70') === 1 && P.pendingOpens.size === 0,
+        'L14 a launch frame from a remote broker the page holds opens its window');
+    // Review round 1 (R7): the seen set is bounded; an evicted launch can park
+    // again (the bound is what keeps the page's memory finite).
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(71));
+    poll(['local:71']);
+    P.windows.delete('local:71');
+    for (let n = 0; n < 128; n++) pageL.noteSessionLaunched('local', REC, {}, frame(5000 + n));
+    P.pendingOpens.clear();
+    pageL.noteSessionLaunched('local', REC, {}, frame(71));
+    const reparked = P.pendingOpens.has('local:71');
+    resetPage();
+    pageL.noteSessionLaunched('local', REC, {}, frame(72));
+    poll(['local:72']);
+    P.windows.delete('local:72');
+    for (let n = 0; n < 127; n++) pageL.noteSessionLaunched('local', REC, {}, frame(6000 + n));
+    P.pendingOpens.clear();
+    pageL.noteSessionLaunched('local', REC, {}, frame(72));
+    ok(reparked && !P.pendingOpens.has('local:72'),
+        'L15 the seen set holds 128 launches, then forgets the oldest');
 
     // ---- V: _viewReady follows the real boot / teardown / rebuild ---------
     const gS = gate();
@@ -579,6 +612,19 @@ function laReset(quiet) {
     V.pull = null;
     ok(envV._viewReady === false,
         'V4 a rebuild a teardown superseded never marks the view ready');
+    // Review round 1 (R9): a restore step that throws still leaves the view up.
+    envV.restoreAppWindows = function () { throw new Error('restore failed'); };
+    life.teardownView();
+    let rebuildThrew = false;
+    try { await life.rebuildView(); } catch (_) { rebuildThrew = true; }
+    const afterRebuild = envV._viewReady;
+    life.teardownView();
+    envV._booted = false;
+    let bootThrew = false;
+    try { await life.bootActiveView(); } catch (_) { bootThrew = true; }
+    envV.restoreAppWindows = function () {};
+    ok(rebuildThrew && afterRebuild === true && bootThrew && envV._viewReady === true,
+        'V5 a boot or rebuild whose restore throws still marks the view ready');
 
     // ---- F: #262 a launch frame's window opens without focus -------------
     resetPage();
@@ -626,9 +672,10 @@ function laReset(quiet) {
     try {
         zApi.withoutFocus(['local:2'], function () { throw new Error('mutator threw'); });
     } catch (_) {}
-    zApi.bringToFront('local:1');
-    ok(Z.focused.join() === 'local:1',
-        'Z5 a throwing scope still ends: other windows focus again at once');
+    zFlush(); zFlush();
+    zApi.bringToFront('local:2');
+    ok(Z.focused.join() === 'local:2',
+        'Z5 a throwing scope still releases its window');
     zReset();
     zApi.withoutFocus(['local:2'], function () {});
     zApi.withoutFocus(['local:2'], function () {});
@@ -660,6 +707,46 @@ function laReset(quiet) {
     zApi.withoutFocus(['local:2'], function () {});   // nothing had focus
     ok(keptOther && zDoc.activeElement === zBody && Z.focused.length === 0,
         'Z8 focus the user moved elsewhere (or none at all) is never taken back');
+    // Review round 1 (R1): quiet never swallows a focus somebody asked for.
+    zReset();
+    zApi.withoutFocus(['local:2'], function () { zApi.bringToFront('local:2'); });
+    zApi.clearFocusQuiet('local:2');      // what the focus op does first
+    zApi.bringToFront('local:2');
+    ok(Z.focused.join() === 'local:2' && envZ.lastTermId === 'local:2',
+        'Z9 a focus op right after a quiet open of the same window focuses it');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});
+    // A hidden tab: requestAnimationFrame never fires. Only the timer runs.
+    await sleep(80);
+    const quietAfter = zApi.focusIsQuiet('local:2');
+    zApi.bringToFront('local:2');
+    ok(quietAfter === false && Z.focused.join() === 'local:2',
+        'Z10 with no animation frames (a hidden tab) quiet still ends by its timer');
+    Z.rafs = [];                          // drop the never-run frames
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});
+    zApi.bringToFront('local:1');         // the user focuses ANOTHER window
+    ok(Z.focused.join() === 'local:1' && envZ.lastTermId === 'local:1'
+        && envZ.frontId === 'local:1',
+        'Z11 during a quiet window another window still focuses and keeps its bookkeeping');
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});
+    zUser('pointerdown', 'local:2');      // the user clicks INTO the quiet one
+    zApi.bringToFront('local:2');         // ...whose own mousedown handler runs
+    const clicked = Z.focused.join() === 'local:2' && envZ.lastTermId === 'local:2';
+    zReset();
+    zApi.withoutFocus(['local:2'], function () {});
+    zUser('keydown', 'local:2');
+    ok(clicked && zApi.focusIsQuiet('local:2') === false,
+        'Z12 a click or key press inside a quiet window releases it');
+    zReset();
+    const gone = zEl('X');
+    zDoc.activeElement = gone;
+    gone.isConnected = false;             // its node left the document
+    zApi.withoutFocus(['local:2'], function () { zDoc.activeElement = zBody; });
+    zFlush(); zFlush();
+    ok(Z.focused.length === 0 && zDoc.activeElement === zBody,
+        'Z13 focus is never given back to an element that left the document');
 
     // ---- LA: layoutAddColumn keeps the focused column when quiet ----------
     laReset(false);
@@ -803,6 +890,8 @@ def test_only_the_lease_holder_with_a_live_view_parks(scenario_run):
     _ok(scenario_run, "L9 a frame dropped during boot is not remembered, so a later one parks")
     _ok(scenario_run, "L10 an id already open or already parked is left alone")
     _ok(scenario_run, "L13 a failing seed never throws out of the frame handler")
+    _ok(scenario_run, "L14 a launch frame from a remote broker the page holds opens its window")
+    _ok(scenario_run, "L15 the seen set holds 128 launches, then forgets the oldest")
 
 
 def test_the_view_ready_flag_follows_the_real_lifecycle(scenario_run):
@@ -813,6 +902,7 @@ def test_the_view_ready_flag_follows_the_real_lifecycle(scenario_run):
     _ok(scenario_run, "V2 a teardown clears it at once")
     _ok(scenario_run, "V3 a rebuild sets it only once it has restored the view")
     _ok(scenario_run, "V4 a rebuild a teardown superseded never marks the view ready")
+    _ok(scenario_run, "V5 a boot or rebuild whose restore throws still marks the view ready")
 
 
 def test_an_open_the_user_did_not_ask_for_takes_no_focus(scenario_run):
@@ -825,10 +915,21 @@ def test_an_open_the_user_did_not_ask_for_takes_no_focus(scenario_run):
     _ok(scenario_run, "Z2 inside withoutFocus nothing moves: focus, lastTermId, frontId, the focused column")
     _ok(scenario_run, "Z3 a quiet float still stacks, without focus")
     _ok(scenario_run, "Z4 a bringToFront deferred to the next frame stays quiet; a later one focuses")
-    _ok(scenario_run, "Z5 a throwing scope still ends: other windows focus again at once")
+    _ok(scenario_run, "Z5 a throwing scope still releases its window")
     _ok(scenario_run, "Z6 overlapping scopes on one key all clear")
     _ok(scenario_run, "Z7 focus a moved node dropped to <body> is given back, at once or a frame later")
     _ok(scenario_run, "Z8 focus the user moved elsewhere (or none at all) is never taken back")
+    _ok(scenario_run, "Z13 focus is never given back to an element that left the document")
+
+
+def test_quiet_never_swallows_a_focus_somebody_asked_for(scenario_run):
+    # Review round 1 (R1, auditor M1): quiet is per window, ends by timer as
+    # well as by frame, is released by the focus op and by the user acting in
+    # the window, and never touches any other window's focus.
+    _ok(scenario_run, "Z9 a focus op right after a quiet open of the same window focuses it")
+    _ok(scenario_run, "Z10 with no animation frames (a hidden tab) quiet still ends by its timer")
+    _ok(scenario_run, "Z11 during a quiet window another window still focuses and keeps its bookkeeping")
+    _ok(scenario_run, "Z12 a click or key press inside a quiet window releases it")
     _ok(scenario_run, "LA1 a quiet new column keeps the focused column (an insert before it shifts the index)")
 
 

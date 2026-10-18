@@ -236,20 +236,27 @@
             // #226: the detached surface boots one window and none of the
             // desktop below (no app windows, no deep link, no restore queue).
             if (isDetachedSurface()) { await bootDetachedView(epoch); return; }
-            restoreAppWindows();
-            // ?session=<id> deep link: auto-open once it appears in /sessions.
-            // A bare numeric id means the local host (links predate multi-host).
-            const deepLink = params.get('session');
-            if (deepLink) {
-                const key = String(deepLink).indexOf(':') === -1
-                    ? 'local:' + deepLink : String(deepLink);
-                pendingOpens.set(key, Date.now() + AUTO_OPEN_TIMEOUT_MS);
-                startFastPoll();
+            // #262: the view counts as up once these ran, even if one threw
+            // (a frame then parks for the regular auto-open pass) -- but not
+            // when a teardown or newer boot superseded this one meanwhile.
+            try {
+                restoreAppWindows();
+                // ?session=<id> deep link: auto-open once it appears in
+                // /sessions. A bare numeric id means the local host (links
+                // predate multi-host).
+                const deepLink = params.get('session');
+                if (deepLink) {
+                    const key = String(deepLink).indexOf(':') === -1
+                        ? 'local:' + deepLink : String(deepLink);
+                    pendingOpens.set(key, Date.now() + AUTO_OPEN_TIMEOUT_MS);
+                    startFastPoll();
+                }
+                seedRestoreQueue();
+                refreshTaskbar();
+                startSlowPoll();
+            } finally {
+                if (!_deactivated && epoch === _viewEpoch) _viewReady = true;
             }
-            seedRestoreQueue();
-            refreshTaskbar();
-            startSlowPoll();
-            _viewReady = true;              // #262
             // #226: drop records of children that died while this page was away.
             try { pruneDetachedSet(); } catch (_) {}
         }
@@ -346,11 +353,15 @@
             // #226: the ordinary rebuild is restore-queue driven and would
             // reopen nothing on the detached surface.
             if (isDetachedSurface()) { rebuildDetachedView(); return; }
-            restoreAppWindows();
-            seedRestoreQueue();
-            refreshTaskbar();
-            startSlowPoll();
-            _viewReady = true;              // #262
+            try {
+                restoreAppWindows();
+                seedRestoreQueue();
+                refreshTaskbar();
+                startSlowPoll();
+            } finally {
+                // #262: as in bootActiveView.
+                if (!_deactivated && epoch === _viewEpoch) _viewReady = true;
+            }
         }
 
         // Remote-host lease status. The HOME lease drives the page (above); a

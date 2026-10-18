@@ -464,35 +464,56 @@ def test_desktop_get_rebuilds_identity_from_registry(tmp_path, monkeypatch):
     assert resp.json["home"] is True
 
 
-def test_262_desktop_get_passes_open_through_typed(tmp_path, monkeypatch):
-    """#262: a chip-only terminal's row carries open:false through the
-    rebuild; a live row's open:true too. A non-bool open drops the KEY, not
-    the row, and a row from a browser that predates the key stays without
-    one (additive: old callers see no change)."""
-    app = _desktop_app(tmp_path, monkeypatch)
-    for wid in (5, 6, 7, 8):
-        _live(app, wid, mcp_mode="readwrite")
-    snap = {"windows": [
-        {"id": 5, "open": False, "tiled": False, "column": None,
-         "geometry": None, "kind": "terminal"},
-        {"id": 6, "open": True, "tiled": True},
-        {"id": 7, "open": "no", "tiled": True},
-        {"id": 8, "tiled": True},
-    ]}
+def _get_snapshot(app, snap, admin=None):
     _holder(app, _reply_ok(snap))
-    _, resp = _mcp(app, "/mcp/desktop", method="GET")
+    _, resp = _mcp(app, "/mcp/desktop", method="GET", admin=admin)
     assert resp.status == 200
-    rows = {r["id"]: r for r in resp.json["windows"]}
-    assert rows[5]["open"] is False
-    assert rows[5]["tiled"] is False and "column" not in rows[5]
-    assert rows[6]["open"] is True
-    assert "open" not in rows[7] and rows[7]["tiled"] is True
-    assert "open" not in rows[8]
-    # ...and the MCP tool's id namespacing keeps the key for the agent.
+    return resp.json
+
+
+def test_262_chips_are_a_separate_typed_list(tmp_path, monkeypatch):
+    """#262 (review round 1, R6): terminals that are only a taskbar chip
+    arrive in their own top-level `chips` list, rebuilt like rows: an int id
+    live in THIS registry, not already a row or a chip, the title from the
+    registry, only {id, title}. The rows stay exactly as they would without
+    any chips, and an older page that sends no `chips` gets none back."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    for wid in (5, 6, 7):
+        _live(app, wid, mcp_mode="readwrite")
+    rows = [{"id": 5, "tiled": True, "column": 0, "row": 0,
+             "kind": "terminal", "key": "local:5"}]
+    with_chips = _get_snapshot(app, {"windows": rows, "chips": [
+        {"id": 6, "title": "LIES", "extra": "dropped"},
+        {"id": 6, "title": "dup"},              # duplicate chip
+        {"id": 5, "title": "already a row"},    # a row wins
+        {"id": 424242, "title": "ghost"},       # not live here
+        {"id": True}, "junk",                   # not an int id / not a dict
+        {"id": 7}]})
+    assert with_chips["chips"] == [
+        {"id": 6, "title": app.ctx.registry.get(6).title},
+        {"id": 7, "title": app.ctx.registry.get(7).title}]
+    without = _get_snapshot(app, {"windows": rows})
+    assert "chips" not in without                # an older page: no key
+    assert with_chips["windows"] == without["windows"]
+    assert [r["id"] for r in with_chips["windows"]] == [5]
+    # ...and the MCP tool's id namespacing covers the chips too.
     from webterm.mcptool import server
-    out = server._namespace_snapshot("h", {"windows": [rows[5]]})
+    out = server._namespace_snapshot("h", with_chips)
+    assert [c["id"] for c in out["chips"]] == ["h:6", "h:7"]
     assert out["windows"][0]["id"] == "h:5"
-    assert out["windows"][0]["open"] is False
+
+
+def test_262_chips_follow_the_callers_visibility(tmp_path, monkeypatch):
+    """A non-admin keeps only chips it can see (effective mode not off),
+    exactly like rows; an admin sees them all."""
+    app = _desktop_app(tmp_path, monkeypatch, admin=ADMIN_TOKEN)
+    _live(app, 6, mcp_mode="readwrite")
+    _live(app, 7, mcp_mode="off")
+    snap = {"windows": [], "chips": [{"id": 6}, {"id": 7}]}
+    plain = _get_snapshot(app, snap)
+    assert [c["id"] for c in plain["chips"]] == [6]
+    admin = _get_snapshot(app, snap, admin=ADMIN_TOKEN)
+    assert [c["id"] for c in admin["chips"]] == [6, 7]
 
 
 def test_desktop_get_filters_rows_by_scope_and_mode(tmp_path, monkeypatch):

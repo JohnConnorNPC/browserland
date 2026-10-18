@@ -7839,14 +7839,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #: The layout attributes the broker passes through from the browser's
     #: snapshot row. Identity (id/title) NEVER comes from the browser -- the
     #: registry is authoritative -- and unknown-to-the-broker extras pass
-    #: through verbatim only within this whitelist. #262: ``open`` is false
-    #: for a terminal that is only a taskbar chip on that desktop (no window
-    #: yet; any arrange op opens it); a browser that predates it sends no
-    #: ``open`` and its rows stay without one.
+    #: through verbatim only within this whitelist.
     _DESKTOP_LAYOUT_KEYS = ("tiled", "column", "row", "width_preset",
                             "geometry", "workspace", "kind", "minimized",
-                            "tabIndex", "tabbed", "split", "widthFrac",
-                            "open")
+                            "tabIndex", "tabbed", "split", "widthFrac")
 
     def _snap_int(value):
         # A REAL int (bool excluded -- True aliases 1), or None.
@@ -7867,7 +7863,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #: all-int dict for geometry). A value of the wrong type drops the KEY,
     #: never the row: a lying browser can misreport only its own layout.
     _DESKTOP_LAYOUT_TYPES = {
-        "tiled": "bool", "minimized": "bool", "tabbed": "bool", "open": "bool",
+        "tiled": "bool", "minimized": "bool", "tabbed": "bool",
         "column": "int", "row": "int", "tabIndex": "int", "workspace": "int",
         "width_preset": "str32", "kind": "str32", "split": "str32",
         "widthFrac": "num", "geometry": "geom",
@@ -8260,6 +8256,32 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             windows.append(row)
         out = _snap_rebuild_top(snap)
         out["windows"] = windows
+        # #262: the terminals that are only a taskbar chip on that desktop,
+        # a list of their own so the rows above keep their old shape. Kept
+        # only when the browser sent one (an older page's answer has no
+        # `chips`); each entry is rebuilt like a row -- an int id live in
+        # THIS registry, not already a row or a chip, visible to the caller
+        # -- and carries only {id, title}, the title from the registry.
+        chips_in = snap.get("chips")
+        if isinstance(chips_in, list):
+            chips = []
+            for chip in chips_in:
+                wid = chip.get("id") if isinstance(chip, dict) else None
+                if isinstance(wid, bool) or not isinstance(wid, int):
+                    continue
+                if wid in seen:
+                    continue
+                entry = app.ctx.registry.get(wid)
+                if entry is None:
+                    continue
+                seen.add(wid)
+                if not admin:
+                    if _mcp_effective_mode(entry) == "off":
+                        continue
+                    if scope is not None and entry.mcp_scope != scope:
+                        continue
+                chips.append({"id": wid, "title": entry.title})
+            out["chips"] = chips
         return sanic_json(out)
 
     async def _mcp_desktop_post(request: Request):

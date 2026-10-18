@@ -34,6 +34,7 @@ from webterm.broker import ui
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
 SRC_JS = BROKER_DIR / "64_js_sessions_poll_control.js"
+SRC_58 = BROKER_DIR / "58_js_layout_mutators.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -44,7 +45,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 87
+EXPECTED_ASSERTS = 91
 
 _HARNESS = r"""
 'use strict';
@@ -53,6 +54,13 @@ const src = fs.readFileSync(__SRC_PATH__, 'utf8');
 const cut = src.indexOf('// ---- desktop relay (#244)');
 if (cut < 0) throw new Error('marker missing');
 const slice = src.slice(cut);
+// #262: the REAL decideTiled/isKnownFloat (58), so the stub places a window
+// the way openWindow does and _desktopWouldTile can be pinned against it.
+const src58 = fs.readFileSync(__SRC58_PATH__, 'utf8');
+const c58a = src58.indexOf('function isKnownFloat(key) {');
+const c58b = src58.indexOf('// ---- consume / expel');
+if (c58a < 0 || c58b < 0) throw new Error('58 decideTiled marker missing');
+const slice58 = src58.slice(c58a, c58b);
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -166,7 +174,7 @@ function openWindowStub(key, sess) {
     quietLog.push(['openWindow:' + key, state.quiet > 0]);
     if (state.openHusk) return;
     const inL = !!findKeyInLayout(key);
-    let tiled = inL || state.tiling;
+    let tiled = real58.decideTiled(key, real58.isKnownFloat(key));
     if (state.forcePlace === 'float') tiled = false;
     if (state.forcePlace === 'tile') tiled = true;
     mk(key, { tiled: tiled }, null);
@@ -230,6 +238,11 @@ const env = {
     openWindow: openWindowStub,
     isTilingMode: function () { return state.tiling; },
     isDetachedSurface: function () { return state.detached; },
+    getOpenTerms: function () {
+        if (!Array.isArray(L.openTerms)) L.openTerms = [];
+        return L.openTerms;
+    },
+    clearFocusQuiet: rec('clearFocusQuiet', function () {}),
     withoutFocus: function (keys, fn) {
         quietScopes.push(keys.slice());
         state.quiet++;
@@ -251,9 +264,14 @@ const factory = new Function('env',
     'with (env) {\n' + slice + '\n' +
     'var __exports = { handleDesktopRpc: handleDesktopRpc,\n' +
     '  resolveDesktopWinKey: resolveDesktopWinKey,\n' +
-    '  desktopCommandResult: desktopCommandResult };\n' +
+    '  desktopCommandResult: desktopCommandResult,\n' +
+    '  wouldTile: _desktopWouldTile };\n' +
     '}\nreturn __exports;\n');
 const api = factory(env);
+const real58 = new Function('env',
+    'with (env) {\n' + slice58 + '\n' +
+    'var __exports = { decideTiled: decideTiled, isKnownFloat: isKnownFloat };\n' +
+    '}\nreturn __exports;\n')(env);
 
 function mkSock() {
     const ws = { sent: [] };
@@ -953,29 +971,76 @@ function countMut(name) {
     ok(r && r.ok === true && quietOf('openWindow:local:30') === true,
         'Q4 send-window opens a chip without focus');
 
-    // ---- K: #262 get lists chip-only terminals as open:false --------------
+    // ---- K: #262 get lists chip-only terminals in `chips` -------------------
     chips();
     sessions.set('remoteX:60', { title: 'remote chip' });
     L.columns[0].rows.push({ height: 0.2, keys: ['local:40'], mode: 'single' });
     execNext = { ok: false, reason: 'absent' };
     r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: null } });
-    const kRows = (r && r.value) ? r.value.windows : [];
-    const kBy = {};
-    for (const row of kRows) kBy[row.key] = row;
-    ok(kBy['local:30'] && kBy['local:30'].open === false && kBy['local:30'].id === 30
-        && kBy['local:30'].title === 'chip 30' && kBy['local:30'].column === null
-        && kBy['local:30'].geometry === null && kBy['local:30'].tiled === false,
-        'K1 a chip-only terminal is listed open:false with no placement');
-    ok(kBy['local:7'] && kBy['local:7'].open === true
-        && kBy['local:12'] && kBy['local:12'].open === true,
-        'K2 every live window is listed open:true');
-    ok(!kBy['local:40'] && !kBy['remoteX:60'] && openCalls.length === 0,
+    const kv = (r && r.value) || {};
+    const kRows = kv.windows || [];
+    const kChips = kv.chips || [];
+    ok(JSON.stringify(kChips) === JSON.stringify([
+            { id: 30, title: 'chip 30' }, { id: 31, title: 'chip 31' }]),
+        'K1 chip-only terminals are listed in chips as {id, title}');
+    const liveKeys = Array.from(windows.keys()).filter(function (k) {
+        return !windows.get(k).disposed; }).sort();
+    ok(JSON.stringify(kRows.map(function (x) { return x.key; }).sort())
+            === JSON.stringify(liveKeys)
+        && kRows.every(function (x) { return !('open' in x); }),
+        'K2 the rows are the live windows only, in their pre-#262 shape');
+    ok(kChips.every(function (c) { return c.id !== 40 && c.id !== 60 && c.id !== null; })
+        && openCalls.length === 0,
         'K3 a dormant key with no session and another broker\'s chip are left out, and get opens nothing');
     r = await drive('local', { rid: freshRid(), op: 'get', args: { visible: [7, 31] } });
-    const kIds = ((r && r.value) ? r.value.windows : []).map(function (x) { return x.id; });
-    ok(kIds.length === 2 && kIds.indexOf(7) !== -1 && kIds.indexOf(31) !== -1,
-        'K4 a non-admin get lists only the chips it can see');
+    const kv4 = (r && r.value) || {};
+    ok((kv4.chips || []).length === 1 && kv4.chips[0].id === 31
+        && (kv4.windows || []).map(function (x) { return x.id; }).join() === '7',
+        'K4 a non-admin get lists only the chips and rows it can see');
     execNext = null;
+
+    // ---- P: #262 _desktopWouldTile agrees with the real decideTiled -------
+    let cells = 0, agree = 0;
+    for (const inLayout of [false, true])
+    for (const known of [false, true])
+    for (const role of [undefined, true, false])
+    for (const tiling of [false, true])
+    for (const detached of [false, true]) {
+        resetWorld();
+        const key = 'local:77';
+        if (inLayout) L.columns[0].rows.push({ height: 0.2, keys: [key], mode: 'single' });
+        if (known) L.openTerms = [key];
+        if (role !== undefined) prefsObj[key] = { tiled: role };
+        state.tiling = tiling; state.detached = detached;
+        const predicted = api.wouldTile(key);
+        const real = real58.decideTiled(key, real58.isKnownFloat(key));
+        cells++;
+        if (predicted === real) agree++;
+    }
+    state.detached = false;
+    ok(cells === 48 && agree === cells,
+        'P1 _desktopWouldTile agrees with the real decideTiled in every cell');
+
+    // ---- R: round 1 ---------------------------------------------------------
+    chips();
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: null } });
+    const iClear = mut.indexOf('clearFocusQuiet'), iReveal = mut.indexOf('reveal');
+    ok(r && r.ok === true && iClear !== -1 && iReveal !== -1 && iClear < iReveal,
+        'R1 the focus op releases its window\'s quiet before it focuses');
+    chips();
+    L.columns[0].rows.push({ height: 0.2, keys: ['local:41'], mode: 'single' });
+    sessions.set('local:41', { title: 'dormant 41' });
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 41, visible: [41] } });
+    ok(r && r.error === 'unknown_window' && openCalls.length === 0,
+        'R2 focus on a dormant chip gates its whole column, like tile');
+    resetWorld();
+    state.catchUp = lands('local:50');
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 50, visible: [50] } });
+    ok(r && r.ok === true && windows.has('local:50') && catchUps.length === 1,
+        'R3 a scoped caller\'s op on its own unpolled window is caught up too');
 
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
@@ -999,7 +1064,8 @@ def scenario_run(tmp_path_factory):
         "boundary is ambiguous")
     harness = tmp_path_factory.mktemp("desktop-rpc") / "harness.js"
     harness.write_text(
-        _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS))),
+        _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS)))
+                .replace("__SRC58_PATH__", json.dumps(str(SRC_58))),
         encoding="utf-8")
     proc = subprocess.run([NODE, str(harness)],
                           capture_output=True, text=True, encoding="utf-8",
@@ -1262,14 +1328,31 @@ def test_262_only_the_focus_op_takes_keyboard_focus(scenario_run):
 
 
 def test_262_get_lists_chip_only_terminals(scenario_run):
-    # An agent must be able to FIND a window before any click: a terminal
-    # that is only a taskbar chip is a row with open:false (and no
-    # placement); live windows say open:true. Same visibility rule, this
-    # broker's namespace only, and listing never opens anything.
-    _ok(scenario_run, "K1 a chip-only terminal is listed open:false with no placement")
-    _ok(scenario_run, "K2 every live window is listed open:true")
+    # An agent must be able to FIND a window before any click: terminals
+    # that are only a taskbar chip go in their own `chips` list, so the rows
+    # keep their pre-#262 shape for every client (review round 1, R6). Same
+    # visibility rule, this broker's namespace only, and listing opens
+    # nothing.
+    _ok(scenario_run, "K1 chip-only terminals are listed in chips as {id, title}")
+    _ok(scenario_run, "K2 the rows are the live windows only, in their pre-#262 shape")
     _ok(scenario_run, "K3 a dormant key with no session and another broker's chip are left out, and get opens nothing")
-    _ok(scenario_run, "K4 a non-admin get lists only the chips it can see")
+    _ok(scenario_run, "K4 a non-admin get lists only the chips and rows it can see")
+
+
+def test_262_would_tile_matches_the_real_decide_tiled(scenario_run):
+    # Review round 1 (R2): the no-side-effect prediction must agree with
+    # openWindow's own decideTiled in every input cell (layout membership,
+    # known float, remembered role, global mode, detached surface).
+    _ok(scenario_run, "P1 _desktopWouldTile agrees with the real decideTiled in every cell")
+
+
+def test_262_review_round_1(scenario_run):
+    # R1: the focus op releases quiet for its window before focusing.
+    # R3: focus on a dormant chip gates the whole column (it mounts there).
+    # R5: the catch-up runs for a scoped caller too (its own new window).
+    _ok(scenario_run, "R1 the focus op releases its window's quiet before it focuses")
+    _ok(scenario_run, "R2 focus on a dormant chip gates its whole column, like tile")
+    _ok(scenario_run, "R3 a scoped caller's op on its own unpolled window is caught up too")
 
 
 # ---- the catch-all ---------------------------------------------------------------
