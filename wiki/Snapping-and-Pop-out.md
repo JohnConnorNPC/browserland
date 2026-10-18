@@ -4,7 +4,7 @@ Browserland has two "hold-to-snap" gestures that move a window between the [[flo
 
 These are mouse gestures (a pen works too); a touch drag on a title bar does nothing.
 
-Both gestures share a single timer — the **drag hold delay** (the *dwell*). You start a drag, hold the window still long enough, and the window arms the gesture.
+Both gestures share a single timer — the **drag hold delay** (the *dwell*). You start a drag, hold the window still long enough, and the window arms the gesture. Moving it more than a few pixels (6) restarts the wait.
 
 ## Snap a floating window into the grid
 
@@ -15,7 +15,7 @@ Use this to drop a free-floating window into the tiling strip.
 3. The drop zones light up — the highlighted overlay previews where the window will land.
 4. **Release** to tile the window where the overlay shows.
 
-To cancel without tiling, drop the window on the top-left **"return to floating"** zone, or press `Escape`.
+To cancel without tiling, drop the window on the top-left **"return to floating"** zone (a 96 px square in the desktop's corner), or press `Escape`. Either puts the window back where the drag started, and so does releasing it where there is no snap target.
 
 For the full map of edges, bands, and quadrants you can drop onto, see the [[drop-zone cheat sheet|Arranging-Windows]].
 
