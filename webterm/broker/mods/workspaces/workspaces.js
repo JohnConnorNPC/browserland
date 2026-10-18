@@ -601,6 +601,9 @@
                     { label: 'Remove workspace', enabled: list.length > 1,
                       action: at(removeWorkspace) },
                     { sep: true },
+                    { label: 'Colour…', enabled: true,
+                      action: () => openColorMenu((wsList().find(w => w.id === wsId) || {}).color,
+                          x, y, (c) => setWorkspaceColorById(wsId, c)) },
                     { label: ws.stack ? 'Move up' : 'Move left', enabled: wsCanMove(key, -1),
                       action: () => moveEntry(key, -1) },
                     { label: ws.stack ? 'Move down' : 'Move right', enabled: wsCanMove(key, 1),
@@ -815,6 +818,42 @@
                     _wsDragKey = null;
                     pager.querySelectorAll('.ws-dot').forEach(wsClearDrop);
                 });
+            }
+            // ---- colours (#258) -------------------------------------------
+            // The launch profiles' palette (core 50) or none -- never a free
+            // hex. typeof-guarded: a build without core 50 has no palette.
+            function wsPalette() {
+                return (typeof PALETTE !== 'undefined' && Array.isArray(PALETTE))
+                    ? PALETTE.map(wsHex).filter(Boolean) : [];
+            }
+            // What a writer may store: a palette hex (any case) -> canonical,
+            // null / '' / 'none' -> no colour, anything else -> undefined.
+            function wsPickColor(c) {
+                if (c === null || c === '' || c === 'none') return null;
+                const h = wsHex(c);
+                return (h && wsPalette().indexOf(h) !== -1) ? h : undefined;
+            }
+            function setWorkspaceColorById(id, color) {
+                const ws = wsList().find(w => w.id === id);
+                const c = wsPickColor(color);
+                if (!ws || c === undefined) return false;
+                if (c === null) delete ws.color; else ws.color = c;
+                savePrefs();
+                renderWorkspaces();
+                applyTaskbarWorkspace();
+                return true;
+            }
+            // None + one swatch row per palette colour, a check on the
+            // current one. The hex is the row's text, so colour is not the
+            // only cue here either.
+            function openColorMenu(current, x, y, pick) {
+                const items = [{ label: (current ? '   ' : '\u2713 ') + 'None', enabled: true,
+                                 action: () => pick(null) }];
+                for (const c of wsPalette()) {
+                    items.push({ label: (c === current ? '\u2713 ' : '   ') + c, enabled: true,
+                                 swatch: { color: c }, action: () => pick(c) });
+                }
+                renderMenu(items, x, y);
             }
             async function renameWorkspace(i) {
                 const ws = wsList()[i];

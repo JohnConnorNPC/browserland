@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 48
+EXPECTED_ASSERTS = 52
 
 _PRELUDE = r"""
 'use strict';
@@ -802,6 +802,45 @@ async function dragging() {
 }
 """
 
+_SCENARIOS += r"""
+async function colours() {
+    // ---- CL: a workspace's colour, from the palette -------------------------
+    function openMenu(w, wsId) {
+        const d = w.dots().filter(function (x) { return x.dataset.wsId === wsId; })[0];
+        if (!d) return null;
+        fire(d, 'contextmenu', { clientX: 10, clientY: 20 });
+        return w.lastMenu();
+    }
+    function act(it) { if (it && it.enabled && it.action) return it.action(); }
+    let w = buildWorld();
+    let m = openMenu(w, 'W2');
+    act(w.item(m, /^Colour…$/));
+    let pal = w.lastMenu();
+    const rows = (pal && pal !== m) ? pal.items : [];
+    const swatches = rows.filter(function (it) { return it.swatch; });
+    ok(!!m && rows.length === PALETTE.length + 1 && /^✓ None$/.test(rows[0].label)
+        && !rows[0].swatch && J(swatches.map(function (it) { return it.swatch.color; })) === J(PALETTE)
+        && swatches.every(function (it) { return it.label.trim() === it.swatch.color; }),
+        'CL1 Colour… opens None plus one labelled swatch row per palette colour, None checked');
+
+    const s0 = w.spies.save;
+    act(w.item(pal, new RegExp(PALETTE[2])));
+    const d2 = w.dots().filter(function (x) { return x.dataset.wsId === 'W2'; })[0];
+    ok(w.st().list[1].color === PALETTE[2] && w.spies.save === s0 + 1 && !!d2
+        && d2.classList.contains('tinted'),
+        'CL2 picking a colour stores it, saves once and tints the dot');
+
+    m = openMenu(w, 'W2');
+    act(w.item(m, /^Colour…$/));
+    pal = w.lastMenu();
+    const checked = pal ? pal.items.filter(function (it) { return /^✓ /.test(it.label); }) : [];
+    ok(checked.length === 1 && checked[0].label === '✓ ' + PALETTE[2],
+        'CL4 the palette menu checks the current colour');
+    act(w.item(pal, /None$/));
+    ok(!('color' in w.st().list[1]), 'CL3 None removes the colour');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -812,6 +851,7 @@ _EPILOGUE = r"""
     await moving();
     await wsMenu();
     await dragging();
+    await colours();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -957,6 +997,13 @@ def test_pager_drag(scenario_run):
     _ok(scenario_run, "DR5 a workspace removed during the drag is not moved and nothing is saved")
     _ok(scenario_run, "DR6 a workspace stacked during the drag is not moved on its own")
     _ok(scenario_run, "DR7 the drop side comes from the dot under a child span, and a foreign drag is ignored")
+
+
+def test_colour(scenario_run):
+    _ok(scenario_run, "CL1 Colour… opens None plus one labelled swatch row per palette colour, None checked")
+    _ok(scenario_run, "CL2 picking a colour stores it, saves once and tints the dot")
+    _ok(scenario_run, "CL4 the palette menu checks the current colour")
+    _ok(scenario_run, "CL3 None removes the colour")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):
