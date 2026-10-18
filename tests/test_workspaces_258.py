@@ -492,15 +492,18 @@ async function heal() {
         && w.spies.save === 1,
         'H2 bad colours are dropped, hex is canonicalised, and the heal saves once');
 
+    // Two workspaces share the dangling id, so only the membership prune
+    // (not the one-member dissolve) can clear it.
     w = buildWorld({ list: [
-        { id: 'W1', focusedCol: 0, stack: 'GONE' },
+        { id: 'W1', focusedCol: 0, stack: 'GONE' }, { id: 'W4', focusedCol: 0, stack: 'GONE' },
         { id: 'W2', focusedCol: 0, stack: 'S1' }, { id: 'W3', focusedCol: 0, stack: 'S1' }],
         stacks: [null, 5, { id: '' }, { id: 'S1', name: '  ops  ', color: 'blue' },
                  { id: 'S1', name: 'dup' }, { id: 'W1' }] });
     const s5 = w.st();
-    ok(s5.list.length === 3 && Array.isArray(s5.stacks)
+    ok(s5.list.length === 4 && Array.isArray(s5.stacks)
         && J(s5.stacks) === J([{ id: 'S1', name: 'ops' }])
-        && s5.list[0].stack === undefined && s5.list[1].stack === 'S1'
+        && s5.list[0].stack === undefined && s5.list[1].stack === undefined
+        && s5.list[2].stack === 'S1'
         && w.spies.save === 1,
         'H5 garbage, duplicate and workspace-id stack rows and a dangling membership are healed');
     w = buildWorld({ stacks: 'junk' });
