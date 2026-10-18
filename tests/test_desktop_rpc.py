@@ -44,7 +44,7 @@ MARKER = "// ---- desktop relay (#244)"
 
 # Every ok() the scenario script makes; pinned so a scenario silently dropped
 # from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 54
+EXPECTED_ASSERTS = 67
 
 _HARNESS = r"""
 'use strict';
@@ -65,7 +65,8 @@ function ok(cond, label) {
 // mutator a recorder. state.deactivated flips mid-await through the getter,
 // pushState sits behind a manual gate so the flush-before-reply ORDER is
 // observable, and _execModCommand answers from a scriptable queue.
-const state = { deactivated: false };
+const state = { deactivated: false, tiling: true, detached: false,
+                openHusk: false, forcePlace: null };
 let homeId = 'local';
 let L = null;
 const windows = new Map();
@@ -77,6 +78,9 @@ let execNext = null;
 let pushCalls = 0;
 let pushResolve = null;
 let pushImmediate = true;
+// #262: every openWindow call, by key (the open itself is observed as the
+// windows map growing; this log says how often and for which key).
+let openCalls = [];
 
 function findKeyInLayout(key) {
     for (let ci = 0; ci < L.columns.length; ci++) {
@@ -114,6 +118,8 @@ function resetWorld() {
     for (const k of Object.keys(prefsObj)) delete prefsObj[k];
     mut.length = 0; execCalls = []; execNext = null;
     pushCalls = 0; pushImmediate = true; state.deactivated = false;
+    state.tiling = true; state.detached = false; state.openHusk = false;
+    state.forcePlace = null; openCalls = [];
     mk('local:7', null, { title: 'agent 7' });
     mk('local:9', null, { title: 'agent 9' });
     mk('local:12', { tiled: false,
@@ -141,6 +147,28 @@ function rearmPush(immediate) {
     pushPromise = new Promise(function (res) { pushResolve = res; });
 }
 rearmPush(true);
+// openWindow as the page does it, reduced to placement: a key already in a
+// column opens tiled there; otherwise the global mode (or forcePlace)
+// decides, and a tiled window gets a column of its own. openHusk models an
+// open that built no live window.
+function openWindowStub(key, sess) {
+    openCalls.push(key);
+    if (state.openHusk) return;
+    const inL = !!findKeyInLayout(key);
+    let tiled = inL || state.tiling;
+    if (state.forcePlace === 'float') tiled = false;
+    if (state.forcePlace === 'tile') tiled = true;
+    mk(key, { tiled: tiled }, null);
+    if (tiled && !inL) {
+        L.columns.push({ id: 'n-' + key, widthPreset: '1/2', rows: [
+            { height: 1, keys: [key], mode: 'single' } ] });
+    }
+}
+function opens(key) {
+    let n = 0;
+    for (const k of openCalls) if (k === key) n++;
+    return n;
+}
 function _execModCommand(op, args) {
     execCalls.push({ op: op, args: args });
     return typeof execNext === 'function' ? execNext(op, args) : execNext;
@@ -186,6 +214,11 @@ const env = {
     tabWindowInto: rec('tabWindowInto', function () {}),
     splitAtWindow: rec('splitAtWindow', function () {}),
     window: { innerWidth: 1920, innerHeight: 1040 },
+    // #262: open-on-demand.
+    prefs: prefsObj,
+    openWindow: openWindowStub,
+    isTilingMode: function () { return state.tiling; },
+    isDetachedSurface: function () { return state.detached; },
 };
 Object.defineProperty(env, '_deactivated', {
     get: function () { return state.deactivated; },
@@ -588,6 +621,145 @@ function countMut(name) {
         'RL4 the snapshot carries the mod\'s stacks, and leaves the key out when the mod sent none');
     execNext = null;
 
+    // ---- O: #262 an op opens a chip-only window, then applies ------------
+    // A chip: in `sessions`, with no `windows` entry and no layout entry.
+    function chips() {
+        resetWorld();
+        sessions.set('local:30', { title: 'chip 30' });
+        sessions.set('local:31', { title: 'chip 31' });
+    }
+    const CHIP_OPS = [
+        ['focus', {}, true], ['tile', {}, true], ['float', {}, true],
+        ['set_geometry', { x: 5, y: 6, w: 300, h: 200 }, false],
+        ['move_column', { to: 'right' }, true],
+        ['set_width', { preset: '1/3' }, true],
+        ['tab_into', { target: 31 }, true],
+        ['split', { target: 31, axis: 'row' }, true],
+    ];
+    async function chipRun(visible) {
+        const good = [];
+        for (const c of CHIP_OPS) {
+            chips();
+            state.tiling = c[2];
+            const args = Object.assign({ id: 30, visible: visible }, c[1]);
+            const a = await drive('local', { rid: freshRid(), op: c[0], args: args });
+            const two = c[0] === 'tab_into' || c[0] === 'split';
+            if (a && a.ok === true && windows.has('local:30')
+                    && opens('local:30') === 1
+                    && (!two || (windows.has('local:31')
+                                 && opens('local:31') === 1))) good.push(c[0]);
+        }
+        return good.length;
+    }
+    ok(await chipRun(null) === CHIP_OPS.length,
+        'O1 every op on a chip-only window opens it once and applies (admin)');
+    ok(await chipRun([30, 31]) === CHIP_OPS.length,
+        'O2 a scoped caller arranges its own chip-only window (every op)');
+
+    chips();
+    L.columns[0].rows.push({ height: 0.2, keys: ['local:40'], mode: 'single' });
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 40, visible: null } });
+    const r40 = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 40, visible: null } });
+    ok(r && r.error === 'unknown_window' && r40 && r40.error === 'unknown_window'
+        && openCalls.length === 0 && !windows.has('local:40'),
+        'O3 a dormant layout key with no session is never opened');
+
+    chips();
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: [] } });
+    const rT = await drive('local', { rid: freshRid(), op: 'tab_into',
+        args: { id: 30, target: 31, visible: [30] } });
+    const rS = await drive('local', { rid: freshRid(), op: 'split',
+        args: { id: 30, target: 31, axis: 'row', visible: [30] } });
+    ok(r && r.error === 'unknown_window' && rT && rT.error === 'unknown_window'
+        && rS && rS.error === 'unknown_window' && openCalls.length === 0,
+        'O4 an out-of-scope id or target is refused and nothing is opened');
+    chips();
+    L.columns[0].rows.push({ height: 0.2, keys: ['local:41'], mode: 'single' });
+    sessions.set('local:41', { title: 'dormant 41' });
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 41, visible: [41] } });
+    ok(r && r.error === 'unknown_window' && openCalls.length === 0,
+        'O5 a chip whose layout column holds an invisible window is refused unopened');
+
+    chips();
+    const BAD = [
+        ['set_width', { preset: 'huge' }], ['split', { target: 31, axis: 'diag' }],
+        ['set_geometry', { x: 'a', y: 0, w: 1, h: 1 }], ['tab_into', { target: 30 }],
+        ['move_column', { to: 'up' }],
+    ];
+    let badOk = 0;
+    for (const c of BAD) {
+        state.tiling = c[0] !== 'set_geometry';
+        r = await drive('local', { rid: freshRid(), op: c[0],
+            args: Object.assign({ id: 30, visible: null }, c[1]) });
+        if (r && r.error === 'bad_args') badOk++;
+    }
+    ok(badOk === BAD.length && openCalls.length === 0,
+        'O6 a bad-args op on a chip answers bad_args and opens nothing');
+    chips();
+    state.tiling = false;
+    const prefsBefore = JSON.stringify(prefsObj);
+    const layoutBefore = JSON.stringify(L);
+    r = await drive('local', { rid: freshRid(), op: 'move_column',
+        args: { id: 30, to: 'right', visible: null } });
+    const rW = await drive('local', { rid: freshRid(), op: 'set_width',
+        args: { id: 30, preset: '1/3', visible: null } });
+    state.tiling = true;
+    const rG = await drive('local', { rid: freshRid(), op: 'set_geometry',
+        args: { id: 30, x: 1, y: 1, w: 9, h: 9, visible: null } });
+    ok(r && r.detail === 'not_tiled' && rW && rW.detail === 'not_tiled'
+        && rG && rG.detail === 'not_floating' && openCalls.length === 0
+        && JSON.stringify(prefsObj) === prefsBefore
+        && JSON.stringify(L) === layoutBefore,
+        'O7 a chip that would open the wrong way is refused unopened, prefs and layout untouched');
+
+    chips();
+    state.deactivated = true;
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 30, visible: null } });
+    state.deactivated = false;
+    ok(r && r.error === 'lost_lease' && openCalls.length === 0,
+        'O8 a deactivated browser opens nothing');
+    chips();
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 7, visible: null } });
+    ok(r && r.ok === true && openCalls.length === 0,
+        'O9 a live window is never opened again');
+    chips();
+    state.detached = true;
+    const rD = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: null } });
+    state.detached = false;
+    chips();
+    windows.set('local:30', { id: 'local:30', disposed: true, tiled: false });
+    r = await drive('local', { rid: freshRid(), op: 'focus',
+        args: { id: 30, visible: null } });
+    ok(rD && rD.error === 'unknown_window' && r && r.error === 'unknown_window'
+        && openCalls.length === 0,
+        'O10 the detached surface and a disposed husk never open');
+    chips();
+    windows.set('local:31', { id: 'local:31', disposed: true, tiled: false });
+    r = await drive('local', { rid: freshRid(), op: 'tab_into',
+        args: { id: 30, target: 31, visible: null } });
+    ok(r && r.error === 'unknown_window' && openCalls.length === 0,
+        'O11 tab_into checks BOTH windows can open before opening either');
+    chips();
+    state.openHusk = true;
+    r = await drive('local', { rid: freshRid(), op: 'tile',
+        args: { id: 30, visible: null } });
+    ok(r && r.error === 'unknown_window' && opens('local:30') === 1
+        && countMut('attachToStrip') === 0,
+        'O12 an open that builds no live window answers unknown_window');
+    chips();
+    state.forcePlace = 'float';
+    r = await drive('local', { rid: freshRid(), op: 'set_width',
+        args: { id: 30, preset: '1/3', visible: null } });
+    ok(r && r.detail === 'not_tiled' && countMut('setColumnPreset') === 0,
+        'O13 an open that placed the window otherwise is caught after the open');
+
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -804,6 +976,36 @@ def test_set_geometry_persists_the_applied_box(scenario_run):
     # window); the persisted pref and the reply must describe the box that
     # was actually applied, never the one that was asked for.
     _ok(scenario_run, "R1 set_geometry persists the box AS APPLIED, not as asked")
+
+
+# ---- #262: an op opens a chip-only window ----------------------------------------
+
+
+def test_262_an_op_opens_a_chip_only_window_then_applies(scenario_run):
+    # An MCP-launched window (or one the user closed) is only a taskbar chip:
+    # in `sessions`, no window. Every arrange op opens it first, exactly once,
+    # then applies -- for an admin and for a scoped caller that can see it.
+    _ok(scenario_run, "O1 every op on a chip-only window opens it once and applies (admin)")
+    _ok(scenario_run, "O2 a scoped caller arranges its own chip-only window (every op)")
+    _ok(scenario_run, "O9 a live window is never opened again")
+
+
+def test_262_the_open_follows_validation_and_the_gate(scenario_run):
+    # The open is the op's first mutator: a refused op opens nothing, and a
+    # key with no session to open it from is never opened at all.
+    _ok(scenario_run, "O3 a dormant layout key with no session is never opened")
+    _ok(scenario_run, "O4 an out-of-scope id or target is refused and nothing is opened")
+    _ok(scenario_run, "O5 a chip whose layout column holds an invisible window is refused unopened")
+    _ok(scenario_run, "O6 a bad-args op on a chip answers bad_args and opens nothing")
+    _ok(scenario_run, "O7 a chip that would open the wrong way is refused unopened, prefs and layout untouched")
+    _ok(scenario_run, "O8 a deactivated browser opens nothing")
+    _ok(scenario_run, "O10 the detached surface and a disposed husk never open")
+    _ok(scenario_run, "O11 tab_into checks BOTH windows can open before opening either")
+
+
+def test_262_an_open_that_misfires_is_caught(scenario_run):
+    _ok(scenario_run, "O12 an open that builds no live window answers unknown_window")
+    _ok(scenario_run, "O13 an open that placed the window otherwise is caught after the open")
 
 
 # ---- the catch-all ---------------------------------------------------------------

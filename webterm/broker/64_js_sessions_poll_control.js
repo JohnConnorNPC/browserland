@@ -1173,6 +1173,40 @@
                     || findKeyInLayout(key)) return key;
             return null;
         }
+        // #262: a key that is only a taskbar chip -- in `sessions` (an MCP
+        // launch, or a window the user closed) with no window -- can be
+        // opened by an op. Never a disposed husk, never a dormant layout key
+        // with no session to open it from, never on the detached surface.
+        function _desktopCanOpen(key) {
+            const win = windows.get(key);
+            if (win) return !win.disposed;
+            return sessions.has(key) && !isDetachedSurface();
+        }
+        // The live window for `key`, opening a chip the way a taskbar click
+        // does (openWindow). The open is the op's FIRST mutator: callers run
+        // it only after validation and the gate.
+        function _desktopOpenChip(key) {
+            let win = windows.get(key);
+            if (!win && _desktopCanOpen(key)) {
+                openWindow(key, sessions.get(key));
+                win = windows.get(key);
+            }
+            return (win && !win.disposed) ? win : null;
+        }
+        // Whether a chip would open tiled: openWindow's own decision
+        // (decideTiled with isKnownFloat), read without getPref and
+        // getOpenTerms, which create an empty entry, so an op refused
+        // before the open leaves prefs and the layout untouched.
+        function _desktopWouldTile(key) {
+            if (isDetachedSurface()) return false;
+            if (findKeyInLayout(key)) return true;
+            const open = getLayout().openTerms;
+            if (Array.isArray(open) && open.indexOf(key) !== -1) return false;
+            const role = prefs[key] ? prefs[key].tiled : undefined;
+            if (role === true) return true;
+            if (role === false) return false;
+            return isTilingMode();
+        }
         // A winKey's int id on THIS connection's broker, or null when the
         // key belongs to another namespace (app windows, other brokers).
         function _desktopIntId(hid, key) {
@@ -1355,39 +1389,57 @@
         // One core (non-workspaces) op. Pure dispatcher over the EXISTING
         // mutators: validates and gates BEFORE the first mutator call, and
         // the whole op is synchronous, so no /state adopt can interleave
-        // between validation and application.
+        // between validation and application. #262: a chip-only window
+        // (`chip`) is opened by _desktopOpenChip, which IS that first
+        // mutator, so it too runs only after validation and the gate (on the
+        // pre-open topology). An op that needs a tiled or floating window
+        // refuses a chip that would open the other way without opening it;
+        // a refusal after the open (a husk, or an open that placed it
+        // otherwise) leaves the window open.
         function desktopCoreOp(hid, op, args, visible) {
             const badArgs = function (detail) {
                 return { ok: false, error: 'bad_args', detail: detail };
             };
+            const unknown = function () {
+                return { ok: false, error: 'unknown_window' };
+            };
             const refuseGate = function (keys, singleOnly) {
                 if (!desktopVisibleGate(hid, visible, keys, singleOnly)) {
-                    return { ok: false, error: 'unknown_window' };
+                    return unknown();
                 }
                 return null;
             };
             const key = resolveDesktopWinKey(hid, args.id);
-            if (key === null) return { ok: false, error: 'unknown_window' };
+            if (key === null) return unknown();
             const win = windows.get(key);
             const live = (win && !win.disposed) ? win : null;
+            const chip = !live && _desktopCanOpen(key);
             if (op === 'focus') {
-                if (!live) return { ok: false, error: 'unknown_window' };
+                if (!live && !chip) return unknown();
                 // Focus arranges nothing: only the named window gates (N4) --
                 // refusing because an invisible sibling shares the column
                 // would be over-strict.
                 const g = refuseGate([key], true);
                 if (g) return g;
+                const w = live || _desktopOpenChip(key);
+                if (!w) return unknown();
                 revealAndFocusWindow(key);
                 return { ok: true, value: {
                     focused_column: getLayout().focusedCol,
-                    controlled: !!live.controlled,
+                    controlled: !!w.controlled,
                 } };
             }
             if (op === 'move_column') {
-                const loc = findKeyInLayout(key);
-                if (!loc) return badArgs('not_tiled');
+                if (chip) {
+                    if (args.to !== 'left' && args.to !== 'right'
+                            && !Number.isInteger(args.to)) return badArgs('to');
+                    if (!_desktopWouldTile(key)) return badArgs('not_tiled');
+                } else if (!findKeyInLayout(key)) return badArgs('not_tiled');
                 const g = refuseGate([key]);
                 if (g) return g;
+                if (chip && !_desktopOpenChip(key)) return unknown();
+                const loc = findKeyInLayout(key);
+                if (!loc) return badArgs('not_tiled');
                 if (args.to === 'left' || args.to === 'right') {
                     moveColumn(visibleColIndex(loc.col),
                                args.to === 'left' ? -1 : 1);
@@ -1403,48 +1455,63 @@
                 if (WIDTH_PRESETS.indexOf(args.preset) === -1) {
                     return badArgs('preset');
                 }
-                if (!live || !findKeyInLayout(key)) return badArgs('not_tiled');
+                if (chip) {
+                    if (!_desktopWouldTile(key)) return badArgs('not_tiled');
+                } else if (!live || !findKeyInLayout(key)) {
+                    return badArgs('not_tiled');
+                }
                 const g = refuseGate([key]);
                 if (g) return g;
-                setColumnPreset(live, args.preset);
+                const w = live || _desktopOpenChip(key);
+                if (!w) return unknown();
+                if (!findKeyInLayout(key)) return badArgs('not_tiled');
+                setColumnPreset(w, args.preset);
                 return { ok: true, value: { preset: args.preset } };
             }
             if (op === 'tile') {
-                if (!live) return { ok: false, error: 'unknown_window' };
+                if (!live && !chip) return unknown();
                 const g = refuseGate([key]);
                 if (g) return g;
-                attachToStrip(live);
+                const w = live || _desktopOpenChip(key);
+                if (!w) return unknown();
+                attachToStrip(w);
                 return { ok: true, value: { tiled: true } };
             }
             if (op === 'float') {
-                if (!live) return { ok: false, error: 'unknown_window' };
+                if (!live && !chip) return unknown();
                 const g = refuseGate([key]);
                 if (g) return g;
-                detachToFloat(live);
+                const w = live || _desktopOpenChip(key);
+                if (!w) return unknown();
+                detachToFloat(w);
                 return { ok: true, value: { tiled: false } };
             }
             if (op === 'set_geometry') {
-                if (!live) return { ok: false, error: 'unknown_window' };
-                if (live.tiled) return badArgs('not_floating');
+                if (!live && !chip) return unknown();
+                if (live && live.tiled) return badArgs('not_floating');
                 const num = function (v) {
                     return typeof v === 'number' && isFinite(v);
                 };
                 if (!num(args.x) || !num(args.y) || !num(args.w) || !num(args.h)) {
                     return badArgs('geometry');
                 }
+                if (chip && _desktopWouldTile(key)) return badArgs('not_floating');
                 const g = refuseGate([key]);
                 if (g) return g;
-                applyGeomToWindow(live, clampGeom({
+                const w = live || _desktopOpenChip(key);
+                if (!w) return unknown();
+                if (w.tiled) return badArgs('not_floating');
+                applyGeomToWindow(w, clampGeom({
                     left: args.x, top: args.y, width: args.w, height: args.h,
                 }));
                 // Persist the box AS APPLIED: a size-locked window keeps its
                 // locked w/h, and prefs/value must not claim otherwise.
-                const gm = currentFloatGeom(live);
-                live.geom = { left: gm.left, top: gm.top,
-                              width: gm.width, height: gm.height };
-                getPref(key).geom = Object.assign({}, live.geom);
+                const gm = currentFloatGeom(w);
+                w.geom = { left: gm.left, top: gm.top,
+                           width: gm.width, height: gm.height };
+                getPref(key).geom = Object.assign({}, w.geom);
                 savePrefs();
-                refitSoon(live);
+                refitSoon(w);
                 return { ok: true, value: { geometry: {
                     x: gm.left, y: gm.top, w: gm.width, h: gm.height,
                 } } };
@@ -1452,25 +1519,29 @@
             if (op === 'tab_into' || op === 'split') {
                 if (args.id === args.target) return badArgs('target');
                 const tkey = resolveDesktopWinKey(hid, args.target);
-                if (tkey === null) return { ok: false, error: 'unknown_window' };
-                const twin = windows.get(tkey);
-                if (!live || !twin || twin.disposed) {
-                    return { ok: false, error: 'unknown_window' };
-                }
+                if (tkey === null) return unknown();
+                const twin0 = windows.get(tkey);
+                const tlive = (twin0 && !twin0.disposed) ? twin0 : null;
+                // Both must be live or openable BEFORE either is opened.
+                if ((!live && !chip)
+                        || (!tlive && !_desktopCanOpen(tkey))) return unknown();
                 if (op === 'split' && args.axis !== 'row'
                         && args.axis !== 'column') return badArgs('axis');
                 // Gate on the PRE-op topology: both windows plus every
                 // window of the columns this op leaves or reshapes.
                 const g = refuseGate([key, tkey]);
                 if (g) return g;
+                const w = live || _desktopOpenChip(key);
+                const twin = tlive || _desktopOpenChip(tkey);
+                if (!w || !twin) return unknown();
                 if (op === 'tab_into') {
-                    tabWindowInto(live, twin);
+                    tabWindowInto(w, twin);
                 } else {
                     // The split mutators need the drag key IN the layout;
                     // floats attach first (the same handoff the UI drag
                     // makes). Validation above already ran, and attach +
                     // split are one sync block -- nothing can interleave.
-                    if (!findKeyInLayout(key)) attachToStrip(live);
+                    if (!findKeyInLayout(key)) attachToStrip(w);
                     if (!findKeyInLayout(tkey)) attachToStrip(twin);
                     splitAtWindow(key, tkey,
                                   args.axis === 'row' ? 'bottom' : 'right');
