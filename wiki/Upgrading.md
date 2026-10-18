@@ -133,7 +133,7 @@ Nothing, on either path:
   on one desktop; the pager, the nine workspace shortcuts and the
   workspace menu items go away. Your grouping is kept, not deleted: turn it back
   on and the workspaces return exactly as they were. The same is true of pinning
-  it off broker-wide (Control Panel -> Mods on this broker).
+  it off broker-wide (Control Panel → Advanced → **Mods on this broker**).
 
 Your keyboard bindings for `workspace-prev` / `workspace-next` /
 `workspace-1..5` are stored by action id and are untouched by any of this.
