@@ -12,7 +12,7 @@ name = "webterm"
 # literal -- tests/test_packaging.py pins both halves of that.
 dynamic = ["version"]
 description = "Self-contained web terminal: headless PTY agents + WebSocket broker (Browserland's web-terminal producer protocol)"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "websockets>=12",
     "sanic>=23",
@@ -25,9 +25,8 @@ pyte = ["pyte>=0.8"]
 # live-cwd tracking. It is best-effort everywhere: without it the agent still
 # destroys windows, but those views degrade (empty list / no badge / no cwd).
 procs = ["psutil>=5"]
-# The Browserland MCP server (webterm/mcptool/). `mcp` pulls in httpx. NOTE: the
-# `mcp` SDK requires Python >=3.10, while webterm core stays >=3.9 — so this is
-# an optional extra, not a core dependency.
+# The Browserland MCP server (webterm/mcptool/). `mcp` pulls in httpx, so it is
+# an optional extra, not a core dependency: core stays websockets + sanic.
 mcp = ["mcp>=1.2"]
 # The #252 peer proxy (/peer/<id>/...): its upstream HTTP client, and the
 # websockets asyncio client its sockets dial with (15+; core needs only 12).

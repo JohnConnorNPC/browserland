@@ -216,7 +216,7 @@ def test_codemirror_files_ship_in_the_wheel():
     is simply absent from an installed wheel -- and a source-tree test run would
     never notice.
 
-    Read as text rather than parsed: tomllib is 3.11+, and webterm supports 3.9.
+    Read as text rather than parsed: tomllib is 3.11+, and webterm supports 3.10.
     """
     pyproject = (Path(vendor.__file__).resolve().parents[2] / "pyproject.toml"
                  ).read_text(encoding="utf-8")

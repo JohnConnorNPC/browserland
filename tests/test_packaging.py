@@ -27,7 +27,7 @@ anything computed -- even to the same string -- and a wheel build starts
 IMPORTING webterm to get it, a silent change in what a build executes.
 
 pyproject is read as text rather than parsed: tomllib is 3.11+ and this package
-supports 3.9, so a parser would mean a new test dependency. To stay honest
+supports 3.10, so a parser would mean a new test dependency. To stay honest
 about table scoping anyway, ``_keys_in`` walks the file tracking the current
 ``[table]`` header and only reports keys from the table asked for -- a decoy
 ``version = "9.9.9"`` under some unrelated tool table is correctly ignored.
