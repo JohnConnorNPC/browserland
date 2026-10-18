@@ -2,9 +2,36 @@
         // Companion to the vertical row gutters: drag steals width between the
         // two adjacent columns, writing a custom col.widthFrac that overrides
         // the preset. Pair-sum stays constant so the rest of the strip is still.
+        // Only a FINITE positive widthFrac counts: columnPixelWidths sums the
+        // fractions, so one Infinity would turn every later column into NaN.
         function colCurrentFrac(col) {
-            return (typeof col.widthFrac === 'number' && col.widthFrac > 0)
+            return (Number.isFinite(col.widthFrac) && col.widthFrac > 0)
                 ? col.widthFrac : presetFraction(col.widthPreset);
+        }
+        // The (n-1) inter-column gutters are real 6px flex items, so the
+        // columns share what is left after them.
+        const STRIP_GUTTER_W = 6;   // keep in sync with .strip-col-gutter
+        function stripAvailWidth(stripW, n) {
+            return Math.max(1, stripW - Math.max(0, n - 1) * STRIP_GUTTER_W);
+        }
+        // Whole-pixel widths for the drawn columns, left to right, from their
+        // fractions of the available width. Each width is the step between two
+        // ROUNDED cumulative edges, so the widths sum to exactly
+        // round(availW * sum of fracs): presets that fill the screen (2x 1/2,
+        // 3x 1/3, 1/3+2/3) fill it to the pixel, and each width stays within
+        // 1px of its own share. Rounding each column alone put two .5 halves
+        // 1px past the strip's edge, so focusing either one scrolled it (#259).
+        function columnPixelWidths(fracs, stripW) {
+            const availW = stripAvailWidth(stripW, fracs.length);
+            const widths = [];
+            let sum = 0, prevEdge = 0;
+            for (const f of fracs) {
+                sum += f;
+                const edge = Math.round(sum * availW);
+                widths.push(edge - prevEdge);
+                prevEdge = edge;
+            }
+            return widths;
         }
         // Live-render predicate SHARED by relayoutStrip (below) and the workspace-
         // switcher preview (62): a stored layout key is "live" iff its window
