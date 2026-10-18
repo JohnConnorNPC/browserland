@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 101
+EXPECTED_ASSERTS = 102
 
 _PRELUDE = r"""
 'use strict';
@@ -1403,6 +1403,24 @@ async function dotClickById() {
 }
 """
 
+_SCENARIOS += r"""
+async function badgeColourCleared() {
+    // ---- CS7: clearing a colour clears the badge's --ws-color too ----------
+    const w = buildWorld({ list: [{ id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, color: '#e96d6d' },
+                                  { id: 'W3', focusedCol: 0 }] });
+    const chip = w.document.getElementById('taskbar-items').appendChild(new Node('div'));
+    chip.className = 'taskbar-item';
+    chip.dataset.sessionId = 'local:22';                  // column L2 lives on W2
+    w.render();
+    const badge = chip.querySelector('.ti-ws');
+    const had = !!badge && badge.style.getPropertyValue('--ws-color') === '#e96d6d';
+    delete w.st().list[1].color;                          // e.g. a peer chose None
+    w.render();
+    ok(had && !badge.classList.contains('tinted') && badge.style.getPropertyValue('--ws-color') === '',
+        'CS7 clearing a workspace\'s colour removes it from its taskbar badges');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1427,6 +1445,7 @@ _EPILOGUE = r"""
     await parityStack();
     await modOff();
     await dotClickById();
+    await badgeColourCleared();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1673,6 +1692,10 @@ def test_mod_off_and_on_keeps_order_colours_and_stacks(scenario_run):
 
 def test_pager_dot_click_resolves_by_id(scenario_run):
     _ok(scenario_run, "PD1 a dot built before a reorder switches to its own workspace when clicked after it")
+
+
+def test_badge_colour_is_cleared(scenario_run):
+    _ok(scenario_run, "CS7 clearing a workspace's colour removes it from its taskbar badges")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

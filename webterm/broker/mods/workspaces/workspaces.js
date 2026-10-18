@@ -1511,6 +1511,7 @@
                     // #258: the workspace's colour beside its name.
                     badge.classList.toggle('tinted', !!(ws && ws.color));
                     if (ws && ws.color) badge.style.setProperty('--ws-color', ws.color);
+                    else badge.style.removeProperty('--ws-color');
                     el.classList.toggle('ws-hidden', hideOther && wsi !== active);
                 });
                 reorderTaskbarItems();
