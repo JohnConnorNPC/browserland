@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 37
+EXPECTED_ASSERTS = 38
 
 _PRELUDE = r"""
 'use strict';
@@ -668,6 +668,12 @@ async function moving() {
     press(w, 'workspace-move-left');
     ok(ids(w) === 'W1,W4,W2,W3,W5', 'MV2 a plain workspace jumps over a whole stack');
 
+    w = buildWorld(seed('W2'));
+    press(w, 'workspace-move-right');
+    const l = w.st().list;
+    ok(ids(w) === 'W1,W3,W2,W4,W5' && l[1].stack === 'S1' && l[2].stack === 'S1',
+        'MV4 a stack member moves inside its stack');
+
     w = buildWorld(seed('W3'));
     s0 = w.spies.save;
     press(w, 'workspace-move-right');                  // last member: no further
@@ -813,6 +819,7 @@ def test_move(scenario_run):
     _ok(scenario_run, "KM1 the two move actions are registered")
     _ok(scenario_run, "MV1 move right swaps with the next workspace, stays current, saves once and repaints")
     _ok(scenario_run, "MV2 a plain workspace jumps over a whole stack")
+    _ok(scenario_run, "MV4 a stack member moves inside its stack")
     _ok(scenario_run, "MV5 a move past either end, or out of a stack, does nothing and saves nothing")
     _ok(scenario_run, "MV8 a moved workspace carries its own remembered focus")
 

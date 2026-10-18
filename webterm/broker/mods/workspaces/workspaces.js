@@ -723,8 +723,20 @@
                 return true;
             }
             // One step (dir -1 / +1): a pager entry passes its neighbouring
-            // ENTRY (a plain workspace jumps a whole stack).
+            // ENTRY (a plain workspace jumps a whole stack); a stack MEMBER
+            // ('w:' of a stacked workspace) swaps inside its stack.
             function moveEntry(key, dir) {
+                const st = wsStore();
+                const i = st.list.findIndex(function (w) { return 'w:' + w.id === key; });
+                if (i >= 0 && st.list[i].stack) {
+                    const j = i + dir;
+                    if (j < 0 || j >= st.list.length || st.list[j].stack !== st.list[i].stack) return false;
+                    const w = st.list[i];
+                    st.list[i] = st.list[j];
+                    st.list[j] = w;
+                    wsMoved();
+                    return true;
+                }
                 const es = wsPagerEntries();
                 const p = es.findIndex(function (e) { return e.key === key; });
                 if (p < 0 || p + dir < 0 || p + dir >= es.length) return false;
