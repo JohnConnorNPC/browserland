@@ -33,7 +33,7 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
-EXPECTED_ASSERTS = 77
+EXPECTED_ASSERTS = 83
 
 _PRELUDE = r"""
 'use strict';
@@ -1112,6 +1112,75 @@ async function stackDrag() {
 }
 """
 
+_SCENARIOS += r"""
+async function stackListKeys() {
+    // ---- SL5-SL9: the stack list from the keyboard ------------------------
+    function seed(active, lastId, hide) {
+        const s = { id: 'S1' };
+        if (lastId) s.lastId = lastId;
+        return { activeId: active, hidePager: !!hide, stacks: [s], list: [
+            { id: 'W1', focusedCol: 0 }, { id: 'W2', focusedCol: 0, stack: 'S1' },
+            { id: 'W3', focusedCol: 0, stack: 'S1' }, { id: 'W4', focusedCol: 0, stack: 'S1' },
+            { id: 'W5', focusedCol: 0 }] };
+    }
+    function focused(w) { const a = w.document.activeElement; return a && a.dataset ? a.dataset.wsId : null; }
+    let w = buildWorld(seed('W3'));
+    w.openList('S1');
+    const f1 = focused(w);
+    w = buildWorld(seed('W1', 'W4'));
+    w.openList('S1');
+    const f2 = focused(w);
+    w = buildWorld(seed('W1'));
+    w.openList('S1');
+    const f3 = focused(w);
+    ok(f1 === 'W3' && f2 === 'W4' && f3 === 'W2',
+        'SL5 focus starts on the current member, else the last-used one, else the first');
+
+    w = buildWorld(seed('W1'));
+    let pop = w.openList('S1');
+    const seen = [];
+    function key(k) {
+        const a = w.document.activeElement;
+        const ev = a ? fire(a, 'keydown', { key: k }) : null;
+        seen.push(focused(w) + (ev && ev.defaultPrevented ? '' : '!'));
+    }
+    key('ArrowDown'); key('ArrowDown'); key('ArrowDown'); key('ArrowUp'); key('Home'); key('End');
+    ok(!!pop && J(seen) === J(['W3', 'W4', 'W4', 'W3', 'W2', 'W4']),
+        'SL6 ArrowDown/ArrowUp/Home/End move between the rows and stop at the ends');
+
+    // SL7: Escape, a click outside or a rebuilt pager hands focus back.
+    let back = 0;
+    for (const why of ['escape', 'outside', 'anchor-gone']) {
+        w = buildWorld(seed('W1'));
+        const prev = w.document.body.appendChild(new Node('button'));
+        prev.focus();
+        pop = w.openList('S1');
+        const moved = focused(w) === 'W2';
+        if (pop) pop.close(why);
+        if (moved && w.document.activeElement === prev) back++;
+    }
+    ok(back === 3, 'SL7 closing the list without a pick returns focus to where it was');
+
+    w = buildWorld(seed('W1'));
+    const prev = w.document.body.appendChild(new Node('button'));
+    prev.focus();
+    pop = w.openList('S1');
+    const r = w.row(pop, 'W4');
+    if (r) fire(r, 'click');
+    ok(!!r && w.st().activeId === 'W4' && w.document.activeElement !== prev,
+        'SL8 a pick does not drag focus back to the old element');
+
+    w = buildWorld(seed('W1', null, true));
+    const pg = w.pager();
+    ok(!!pg && pg.style.display === 'none', 'SL9 precondition: the pager is hidden');
+    const stackDot = w.stackDot('S1');
+    if (stackDot) fire(stackDot, 'click');
+    pop = w.pops[w.pops.length - 1];
+    ok(!!pop && pop.open && pop.anchor === w.document.getElementById('taskbar'),
+        'SL9 with the pager hidden the list anchors to the taskbar');
+}
+"""
+
 _EPILOGUE = r"""
 (async function () {
     await baseline();
@@ -1128,6 +1197,7 @@ _EPILOGUE = r"""
     await stackList();
     await stackEntry();
     await stackDrag();
+    await stackListKeys();
     console.log(pass + ' passed, ' + fail + ' failed');
     process.exitCode = fail ? 1 : 0;
 })().catch(function (e) {
@@ -1326,6 +1396,15 @@ def test_stack_list(scenario_run):
 def test_drags_that_involve_a_stack(scenario_run):
     _ok(scenario_run, "DR3 dropping on a stack lands beside the whole stack, never inside it")
     _ok(scenario_run, "MV3 dragging a stack moves all its members as one block")
+
+
+def test_stack_list_keyboard_and_focus(scenario_run):
+    _ok(scenario_run, "SL5 focus starts on the current member, else the last-used one, else the first")
+    _ok(scenario_run, "SL6 ArrowDown/ArrowUp/Home/End move between the rows and stop at the ends")
+    _ok(scenario_run, "SL7 closing the list without a pick returns focus to where it was")
+    _ok(scenario_run, "SL8 a pick does not drag focus back to the old element")
+    _ok(scenario_run, "SL9 precondition: the pager is hidden")
+    _ok(scenario_run, "SL9 with the pager hidden the list anchors to the taskbar")
 
 
 def test_every_scenario_passed_and_node_exited_clean(scenario_run):

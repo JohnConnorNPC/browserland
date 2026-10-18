@@ -623,6 +623,8 @@
                 const box = document.createElement('div');
                 box.className = 'ws-stack-list';
                 const cur = activeWorkspaceId();
+                const back = document.activeElement;
+                let picked = false;
                 for (const m of e.members) {
                     const b = document.createElement('button');
                     b.type = 'button';
@@ -638,6 +640,7 @@
                     b.appendChild(lab);
                     const id = m.id;
                     b.addEventListener('click', () => {
+                        picked = true;
                         if (_wsStackPop) _wsStackPop.close();
                         const i = workspaceIndexById(id);
                         if (i >= 0) switchWorkspace(i);
@@ -650,10 +653,34 @@
                     });
                     box.appendChild(b);
                 }
-                const anchor = Array.prototype.find.call(pager.querySelectorAll('.ws-dot'),
-                    (d) => d.dataset.stackId === sid) || document.getElementById('taskbar');
-                _wsStackPop = ctx.popover.anchor(box, anchor, { placement: 'top', gap: 8,
-                    onClose: function () { _wsStackPop = null; } });
+                // The keyboard: arrows / Home / End move between rows, Enter
+                // and Space are the buttons' own, Escape is the popover's.
+                box.addEventListener('keydown', (ev) => {
+                    const rows = Array.prototype.slice.call(box.querySelectorAll('.wsl-row'));
+                    const at = rows.indexOf(document.activeElement);
+                    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: rows.length - 1 }[ev.key];
+                    if (to === undefined) return;
+                    ev.preventDefault();
+                    const r = rows[Math.max(0, Math.min(rows.length - 1, to))];
+                    if (r) r.focus();
+                });
+                // A number key can open this with the pager hidden: no dot to
+                // point at, so the taskbar is the anchor.
+                const dot = pager.style.display !== 'none' && Array.prototype.find.call(
+                    pager.querySelectorAll('.ws-dot'), (d) => d.dataset.stackId === sid);
+                _wsStackPop = ctx.popover.anchor(box, dot || document.getElementById('taskbar'), {
+                    placement: 'top', gap: 8,
+                    // Every close but a pick hands focus back (a pick's switch
+                    // focuses the window it lands on).
+                    onClose: function () {
+                        _wsStackPop = null;
+                        if (!picked && back && back.isConnected && typeof back.focus === 'function') back.focus();
+                    } });
+                // Focus starts on the member the stack stands for now.
+                const shown = wsStackShown(e);
+                const first = Array.prototype.find.call(box.querySelectorAll('.wsl-row'),
+                    (b) => b.dataset.wsId === shown.id);
+                if (first) first.focus();
             }
             // ---- workspace rename / remove / label-mode (tasks 18, 19) --------
             // #258: built for a workspace ID and every action re-resolves it
