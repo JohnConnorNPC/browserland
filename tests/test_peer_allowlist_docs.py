@@ -219,7 +219,7 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "browser that holds the peer's control lease",
                 "no browser on the peer the answer is no_active_browser",
                 "carries home: false",
-                "answers not_home",
+                "workspaces op through the peer entry answers not_home",
                 "delete the entry if you do not use that peer"):
             assert phrase in text, (rel, phrase)
 _RELAY_STATUS = {
