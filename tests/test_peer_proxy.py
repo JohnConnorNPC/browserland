@@ -1021,6 +1021,8 @@ async def test_the_hub_persists_no_peer_token(hub2, upstream, caplog):
             assert secret not in text, (secret, where)
     assert any(k.startswith("file ") for k in held), \
         "unmeasured: the hub wrote no file to scan"
+
+
 async def test_desktop_ops_reach_the_peers_relay(live, upstream):
     """#261: through /peer/<id> the desktop calls are the PEER's: the hub
     relays GET and POST /mcp/desktop with the peer's bearer and body, adds

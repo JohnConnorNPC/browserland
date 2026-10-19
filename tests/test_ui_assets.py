@@ -34318,6 +34318,8 @@ process.stdout.write(JSON.stringify({text: p.text}) + '\n');
         assert [s[0] for s in seen] == ["local"]
     finally:
         reset()
+
+
 def test_the_copy_click_asks_the_plan_and_copies_nothing_on_error():
     """#261: the click hands the whole decision to mcpCopyPlan with the
     serving broker's own peer read, shows its error before anything reaches

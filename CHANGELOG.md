@@ -43,18 +43,21 @@ again, unless they change a dependency file too.
   entry shows only the hub's own windows; each broker behind it (#252) needs an
   entry of its own, at `http://<hub>/peer/<id>` with that peer's own MCP token,
   and the docs now say so, with what each failure looks like. **Copy
-  .mcp.json** on the broker serving the page now writes those entries, one per
-  configured peer, with a placeholder where the peer's token goes: the page
-  never fetches a peer's token and the hub never stores one, and the MCP
-  server refuses a placeholder left in place before anything is sent. The MCP
-  server also explains the hub's relay refusals (`unknown_peer`,
-  `proxy_unavailable`, `peer_busy`, `peer_timeout`, `peer_unreachable`,
-  `not_relayed`, `peer_hop_refused`, `body_too_large`, `body_timeout`,
-  `bad_length`) in words that say what to do, and `mcp_disabled` /
-  `auth_required` through a hub say they are the peer's. A process-wide
-  `--scope` reaches the peer entries; the scope typed beside Copy goes on the
-  hub entry only. Once peer entries exist, `launch_terminal` needs `host=`.
-  See [`wiki/MCP-and-AI-Agents.md`](wiki/MCP-and-AI-Agents.md).
+  .mcp.json** has a new option, **Include peer entries** (off by default: the
+  file is unchanged), that on the broker serving the page adds one entry per
+  configured peer with a placeholder where the peer's token goes: Copy never
+  writes a peer's token, the hub never stores one, and the MCP server refuses
+  a placeholder left in place before anything is sent. The hub also refuses to
+  pass its own tokens to a peer (`hub_credential_refused`). The MCP server
+  explains the hub's relay refusals (`unknown_peer`, `proxy_unavailable`,
+  `peer_busy`, `peer_timeout`, `peer_unreachable`, `not_relayed`,
+  `peer_hop_refused`, `body_too_large`, `body_timeout`, `bad_length`) in words
+  that say who has to act; a paced `send_keys` refused partway says how many
+  keys were typed; and `mcp_disabled` / `auth_required` through a hub say they
+  are the peer's. A process-wide `--scope` reaches the peer entries; the scope
+  typed beside Copy goes on the hub entry only. Once peer entries exist,
+  `launch_terminal` needs `host=`. See
+  [`wiki/MCP-and-AI-Agents.md`](wiki/MCP-and-AI-Agents.md).
 
 - **Workspaces can be moved, coloured and stacked** (#258). Drag a pager dot to
   a new place, or use **Move left** / **Move right** in its menu (and two new

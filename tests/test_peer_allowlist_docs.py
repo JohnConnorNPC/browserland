@@ -128,7 +128,7 @@ def test_the_sockets_part_states_what_the_code_does():
     assert "4401 `ticket`" not in s and "4401 `revoked`" not in s
 
 
-# #261: the ten refusals the hub's MCP relay adds, as an agent's client
+# #261: the refusals the hub's MCP relay adds, as an agent's client
 # must be able to explain them. Spelled out here, not derived from the wiki
 # row, so deleting a code from both the wiki and the client table still fails.
 RELAY_CODES = {"unknown_peer", "proxy_unavailable", "peer_busy",
@@ -140,7 +140,7 @@ RELAY_CODES = {"unknown_peer", "proxy_unavailable", "peer_busy",
 def test_the_relay_code_set_is_texted_and_documented():
     """The section's documented codes, less the ones that are not new relay
     refusals (bad_ticket is the browser gate's; the other three already had
-    client texts), are exactly the ten, and each has a client text."""
+    client texts), are exactly RELAY_CODES, and each has a client text."""
     from webterm.mcptool.client import _ERROR_MESSAGES
     documented = set(re.findall(r"\b(?:4\d\d|5\d\d) `([a-z_]+)`",
                                 _section()))
@@ -149,6 +149,8 @@ def test_the_relay_code_set_is_texted_and_documented():
     assert relay == RELAY_CODES, sorted(relay ^ RELAY_CODES)
     missing = sorted(c for c in RELAY_CODES if c not in _ERROR_MESSAGES)
     assert not missing, f"no client text for {missing}"
+
+
 # #261: what the docs tell an agent about a hub and its peers. The sentences
 # are matched after joining wrapped lines and dropping code ticks.
 
@@ -216,12 +218,22 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "token_placeholder", "unknown_peer", "proxy_unavailable",
                 "peer_busy", "peer_hop_refused",
                 "launch_terminal needs host=",
+                "Include peer entries",
+                "off by default: unticked, the file is what it has always been",
+                "Peer entries come only from the hub's own tab",
+                "never hands its own credentials to a peer",
+                "hub_credential_refused",
+                "an older mcptool would send it as a bearer",
+                "2 of 5 keys sent",
+                "who has to act",
                 "browser that holds the peer's control lease",
                 "no browser on the peer the answer is no_active_browser",
                 "carries home: false",
                 "workspaces op through the peer entry answers not_home",
                 "delete the entry if you do not use that peer"):
             assert phrase in text, (rel, phrase)
+
+
 _RELAY_STATUS = {
     "unknown_peer": 404, "proxy_unavailable": 503, "peer_busy": 503,
     "peer_timeout": 504, "peer_unreachable": 502, "not_relayed": 404,
@@ -238,7 +250,7 @@ def _mcp_error_table():
 
 def test_every_relay_code_has_its_row_in_the_mcp_error_table():
     """#261: client.py names this table as its source of truth, so each of
-    the ten relay refusals has a row with its status, and a status the broker
+    relay refusal in RELAY_CODES has a row with its status, and a status the broker
     actually returns (not_relayed and peer_hop_refused get theirs from the
     classify table, so only their rows are pinned)."""
     assert set(_RELAY_STATUS) == RELAY_CODES

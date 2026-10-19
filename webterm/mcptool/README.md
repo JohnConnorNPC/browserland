@@ -193,24 +193,35 @@ browserland-mcp --hosts '[
   no part. A process-wide `--scope` (or `$BROWSERLAND_MCP_SCOPE`) is
   different: it reaches every entry that names no scope of its own, peer
   entries included.
-- **Control Panel → Access → MCP access → Copy .mcp.json** on the hub writes
-  these entries for you: one per peer, named `<hub>.<id>`, with the peer's
+- **Control Panel → Access → MCP access → Copy .mcp.json**, with *Include peer entries*
+  ticked (off by default: unticked, the file is what it has always been), on
+  the hub's own tab, writes these entries for you: one per peer, named
+  `local.<id>` (the file calls the serving broker `local`), with the peer's
   `peer_origin` and the placeholder `<paste this peer's MCP token>` where its
   token goes. Paste that peer's own token over it, or delete the entry if you
-  do not use that peer. The page never fetches a peer's token and the hub does
-  not store one; a placeholder left in place is refused before anything is sent
-  (`token_placeholder`, one row under `errors` in `list_terminals`). The scope
-  field writes the hub entry's scope only. With more than one host configured,
+  do not use that peer. Copy never writes a peer's token and the hub does not
+  store one; a placeholder left in place is refused before anything is sent
+  (`token_placeholder`, one row under `errors` in `list_terminals`); an older
+  mcptool would send it as a bearer, which is harmless but spends a hub dial.
+  Peer entries come only from the hub's own tab: on another host's tab the
+  option adds none, and the line under the button says so. The scope field
+  writes the hub entry's scope only. With more than one host configured,
   `launch_terminal` needs `host=` (`host_required` otherwise).
+- The hub never hands its own credentials to a peer: a call on a peer entry
+  whose bearer, or `X-Browserland-Mcp-Admin` header, is one of the hub's own
+  tokens (MCP, browser or admin) is refused with `hub_credential_refused`
+  (403) and nothing is forwarded. Put the peer's own MCP token in the entry.
 - When something is missing: a peer with no entry is simply absent.
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
   `"mcp": true` (one answer for both); `proxy_unavailable` (503) means the hub
   lacks the `proxy` extra; the peer's own `auth_required` / `mcp_disabled` is
-  that peer's token or MCP switch, not the hub's. Each message says what to do.
+  that peer's token or MCP switch, not the hub's. Each message says who has
+  to act: the hub's operator for `unknown_peer` and `proxy_unavailable`, the
+  owner of the MCP config for a placeholder.
 - The hub relays at most 2 calls per peer (8 in all), a pool of its own that
   cannot take a browser window's slot. A `read_screen` that waits holds one for
   up to 15 s. Over the limit the hub answers `peer_busy` at once: the call is
-  not sent and never queued, so retry when another call finishes.
+  not sent and never queued, so retry when another call finishes. A `send_keys` paced over several keys that is refused partway says how many keys were typed (`2 of 5 keys sent`): resume from the next key, never the whole call.
 - One hop only: a broker behind a peer is not reachable through the hub
   (`peer_hop_refused`).
 - Desktop tools: `get_desktop` and `arrange_window` on a peer entry go to the

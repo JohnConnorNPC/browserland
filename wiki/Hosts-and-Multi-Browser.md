@@ -88,8 +88,8 @@ token on if the operator later points `b` elsewhere; without it, re-pointing
 `b` re-points that token too. That host entry's `scope` and `admin_token` are
 the other broker's, passed through unchanged; this broker's own MCP token,
 scopes and admin credential play no part. **Copy .mcp.json** (Control Panel →
-Access → MCP access) on this broker writes one such entry per peer, with a
-placeholder where that peer's token goes. An MCP config with only this
+Access → MCP access) on this broker, with *Include peer entries* ticked,
+writes one such entry per peer, with a placeholder where that peer's token goes. An MCP config with only this
 broker's entry shows only this broker's own windows; a peer's windows appear
 once it has an entry with its own MCP token. See [[MCP-and-AI-Agents]].
 
