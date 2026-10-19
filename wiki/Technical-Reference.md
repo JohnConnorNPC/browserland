@@ -1516,8 +1516,18 @@ its first `hello`) is editable by its owner. `GET /mcp/info` answers
 | 404 | `unknown_peer` | through a broker's `/peer/<id>/mcp` prefix: no peer `<id>`, or it is not configured with `mcp: true` (#252) |
 | 503 | `proxy_unavailable` | through a broker's `/peer/<id>/mcp` prefix: that broker lacks the `proxy` extra (#252) |
 | 409 | `peer_origin_changed` | through a broker's `/peer/<id>/mcp` prefix: the mcptool host's `peer_origin` is not the address that broker now dials for the peer (#252) |
+| 503 | `peer_busy` | through a broker's `/peer/<id>/mcp` prefix: over the relay's own pool, 2 calls per peer within 8 (a waiting `read_screen` holds one for up to 15 s); the call is never sent and never queued (#252) |
+| 504 | `peer_timeout` | through a broker's `/peer/<id>/mcp` prefix: the peer did not answer within the relay's timeouts (#252) |
+| 502 | `peer_unreachable` | through a broker's `/peer/<id>/mcp` prefix: the broker could not reach the peer (#252) |
+| 404 | `not_relayed` | through a broker's `/peer/<id>/mcp` prefix: the path is not one of the relayed MCP routes (#252) |
+| 404 | `peer_hop_refused` | through a broker's `/peer/<id>/mcp` prefix: the path names another `/peer/` hop: one hop only (#252) |
+| 413 | `body_too_large` | through a broker's `/peer/<id>/mcp` prefix: the request body is over 1 MiB; refused before any dial (#252) |
+| 408 | `body_timeout` | through a broker's `/peer/<id>/mcp` prefix: the whole request body did not arrive within 5 s; refused before any dial (#252) |
+| 400 | `bad_length` | through a broker's `/peer/<id>/mcp` prefix: the request's `Content-Length` is not an integer; refused before any dial (#252) |
 | 502 | `desktop_op_failed` | the browser's desktop op raised |
 | 400 | `bad_op` / `bad_args` | `/mcp/desktop` op outside the allowlist / op arguments invalid |
+
+Raised by the `webterm.mcptool` client itself, never sent by a broker (its `status` is 0 and no request was made, or none was answered): `connection_error`, `scope_unsupported` (above) and `token_placeholder` (a hosts entry still holding the placeholder that Control Panel → Copy .mcp.json writes for a peer; nothing is sent until the peer's own token replaces it).
 
 ### Admin surface (browser `auth_token`-gated)
 

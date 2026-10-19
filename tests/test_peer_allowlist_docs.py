@@ -218,3 +218,42 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "launch_terminal needs host=",
                 "delete the entry if you do not use that peer"):
             assert phrase in text, (rel, phrase)
+_RELAY_STATUS = {
+    "unknown_peer": 404, "proxy_unavailable": 503, "peer_busy": 503,
+    "peer_timeout": 504, "peer_unreachable": 502, "not_relayed": 404,
+    "peer_hop_refused": 404, "body_too_large": 413, "body_timeout": 408,
+    "bad_length": 400}
+
+
+def _mcp_error_table():
+    text = (REPO / "wiki" / "Technical-Reference.md").read_text(
+        encoding="utf-8")
+    a = text.index("## MCP HTTP interface")
+    return text[a:text.index("### Admin surface", a)]
+
+
+def test_every_relay_code_has_its_row_in_the_mcp_error_table():
+    """#261: client.py names this table as its source of truth, so each of
+    the ten relay refusals has a row with its status, and a status the broker
+    actually returns (not_relayed and peer_hop_refused get theirs from the
+    classify table, so only their rows are pinned)."""
+    assert set(_RELAY_STATUS) == RELAY_CODES
+    table = _mcp_error_table()
+    code = ((REPO / "webterm" / "broker" / "app.py").read_text(
+        encoding="utf-8")
+        + (REPO / "webterm" / "broker" / "peers.py").read_text(
+            encoding="utf-8"))
+    for name, status in _RELAY_STATUS.items():
+        assert f"| {status} | `{name}` |" in table, name
+        if name not in ("not_relayed", "peer_hop_refused"):
+            assert re.search(rf'\b{status},\s*"{name}"', code), (name, status)
+
+
+def test_a_client_only_code_is_not_a_wire_row():
+    """token_placeholder is raised by the mcptool, never sent: it is listed
+    apart from the table's HTTP rows."""
+    table = _mcp_error_table()
+    assert "Raised by the `webterm.mcptool` client itself" in table
+    assert "`token_placeholder`" in table
+    rows = [ln for ln in table.splitlines() if ln.startswith("|")]
+    assert not [ln for ln in rows if "token_placeholder" in ln]
