@@ -879,3 +879,30 @@ async def test_a_peer_without_mcp_reads_the_enable_text(live, upstream):
     text = " ".join(str(err).split())
     assert 'Set "mcp": true on that peer' in text and "restart the hub" in text
     assert upstream.seen == []
+
+
+async def test_the_process_scope_crosses_the_hub_once(live, upstream):
+    """#261: a client built with the process-wide scope sends it on every
+    call to a peer entry, and the hub passes exactly one copy of it; an
+    unscoped client sends none. (A scoped client probes /mcp/info first, so
+    the fake sees two requests.)"""
+    import asyncio
+    upstream.routes["/mcp/info"] = lambda s: json_answer(
+        {"ok": True, "scope": "proc"})
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+
+    def call(scope):
+        c = _hub_client(live, "m", scope=scope)
+        try:
+            return c.list_terminals()
+        finally:
+            c.close()
+
+    loop = asyncio.get_running_loop()
+    assert await loop.run_in_executor(None, call, "proc") == []
+    assert [s.path for s in upstream.seen] == ["/mcp/info", "/mcp/terminals"]
+    assert [s.all(SCOPE_HEADER) for s in upstream.seen] == [["proc"], ["proc"]]
+    upstream.seen.clear()
+    assert await loop.run_in_executor(None, call, None) == []
+    assert [s.path for s in upstream.seen] == ["/mcp/terminals"]
+    assert upstream.seen[0].all(SCOPE_HEADER) == []

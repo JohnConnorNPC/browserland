@@ -3320,3 +3320,18 @@ def test_only_the_peers_own_codes_get_the_note():
         with pytest.raises(BrowserlandError) as ei:
             c.read_screen(1)
     assert "through a hub" not in str(ei.value)
+
+
+# ---- #261: the scope pair for a hub entry and its peer entries ---------------
+
+def test_a_peer_entry_takes_the_process_scope_not_the_hubs():
+    """An entry's own scope never reaches another entry; the process-wide
+    scope reaches every entry with none of its own, a /peer/<id> one too."""
+    from webterm.mcptool import __main__ as m
+    raw = _hosts_json({"name": "hub", "scope": "s1"},
+                      {"name": "hub.b", "url": "http://hub:4445/peer/b"})
+    with_proc = m._parse_hosts(raw, "proc")
+    assert [(h[0], h[3]) for h in with_proc] == [("hub", "s1"),
+                                                 ("hub.b", "proc")]
+    without = m._parse_hosts(raw, None)
+    assert [(h[0], h[3]) for h in without] == [("hub", "s1"), ("hub.b", None)]
