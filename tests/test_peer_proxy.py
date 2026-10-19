@@ -256,6 +256,57 @@ async def test_mcp_config_is_not_relayed_to_an_mcp_peer(live, upstream,
     assert upstream.seen == []
 
 
+async def test_a_route_listed_on_the_other_gate_is_not_relayed(live, upstream,
+                                                               monkeypatch):
+    """#260: the gate classify picks must equal the branch the prefix chose.
+    /mcp/config listed in BROWSER_ALLOW (the follow-up the Control Panel's MCP
+    section would want) would otherwise run the MCP branch -- B's MCP bearer
+    and no pairing -- on a route that is not MCP-gated. The refusal is
+    404 not_relayed, no dial, and it outranks the pairing rung (409) the
+    wrong branch would have shown. The reverse (an /info entry on MCP_ALLOW,
+    reached through the browser branch) is refused the same way."""
+    monkeypatch.setattr(peers, "BROWSER_ALLOW",
+                        peers.BROWSER_ALLOW | {("GET", "/mcp/config")})
+    r = await _get(live, "/peer/m/mcp/config", {
+        "Authorization": "Bearer " + B_MCP,
+        peers.PEER_ORIGIN_HEADER: "http://elsewhere.invalid"})
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "not_relayed"}
+    assert r.headers.get(peers.PEER_REFUSAL_HEADER) == "not_relayed"
+    assert upstream.seen == []
+
+    monkeypatch.setattr(peers, "MCP_ALLOW",
+                        peers.MCP_ALLOW | {("GET", "/info")})
+    r = await _get(live, "/peer/b/info", browser(upstream.origin))
+    assert r.status_code == 404, r.text
+    assert r.json() == {"ok": False, "error": "not_relayed"}
+    assert r.headers.get(peers.PEER_REFUSAL_HEADER) == "not_relayed"
+    assert upstream.seen == []
+
+
+def test_every_mcp_allow_route_is_mcp_gated_on_the_peer(tmp_path, monkeypatch):
+    """#260: the class M1 belongs to. MCP_ALLOW is the list of routes the hub
+    sends the peer's MCP token to, so each must be MCP-gated on the peer
+    itself: the browser token alone is 401, the MCP token is not. A browser-
+    realm route added to MCP_ALLOW (as /mcp/config was) fails here -- there
+    the browser token passes and the MCP token is the one refused."""
+    for var in ("WEB_TERMINAL_TOKEN", "WEB_TERMINAL_MCP_TOKEN",
+                "WEB_TERMINAL_MCP_ADMIN_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    app = _make_app(tmp_path, {}, mcp_enabled=True, mcp_token=B_MCP,
+                    mcp_state_path=str(tmp_path / "webterm_mcp.json"))
+    assert peers.MCP_ALLOW
+    for method, path in sorted(peers.MCP_ALLOW):
+        kw = {"json": {}} if method == "POST" else {}
+        call = getattr(app.test_client, method.lower())
+        _, browser_only = call(
+            path, headers=[("Authorization", "Bearer " + TEST_TOKEN)], **kw)
+        assert browser_only.status == 401, (method, path, browser_only.status)
+        _, with_mcp = call(
+            path, headers=[("Authorization", "Bearer " + B_MCP)], **kw)
+        assert with_mcp.status != 401, (method, path, with_mcp.status)
+
+
 async def test_mcp_gate_without_a_bearer_is_401(live, upstream):
     r = await _get(live, "/peer/m/mcp/terminals")
     assert r.status_code == 401

@@ -8998,11 +8998,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             refusal = _peer_browser_entry(request, peer)
             if refusal is not None:
                 return refusal
-        # is_mcp_path and classify decode `rest` the same way, so the table
-        # that matched always belongs to the gate already chosen.
+        # is_mcp_path and classify decode `rest` the same way, so for today's
+        # tables the gate classify picks equals the branch taken above. That
+        # is not left to the tables (#260): a route listed on the OTHER gate
+        # (say /mcp/config added to BROWSER_ALLOW) would otherwise run this
+        # branch's credential checks with the other gate's header policy.
         gate, path = peers.classify(request.method, rest)
         if gate is None:
             return _peer_refusal(gate_mcp, 404, path)
+        if (gate == peers.GATE_MCP) != gate_mcp:
+            return _peer_refusal(gate_mcp, 404, "not_relayed")
         if not gate_mcp:
             bearer, refusal = _peer_browser_pairing(request, peer)
             if refusal is not None:

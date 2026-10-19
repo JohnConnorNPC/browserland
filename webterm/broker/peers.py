@@ -261,11 +261,12 @@ def make_client():
 
 
 # ---- what may be relayed ----------------------------------------------------
-# Explicit (method, path) tables, research #252 S7 verbatim. Anything absent is
-# denied: no prefix matching, so `/mods/` cannot admit `/mods/install`. Never
-# here, by design: GET /, /help-corpus.json, /vendor/*, /mods/<id>/<gen>/*,
-# /mods/install|uninstall|rescan|installed, POST /restart, WS /browserland,
-# /state (GET/PUT), /status/fetch, OPTIONS, and (until phase 2) /ws, /control.
+# Explicit (method, path) tables, research #252 S7 minus GET/POST /mcp/config
+# (#260). Anything absent is denied: no prefix matching, so `/mods/` cannot
+# admit `/mods/install`. Never here, by design: GET /, /help-corpus.json,
+# /vendor/*, /mods/<id>/<gen>/*, /mods/install|uninstall|rescan|installed,
+# POST /restart, WS /browserland, /state (GET/PUT), /status/fetch, OPTIONS,
+# GET/POST /mcp/config, and (until phase 2) /ws, /control.
 
 #: The browser gate: A's browser token AND B's token in PEER_TOKEN_HEADER.
 BROWSER_ALLOW = frozenset(
@@ -295,8 +296,10 @@ MOD_STORE_METHODS = frozenset({"GET", "PUT"})
 #: ``/mcp/config`` is NOT here on purpose: on B it is a browser-realm route
 #: (B's browser token, never the MCP one), so offering it on this gate would
 #: send the MCP gate's bearer to a route that is not MCP-gated. It is not in
-#: BROWSER_ALLOW either (the prefix ``mcp/`` always picks the MCP gate), so
-#: it answers 404 ``not_relayed``.
+#: BROWSER_ALLOW either, so it answers 404 ``not_relayed``. (The prefix
+#: ``mcp/`` picks the MCP gate, and ``_peer_relay`` refuses a table entry
+#: that sits on the other gate, so listing it in BROWSER_ALLOW would not move
+#: it either.)
 MCP_ALLOW = frozenset(
     [("GET", p) for p in (
         "/mcp/info", "/mcp/terminals", "/mcp/profiles", "/mcp/desktop")]
