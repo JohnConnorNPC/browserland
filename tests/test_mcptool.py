@@ -3276,3 +3276,47 @@ def test_a_placeholder_host_is_listed_under_errors():
     assert [t["id"] for t in out["terminals"]] == ["local:1"]
     assert "paste that peer's own MCP token" in out["errors"]["local.b"]
     assert out["errors"] == again["errors"] and sent == []
+
+
+# ---- #261: mcp_disabled / auth_required through a hub are the peer's ------
+
+@pytest.mark.parametrize("code,status", [("mcp_disabled", 403),
+                                         ("auth_required", 401)])
+@pytest.mark.parametrize("base,peer", [
+    ("http://hub:4445/peer/b", "b"),
+    ("http://hub:4445/peer/b/", "b"),
+    ("http://hub:4445/peer/x_y-1", "x_y-1"),
+    ("http://hub:4445", None),
+    ("http://hub:4445/peer/b/extra", None),
+], ids=["peer", "peer-slash", "peer-id-chars", "direct", "extra-segment"])
+def test_peer_answered_codes_through_a_hub(code, status, base, peer):
+    from webterm.mcptool.client import _ERROR_MESSAGES
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": code})
+
+    with BrowserlandClient(base=base, token="t",
+                           transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+    msg = str(ei.value)
+    if peer is None:
+        # a direct host (or a path that is not a bare /peer/<id>): the text
+        # is byte-for-byte what it was
+        assert msg == f"{_ERROR_MESSAGES[code]} (HTTP {status})"
+    else:
+        assert msg.startswith(_ERROR_MESSAGES[code])
+        assert f"peer {peer!r} through a hub" in msg
+        assert "that peer's MCP access" in msg and "not the hub's" in msg
+        assert msg.endswith(f"(HTTP {status})")
+
+
+def test_only_the_peers_own_codes_get_the_note():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "unknown_or_off"})
+
+    with BrowserlandClient(base="http://hub:4445/peer/b", token="t",
+                           transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.read_screen(1)
+    assert "through a hub" not in str(ei.value)

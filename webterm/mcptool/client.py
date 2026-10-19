@@ -17,6 +17,7 @@ until ``/mcp/info`` has echoed that scope back (see
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -26,6 +27,18 @@ import httpx
 # in the broker (and sanic with it).
 from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
                         normalize_origin)
+
+#: #261: a hosts url that goes through a hub's relay: the id is the hub's
+#: PEER_ID_RE (a path with another segment after it does not match).
+_PEER_BASE_RE = re.compile(r"^.*/peer/([A-Za-z0-9_-]{1,64})$")
+
+#: #261: through a hub, mcp_disabled and auth_required are the PEER's answers
+#: (the relay forwards the call with the host's own token), so the generic
+#: text, which says "the broker", is completed with whose it is.
+_PEER_ANSWERED_NOTE = (
+    "This host reaches peer {peer!r} through a hub: this is that peer's MCP "
+    "access (enable it, and copy its token, in that peer's Control Panel "
+    "→ MCP access), not the hub's.")
 
 #: #261: the token Control Panel -> Copy .mcp.json writes into a peer's hosts
 #: entry (the hub has no MCP token of that peer's, and never fetches one). It
@@ -220,6 +233,12 @@ class BrowserlandClient:
                  admin_token: Optional[str] = None,
                  peer_origin: Optional[str] = None):
         self.base = base.rstrip("/")
+        #: #261: the peer id when this host's url ends in /peer/<id> (a host
+        #: reached through a hub's relay), else None. Only the two codes the
+        #: peer itself answers (mcp_disabled, auth_required) read differently
+        #: for it: see _PEER_ANSWERED_NOTE.
+        via = _PEER_BASE_RE.match(self.base)
+        self._via_peer = via.group(1) if via else None
         #: The scope this client declares (#232), or None. An empty string is
         #: unscoped, exactly as the broker reads an empty header.
         self.scope = scope or None
@@ -298,6 +317,12 @@ class BrowserlandClient:
             message = _ERROR_MESSAGES.get(code, f"Broker error: {code}")
             if code == "lost_lease" and parsed.get("dispatched") is False:
                 message = _LOST_LEASE_NOT_DISPATCHED
+            # getattr: tests/test_broker_roles.py calls this unbound with
+            # self=None, and that call must keep working.
+            via_peer = getattr(self, "_via_peer", None)
+            if via_peer and code in ("mcp_disabled", "auth_required"):
+                message = f"{message} " + _PEER_ANSWERED_NOTE.format(
+                    peer=via_peer)
             message = f"{message} (HTTP {r.status_code})"
             extra = _error_detail(parsed)
             if extra:
