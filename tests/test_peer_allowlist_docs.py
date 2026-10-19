@@ -302,6 +302,18 @@ def test_upgrading_and_the_changelog_say_a_peer_needs_its_own_token():
     log = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
     one_zero = log[log.index("## [1.0.0]"):log.index("## [0.8.0]")]
     assert "**A peer behind a hub needs its own MCP token** (#261)" in one_zero
+    # #260 review R5/R17: the round's entries sit under Security, and the
+    # S1 rationale does not claim a guessing oracle.
+    security = one_zero[one_zero.index("### Security"):]
+    for lead in ("**An unknown peer no longer tells a hub token from any "
+                 "other bearer** (#260)",
+                 "**`/peer/<id>/mcp/config` is not relayed** (#260)",
+                 "**`POST /mcp/launch` is refused while the broker "
+                 "restarts** (#260)"):
+        assert lead in security, lead
+        assert one_zero.count(lead) == 1, lead
+    assert "guessed token" not in one_zero
+    assert "after the hub's earlier refusals" in " ".join(security.split())
 
 
 def test_the_peer_proxy_section_says_a_shared_token_is_refused():

@@ -1448,6 +1448,7 @@ def test_the_docs_put_restarting_first_on_mcp_launch():
             / "Technical-Reference.md").read_text(encoding="utf-8")
     a = text.index("**`POST /mcp/launch`** —")
     para = " ".join(text[a:text.index("\n\n", a)].split())
+    assert "before the body is parsed" in para
     assert para.index("503 `restarting`") < para.index("403 `terminals_disabled`")
     assert para.index("403 `terminals_disabled`") < para.index(
         "403 `launch_disabled`")

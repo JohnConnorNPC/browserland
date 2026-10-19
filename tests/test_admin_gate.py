@@ -435,8 +435,15 @@ def test_the_docs_say_the_admin_token_does_not_cover_file_writes():
         assert _ROUTES_NOT_FILES in para, page
         assert "next boot" in para, page
         assert "not part of 1.0" in para, page
+        # R13: the scanner's rules are no barrier to a writer of mods_dir.
+        assert ("not a barrier against someone who can write `mods_dir`"
+                in para), page
     up = _wiki("Upgrading.md")
     a = up.index("## The admin token guards routes, not files (#191)")
     section = _flat(up[a:up.index("\n---", a)])
     assert _ROUTES_NOT_FILES in section
+    # R2: the pointer names the Technical-Reference section, not an anchor
+    # that does not resolve.
+    assert "[[Technical-Reference#mods-" not in section
+    assert "section of [[Technical-Reference]]" in section
     assert "next boot" in section and "not part of 1.0" in section
