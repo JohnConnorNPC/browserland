@@ -1741,6 +1741,18 @@ the page token only. They are
 deliberately **not** lease-gated: this is broker configuration, and the point is
 being able to administer a broker somebody else is using right now.
 
+**The admin token guards routes, not files.** The admin token does not stop a
+holder of the page token from writing files into `mods_dir` through `/file/*`:
+those routes are host-wide (no root confines them), carry no admin gate, and a
+broker that serves the UI scans `mods_dir` at its next boot and serves whatever
+validates there. That boot-time scan applies the same rules as `POST
+/mods/rescan` (including the `permissions` lint) and asks for no admin header.
+So with `admin_token` set, install, uninstall, rescan and the two policy writes
+still need the header, but a page-token holder can still get a package served
+after a restart by writing it into `mods_dir` directly. A check that refuses
+`/file/*` writes inside `mods_dir` is not part of 1.0; keep `mods_dir` as
+protected as the broker's own configuration.
+
 **A mod is not sandboxed.** It runs same-origin with the page's full authority
 and can reach `/file/*`, `/session/*`, `/state` and `/mcp/*` directly; `ctx`
 grants it nothing it lacks. So the trust event is the **token-gated install**,

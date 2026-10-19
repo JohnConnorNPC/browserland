@@ -378,3 +378,59 @@ def test_the_query_refusal_log_is_value_free(tmp_path, monkeypatch, caplog):
     assert not any(ADMIN in rec.getMessage() for rec in broker_records)
     assert any("rejected admin token in query string" in rec.getMessage()
                for rec in broker_records)
+
+
+# ---- #260: the admin credential guards routes, not files -----------------------
+#
+# A limit the docs now state (S2): /file/* is host-wide and carries no admin
+# gate, so a page-token holder can write inside mods_dir, and the next boot
+# adopts what validates. The behaviour test observes that limit (so a future
+# containment check turns it red and sends the docs back to be updated); the
+# docs test pins the sentence in the three places a reader looks.
+
+_ROUTES_NOT_FILES = ("does not stop a holder of the page token from writing "
+                     "files into `mods_dir` through `/file/*`")
+
+
+def _wiki(name):
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "wiki"
+            / name).read_text(encoding="utf-8")
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def _paragraph_after(text, lead):
+    a = text.index(lead)
+    b = text.find("\n\n", a)
+    return _flat(text[a:b if b != -1 else len(text)])
+
+
+def test_a_page_token_holder_can_still_write_into_mods_dir(tmp_path,
+                                                           monkeypatch):
+    """With admin_token set, /file/write into mods_dir needs only the page
+    token (the documented 1.0 limit). If this goes red, the containment check
+    landed: update Technical-Reference, Writing-a-Mod and Upgrading."""
+    app = _admin_app(tmp_path, monkeypatch)
+    target = tmp_path / "mods" / "x-probe"
+    target.mkdir(parents=True)
+    _, r = authed(app).post("/file/write", json={
+        "path": str(target / "hello.txt"), "content": "hi"})
+    assert r.status == 200 and r.json["ok"] is True, r.text
+    assert (target / "hello.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_the_docs_say_the_admin_token_does_not_cover_file_writes():
+    lead = "**The admin token guards routes, not files.**"
+    for page in ("Technical-Reference.md", "Writing-a-Mod.md"):
+        para = _paragraph_after(_wiki(page), lead)
+        assert _ROUTES_NOT_FILES in para, page
+        assert "next boot" in para, page
+        assert "not part of 1.0" in para, page
+    up = _wiki("Upgrading.md")
+    a = up.index("## The admin token guards routes, not files (#191)")
+    section = _flat(up[a:up.index("\n---", a)])
+    assert _ROUTES_NOT_FILES in section
+    assert "next boot" in section and "not part of 1.0" in section

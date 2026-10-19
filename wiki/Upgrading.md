@@ -154,6 +154,26 @@ status window, or put `"status_fetch_enabled": true` in that broker's
 
 ---
 
+## The admin token guards routes, not files (#191)
+
+**What changed.** Nothing in the code. 1.0 states a limit that was only implied
+before: the `admin_token` you can set in the broker's config makes install,
+uninstall, rescan and the two policy writes need the `X-Webterm-Admin` header,
+but it does not stop a holder of the page token from writing files into
+`mods_dir` through `/file/*`, and a broker that serves the UI scans `mods_dir`
+at its next boot and serves whatever validates there, with no admin header.
+
+**Does this affect me?** Only if you rely on `admin_token` to keep a page-token
+holder (or an installed mod) from getting code served. It keeps the install
+routes apart from the page token; it is not a boundary around `mods_dir`.
+
+**What to do.** Treat the page token as able to change what the next boot
+serves, and keep `mods_dir` as protected as the broker's config. A check that
+refuses `/file/*` writes inside `mods_dir` is not part of 1.0. See
+[[Technical-Reference#mods-browser-auth_token-gated-157-163-172]].
+
+---
+
 ## A mod package must declare what it uses (#193)
 
 **What changed.** Installing a mod checks its scripts against the
