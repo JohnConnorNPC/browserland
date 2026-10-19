@@ -27,6 +27,14 @@ import httpx
 from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
                         normalize_origin)
 
+#: #261: the token Control Panel -> Copy .mcp.json writes into a peer's hosts
+#: entry (the hub has no MCP token of that peer's, and never fetches one). It
+#: is a RESERVED string, not a credential: a client built with it refuses
+#: every call before any request is made (see BrowserlandClient._send). A
+#: broker would accept any string as its own MCP token, so the guarantee is
+#: this client's, not the string's.
+PEER_TOKEN_PLACEHOLDER = "<paste this peer's MCP token>"
+
 # Broker error codes -> human-readable messages. Source of truth is the error
 # table in wiki/Technical-Reference.md ("MCP HTTP interface" error reference). Codes not
 # listed here fall back to the raw code so a new broker error is never swallowed.
@@ -113,6 +121,12 @@ _ERROR_MESSAGES = {
     "scope_unsupported": "The broker did not confirm this server's scope, so "
                          "its answers could include windows outside it; every "
                          "call to this host is refused.",
+    # Raised by this client, never sent by a broker: see _send. status 0.
+    "token_placeholder": "This host's token is still the placeholder that "
+                         "Copy .mcp.json writes for a peer. Nothing was sent: "
+                         "paste that peer's own MCP token (never the hub's) "
+                         "over it in the hosts entry and restart this server, "
+                         "or delete the entry if you do not use that peer.",
     # #245: the admin credential's error surface.
     "admin_required": "The broker did not accept this server's admin "
                       "credential. While the broker has an admin token, a "
@@ -181,7 +195,9 @@ def _error_detail(body: Optional[Dict[str, Any]]) -> str:
 class BrowserlandError(RuntimeError):
     """A broker ``/mcp/*`` call failed.
 
-    ``status`` is the HTTP status code; ``code`` is the broker's ``error`` value
+    ``status`` is the HTTP status code (0 when this client refused or could
+    not make the request: ``connection_error``, ``scope_unsupported``,
+    ``token_placeholder``); ``code`` is the broker's ``error`` value
     (e.g. ``"read_only"``), or ``None`` when the body had no parseable error.
     """
 
@@ -232,6 +248,9 @@ class BrowserlandClient:
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
         self._read_timeout = read_timeout
+        # #261: kept as a flag, not the token, so a repr or debug dump of this
+        # client never carries the credential.
+        self._placeholder = token == PEER_TOKEN_PLACEHOLDER
         headers = {"Authorization": f"Bearer {token}"}
         if self.scope:
             headers[SCOPE_HEADER] = self.scope
@@ -313,6 +332,12 @@ class BrowserlandClient:
         # (code is None: what a proxy answers while the broker behind it
         # restarts). An answer with a code came from a broker that is still
         # there, and keeps them.
+        if self._placeholder:
+            # #261: every request goes through here, so none can carry the
+            # Copy .mcp.json placeholder as a bearer.
+            raise BrowserlandError(
+                0, "token_placeholder",
+                f"{_ERROR_MESSAGES['token_placeholder']} Host {self.name!r}.")
         try:
             r = self._client.request(method, self.base + path,
                                      json=json_body, timeout=timeout)

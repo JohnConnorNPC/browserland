@@ -3202,3 +3202,77 @@ def test_the_relay_texts_state_the_hubs_numbers():
         _ERROR_MESSAGES["body_too_large"]
     assert f"within {peers.PEER_MCP_BODY_DEADLINE_S:g} s" in \
         _ERROR_MESSAGES["body_timeout"]
+
+
+# ---- #261: the Copy .mcp.json placeholder is never sent --------------------
+
+def _placeholder_client(**kw):
+    from webterm.mcptool.client import PEER_TOKEN_PLACEHOLDER
+    sent = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        sent.append(req)
+        return httpx.Response(200, json=[])
+
+    c = BrowserlandClient(base="http://hub:4445/peer/b",
+                          token=PEER_TOKEN_PLACEHOLDER, name="local.b",
+                          transport=httpx.MockTransport(handler), **kw)
+    return c, sent
+
+
+def test_the_placeholder_never_leaves_the_client():
+    """Every public path and the low-level sender refuse before a request is
+    built: the recorder sees nothing, whatever the call."""
+    c, sent = _placeholder_client(scope="s1")        # scoped: probes first
+    calls = [lambda: c.list_terminals(), lambda: c.read_screen(1),
+             lambda: c.capabilities(), lambda: c.list_profiles(),
+             lambda: c._send("GET", "/mcp/info"),
+             lambda: c._request("GET", "/mcp/terminals")]
+    for call in calls:
+        with pytest.raises(BrowserlandError) as ei:
+            call()
+        assert ei.value.code == "token_placeholder" and ei.value.status == 0
+        assert "HTTP" not in str(ei.value)
+        assert "local.b" in str(ei.value)
+    c.close()
+    assert sent == []
+
+
+def test_a_real_token_is_not_refused():
+    from webterm.mcptool.client import PEER_TOKEN_PLACEHOLDER
+    sent = []
+
+    def handler(req):
+        sent.append(req.headers["authorization"])
+        return httpx.Response(200, json=[])
+
+    with BrowserlandClient(base="http://hub:4445/peer/b",
+                           token=PEER_TOKEN_PLACEHOLDER + " ",
+                           transport=httpx.MockTransport(handler)) as c:
+        c.list_terminals()
+    assert sent == ["Bearer " + PEER_TOKEN_PLACEHOLDER + " "]
+
+
+def test_the_placeholder_is_not_kept_on_the_client():
+    from webterm.mcptool.client import PEER_TOKEN_PLACEHOLDER
+    c, _ = _placeholder_client()
+    c.close()
+    assert not any(v == PEER_TOKEN_PLACEHOLDER for v in vars(c).values())
+
+
+def test_a_placeholder_host_is_listed_under_errors():
+    """The server keeps listing the hosts that work; the placeholder host is
+    one `errors` row carrying the text, on every call."""
+    server = _install({"local": lambda r: httpx.Response(200, json=[{"id": 1}]),
+                       "local.b": lambda r: httpx.Response(200, json=[])})
+    try:
+        c, sent = _placeholder_client()
+        server._clients["local.b"].close()
+        server._clients["local.b"] = c
+        out = server.list_terminals()
+        again = server.list_terminals()
+    finally:
+        _reset_server()
+    assert [t["id"] for t in out["terminals"]] == ["local:1"]
+    assert "paste that peer's own MCP token" in out["errors"]["local.b"]
+    assert out["errors"] == again["errors"] and sent == []
