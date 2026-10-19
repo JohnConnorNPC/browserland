@@ -3152,6 +3152,7 @@ _RELAY_TEXTS = [
     ("body_too_large", 413, "1 MiB"),
     ("body_timeout", 408, "5 s"),
     ("bad_length", 400, "Content-Length"),
+    ("hub_credential_refused", 403, "hub's own tokens"),
 ]
 
 

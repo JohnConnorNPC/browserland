@@ -8882,6 +8882,24 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return header[7:].strip() or None
         return None
 
+    def _is_hub_credential(request: Request, bearer: str) -> bool:
+        """#261: is the bearer (or the MCP admin header) one of THIS broker's
+        own tokens -- browser, MCP, MCP admin, broker admin? The relay's
+        bearer is the peer's token; a caller who sends the hub's instead (a
+        pasted wrong line in a .mcp.json) would hand it to the peer. Every
+        pair is compared in constant time and none short-circuits; the value
+        is never logged."""
+        mine = (app.ctx.auth_token, app.ctx.mcp_cfg.get("token"),
+                app.ctx.mcp_cfg.get("admin_token"), app.ctx.admin_token)
+        sent = [bearer] + list(request.headers.getall(MCP_ADMIN_HEADER, [])
+                               or [])
+        hit = False
+        for candidate in sent:
+            for token in mine:
+                if auth.token_matches(candidate, token):
+                    hit = True
+        return hit
+
     async def _read_capped_body(request: Request):
         """``(body, None)`` or ``(None, (status, error))``: a whole request
         body, read BEFORE a slot is taken, within peers.PEER_MCP_MAX_BODY and
@@ -8955,6 +8973,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 LOGGER.warning("rejected unauthenticated /peer mcp from %s",
                                request.ip)
                 return _peer_refusal(True, 401, "auth_required")
+            if _is_hub_credential(request, bearer):
+                # BEFORE the peer lookup: it says nothing about any peer, and
+                # nothing is forwarded or dialed. (#261)
+                LOGGER.warning("refused a hub credential as a /peer mcp "
+                               "bearer from %s", request.ip)
+                return _peer_refusal(True, 403, "hub_credential_refused")
             if peer is None or not peer["mcp"]:
                 return _peer_refusal(True, 404, "unknown_peer")
             if not app.ctx.peer_proxy:

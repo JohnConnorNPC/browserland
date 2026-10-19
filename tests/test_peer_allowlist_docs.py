@@ -85,7 +85,7 @@ def test_the_section_states_what_the_code_does():
                           "not_relayed", "peer_origin_changed", "bad_scope",
                           "peer_busy", "body_too_large", "bad_length",
                           "body_timeout", "peer_timeout", "peer_unreachable",
-                          "bad_ticket"}
+                          "bad_ticket", "hub_credential_refused"}
     for code_name in documented:
         assert f'"{code_name}"' in code, code_name
     # #260 review round 1: the name alone also matches app.py's WS close
@@ -134,7 +134,7 @@ def test_the_sockets_part_states_what_the_code_does():
 RELAY_CODES = {"unknown_peer", "proxy_unavailable", "peer_busy",
                "peer_timeout", "peer_unreachable", "not_relayed",
                "peer_hop_refused", "body_too_large", "body_timeout",
-               "bad_length"}
+               "bad_length", "hub_credential_refused"}
 
 
 def test_the_relay_code_set_is_texted_and_documented():
@@ -226,7 +226,7 @@ _RELAY_STATUS = {
     "unknown_peer": 404, "proxy_unavailable": 503, "peer_busy": 503,
     "peer_timeout": 504, "peer_unreachable": 502, "not_relayed": 404,
     "peer_hop_refused": 404, "body_too_large": 413, "body_timeout": 408,
-    "bad_length": 400}
+    "bad_length": 400, "hub_credential_refused": 403}
 
 
 def _mcp_error_table():

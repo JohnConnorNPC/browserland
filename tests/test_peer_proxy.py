@@ -1046,3 +1046,90 @@ async def test_desktop_ops_reach_the_peers_relay(live, upstream):
                for s in upstream.seen)
     assert json.loads(upstream.seen[1].body) == {"op": "focus",
                                                  "args": {"id": 3}}
+
+
+
+# ---- #261: the hub never hands its own credentials to a peer ------------------
+
+_HUB_TOKENS = {"browser": HUB_BROWSER, "mcp": HUB_MCP,
+               "mcp_admin": HUB_MCP_ADMIN, "admin": HUB_ADMIN}
+
+
+@pytest.mark.parametrize("which", sorted(_HUB_TOKENS))
+async def test_a_hub_token_as_the_peer_bearer_is_refused(hub2, upstream,
+                                                         caplog, which):
+    """Each kind of token the hub holds, sent where the peer's MCP token goes:
+    403 hub_credential_refused, nothing dialed, and no log line carries it."""
+    import logging
+    secret = _HUB_TOKENS[which]
+    client = _client()
+    with caplog.at_level(logging.DEBUG):
+        try:
+            r = await client.get(
+                hub2.url + "/peer/m/mcp/terminals",
+                headers={"Authorization": "Bearer " + secret})
+        finally:
+            await client.aclose()
+    assert r.status_code == 403, r.text
+    assert r.json() == {"error": "hub_credential_refused"}
+    assert r.headers.get(peers.PEER_REFUSAL_HEADER) == "hub_credential_refused"
+    assert upstream.seen == []
+    text = "\n".join(rec.getMessage() for rec in caplog.records)
+    for canary in HUB_CANARIES:
+        assert canary not in text
+
+
+async def test_the_hub_refuses_its_token_before_it_looks_the_peer_up(
+        hub2, upstream):
+    client = _client()
+    try:
+        r = await client.get(hub2.url + "/peer/nosuch/mcp/terminals",
+                             headers={"Authorization": "Bearer " + HUB_MCP})
+    finally:
+        await client.aclose()
+    assert r.status_code == 403 and upstream.seen == []
+
+
+async def test_a_hub_mcp_admin_in_the_admin_header_is_refused(hub2, upstream):
+    """The peer's own bearer with the HUB's MCP admin token in the admin
+    header is refused; the peer's own admin token in that header still
+    relays, so only the hub's tokens are turned back."""
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+    client = _client()
+    try:
+        bad = await client.get(
+            hub2.url + "/peer/m/mcp/terminals",
+            headers={"Authorization": "Bearer " + B_MCP,
+                     MCP_ADMIN_HEADER: HUB_MCP_ADMIN})
+        assert bad.status_code == 403 and upstream.seen == []
+        good = await client.get(
+            hub2.url + "/peer/m/mcp/terminals",
+            headers={"Authorization": "Bearer " + B_MCP,
+                     MCP_ADMIN_HEADER: B_MCP_ADMIN})
+    finally:
+        await client.aclose()
+    assert good.status_code == 200
+    assert upstream.seen[0].one(MCP_ADMIN_HEADER) == B_MCP_ADMIN
+
+
+async def test_the_agent_sees_the_refusal_text(hub2, upstream):
+    """Through the real client: the hub's MCP token pasted into a peer entry
+    reads as the client's text for the operator, and nothing reached B."""
+    import asyncio
+    from webterm.mcptool import BrowserlandError
+    from webterm.mcptool.client import _ERROR_MESSAGES
+
+    def call():
+        c = _hub_client(hub2, "m", token=HUB_MCP)
+        try:
+            return c.list_terminals()
+        except BrowserlandError as exc:
+            return exc
+        finally:
+            c.close()
+
+    err = await asyncio.get_running_loop().run_in_executor(None, call)
+    assert isinstance(err, BrowserlandError), err
+    assert (err.code, err.status) == ("hub_credential_refused", 403)
+    assert str(err) == _ERROR_MESSAGES["hub_credential_refused"] + " (HTTP 403)"
+    assert upstream.seen == []
