@@ -804,3 +804,78 @@ async def test_a_peer_cannot_send_this_brokers_401_marker(live, upstream,
     r = await _get(live, "/peer/b/sessions", browser(upstream.origin))
     assert r.status_code == 401
     assert peers.PEER_REFUSAL_HEADER not in r.headers
+
+
+# ---- #261: what an agent sees through a hub ------------------------------
+
+def _hub_client(live, peer, token=B_MCP, **kw):
+    from webterm.mcptool import BrowserlandClient
+    return BrowserlandClient(base=live.url + "/peer/" + peer, token=token, **kw)
+
+
+async def test_a_waiting_read_screen_fills_the_peers_two_dials(live, upstream):
+    """#261: two waiting read_screens hold both of a peer's MCP dials; a
+    third call is refused at once with the client's peer_busy text, is never
+    dialed and never queued, and the hub's pool drains when they finish."""
+    import asyncio
+    from webterm.mcptool import BrowserlandError
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    release = threading.Event()
+    upstream.routes["/mcp/read"] = lambda s: Answer(
+        200, [("Content-Type", "application/json")], b"{}", hold=release)
+
+    def read():
+        c = _hub_client(live, "m")
+        try:
+            return c.read_screen(1, wait_for_change="x", timeout_ms=15000)
+        except BrowserlandError as exc:
+            return exc
+        finally:
+            c.close()
+
+    loop = asyncio.get_running_loop()
+    held = [loop.run_in_executor(None, read) for _ in range(2)]
+    try:
+        for _ in range(200):
+            if upstream.hits("/mcp/read") >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert upstream.hits("/mcp/read") == 2
+        third = await loop.run_in_executor(None, read)
+        assert isinstance(third, BrowserlandError), third
+        assert (third.code, third.status) == ("peer_busy", 503)
+        assert str(third) == _ERROR_MESSAGES["peer_busy"] + " (HTTP 503)"
+        # the refused call never dialed, and nothing queued behind the two
+        assert upstream.hits("/mcp/read") == 2
+    finally:
+        release.set()
+    assert await asyncio.gather(*held) == [{}, {}]
+    for _ in range(40):
+        if not live.app.ctx.peer_mcp_cap._busy:
+            break
+        await asyncio.sleep(0.05)
+    assert live.app.ctx.peer_mcp_cap._busy == {}
+
+
+async def test_a_peer_without_mcp_reads_the_enable_text(live, upstream):
+    """#261: peer "b" is in the hub's /info but not set to mcp:true; a host
+    pointed at it (with a real token, not the Copy placeholder) is told how
+    to enable it, and nothing is dialed."""
+    import asyncio
+    from webterm.mcptool import BrowserlandError
+
+    def call():
+        c = _hub_client(live, "b", token="a-real-token")
+        try:
+            return c.list_terminals()
+        except BrowserlandError as exc:
+            return exc
+        finally:
+            c.close()
+
+    err = await asyncio.get_running_loop().run_in_executor(None, call)
+    assert isinstance(err, BrowserlandError), err
+    assert (err.code, err.status) == ("unknown_peer", 404)
+    text = " ".join(str(err).split())
+    assert 'Set "mcp": true on that peer' in text and "restart the hub" in text
+    assert upstream.seen == []
