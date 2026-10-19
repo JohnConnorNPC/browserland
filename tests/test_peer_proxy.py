@@ -241,6 +241,21 @@ async def test_mcp_gate_takes_bs_mcp_token_alone(live, upstream):
     assert seen.one(ADMIN_HEADER) is None
 
 
+@pytest.mark.parametrize("method", ["GET", "POST"])
+async def test_mcp_config_is_not_relayed_to_an_mcp_peer(live, upstream,
+                                                        method):
+    """#260: /mcp/config is a browser-realm route on B, so the MCP gate must
+    not carry B's MCP token to it. Both methods are refused here, with the
+    refusal marker, and B is never dialed."""
+    r = await _get(live, "/peer/m/mcp/config",
+                   {"Authorization": "Bearer " + B_MCP}, method=method,
+                   **({"json": {"enabled": True}} if method == "POST" else {}))
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "not_relayed"}
+    assert r.headers.get(peers.PEER_REFUSAL_HEADER) == "not_relayed"
+    assert upstream.seen == []
+
+
 async def test_mcp_gate_without_a_bearer_is_401(live, upstream):
     r = await _get(live, "/peer/m/mcp/terminals")
     assert r.status_code == 401

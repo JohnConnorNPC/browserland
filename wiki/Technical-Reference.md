@@ -532,12 +532,14 @@ Hosts row's mode control writes them (a registry import never does).
 
 | Method | Paths |
 |---|---|
-| GET | `/mcp/info`, `/mcp/terminals`, `/mcp/profiles`, `/mcp/desktop`, `/mcp/config` |
-| POST | `/mcp/read`, `/mcp/input`, `/mcp/reset`, `/mcp/flush`, `/mcp/pace`, `/mcp/launch`, `/mcp/window`, `/mcp/desktop`, `/mcp/config`, `/mcp/knobs` |
+| GET | `/mcp/info`, `/mcp/terminals`, `/mcp/profiles`, `/mcp/desktop` |
+| POST | `/mcp/read`, `/mcp/input`, `/mcp/reset`, `/mcp/flush`, `/mcp/pace`, `/mcp/launch`, `/mcp/window`, `/mcp/desktop`, `/mcp/knobs` |
 
 **Anything absent is denied** (exact match, no prefixes). Never relayed:
 `GET /`, `/help-corpus.json`, `/vendor/*`, `/mods/<id>/<gen>/*`,
-`/mods/install|uninstall|rescan|installed`, `POST /restart`,
+`/mods/install|uninstall|rescan|installed`, `GET`/`POST /mcp/config` (a
+browser-realm route on the peer, so the MCP gate's bearer never goes there; it
+answers 404 `not_relayed`), `POST /restart`,
 `WS /browserland`, `GET`/`PUT /state` and `/status/fetch` (`/ws` and
 `/control` cross as [sockets](#sockets)). A path naming another `/peer/` hop is refused
 (`peer_hop_refused`). `OPTIONS` is not routed on the prefix (405, never

@@ -45,9 +45,9 @@ S7_BROWSER = (
        "/mods/policy /profiles/config".split()])
 S7_MCP = (
     [("GET", p) for p in "/mcp/info /mcp/terminals /mcp/profiles "
-     "/mcp/desktop /mcp/config".split()]
+     "/mcp/desktop".split()]
     + [("POST", p) for p in "/mcp/read /mcp/input /mcp/reset /mcp/flush "
-       "/mcp/pace /mcp/launch /mcp/window /mcp/desktop /mcp/config "
+       "/mcp/pace /mcp/launch /mcp/window /mcp/desktop "
        "/mcp/knobs".split()])
 
 
@@ -55,7 +55,13 @@ def test_tables_are_the_design_verbatim():
     assert peers.BROWSER_ALLOW == frozenset(S7_BROWSER)
     assert len(peers.BROWSER_ALLOW) == 9 + 35
     assert peers.MCP_ALLOW == frozenset(S7_MCP)
-    assert len(peers.MCP_ALLOW) == 15
+    assert len(peers.MCP_ALLOW) == 13
+    # #260: /mcp/config is browser-realm on the peer; neither method may be
+    # offered on the MCP gate (nor on the browser gate).
+    assert ("GET", "/mcp/config") not in peers.MCP_ALLOW
+    assert ("POST", "/mcp/config") not in peers.MCP_ALLOW
+    assert ("GET", "/mcp/config") not in peers.BROWSER_ALLOW
+    assert ("POST", "/mcp/config") not in peers.BROWSER_ALLOW
 
 
 def test_mod_store_id_shape_is_the_brokers():
@@ -98,6 +104,13 @@ def test_classify_denies(method, rest):
 ])
 def test_hop_is_refused_before_the_table(rest):
     assert peers.classify("GET", rest) == (None, "peer_hop_refused")
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_mcp_config_is_not_relayed_on_either_gate(method):
+    """#260: the prefix still picks the MCP gate, and the table refuses."""
+    assert peers.is_mcp_path("mcp/config")
+    assert peers.classify(method, "mcp/config") == (None, "not_relayed")
 
 
 def test_mcp_gate_is_decided_on_the_decoded_segment():

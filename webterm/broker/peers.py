@@ -292,14 +292,17 @@ MOD_STORE_RE = re.compile(r"/mod-store/([a-z0-9][a-z0-9-]{0,63})")
 MOD_STORE_METHODS = frozenset({"GET", "PUT"})
 
 #: The MCP gate: B's MCP token alone, and only for a peer with ``mcp: true``.
+#: ``/mcp/config`` is NOT here on purpose: on B it is a browser-realm route
+#: (B's browser token, never the MCP one), so offering it on this gate would
+#: send the MCP gate's bearer to a route that is not MCP-gated. It is not in
+#: BROWSER_ALLOW either (the prefix ``mcp/`` always picks the MCP gate), so
+#: it answers 404 ``not_relayed``.
 MCP_ALLOW = frozenset(
     [("GET", p) for p in (
-        "/mcp/info", "/mcp/terminals", "/mcp/profiles", "/mcp/desktop",
-        "/mcp/config")]
+        "/mcp/info", "/mcp/terminals", "/mcp/profiles", "/mcp/desktop")]
     + [("POST", p) for p in (
         "/mcp/read", "/mcp/input", "/mcp/reset", "/mcp/flush", "/mcp/pace",
-        "/mcp/launch", "/mcp/window", "/mcp/desktop", "/mcp/config",
-        "/mcp/knobs")])
+        "/mcp/launch", "/mcp/window", "/mcp/desktop", "/mcp/knobs")])
 
 GATE_BROWSER = "browser"
 GATE_MCP = "mcp"
