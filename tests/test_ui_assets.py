@@ -34277,3 +34277,46 @@ process.stdout.write(JSON.stringify({text: p.text}) + '\n');
         assert [s[0] for s in seen] == ["local"]
     finally:
         reset()
+def test_the_copy_click_asks_the_plan_and_copies_nothing_on_error():
+    """#261: the click hands the whole decision to mcpCopyPlan with the
+    serving broker's own peer read, shows its error before anything reaches
+    the clipboard, and fetches nothing for a peer (it has no peer token to
+    fetch and the hub must never hold one)."""
+    cp = _src237("81_js_control_panel.js")
+    click = cp[cp.index("setMcpCopyJson.addEventListener('click', () => {"):]
+    click = click[:click.index("\n            });\n")]
+    assert "const plan = mcpCopyPlan({" in click
+    assert "isLocal: host.id === 'local'," in click
+    assert "info: localPeersKnown()," in click
+    assert "const text = plan.text;" in click
+    err = click[click.index("if (plan.error) {"):click.index("const text = plan.text;")]
+    assert "setMcpCopyErr.textContent = plan.error;" in err
+    assert "setMcpCopyErr.classList.add('show');" in err
+    assert re.search(r"\n\s+return;\n\s+}\s*$", err), "the error must return"
+    assert "copyTextToClipboard" not in err
+    assert click.index("if (plan.error) {") < click.index("copyTextToClipboard(text)")
+    for banned in ("hostFetch", "/peer/", "/mcp/config", "fetch("):
+        assert banned not in click, banned
+
+
+def test_the_copy_hint_explains_peer_entries():
+    """#261: the hint names the peer entries, the placeholder, that the scope
+    is the broker's entry only, the launch_terminal consequence and what a
+    hub-only config shows."""
+    import html
+    body = _src237("40_body.html")
+    mcp = body[body.index('<div class="set-title">MCP access</div>'):]
+    mcp = mcp[:mcp.index("<!-- #157:")]
+    hint = mcp[mcp.index("Copy .mcp.json puts"):]
+    hint = hint[:hint.index("</div>")]
+    hint = html.unescape(re.sub(r"\s+", " ", re.sub(r"</?code>", "", hint)))
+    for words in ("also lists each of its peers (/peer/<id>)",
+                  "named local.<id>",
+                  "with a placeholder where the token goes",
+                  "paste that peer's own MCP token",
+                  "delete the entry if you do not use that peer",
+                  "applies to this broker's entry only",
+                  "unscoped unless you add one",
+                  "launch_terminal needs a host",
+                  "shows only this broker's own windows"):
+        assert words in hint, f"the hint must say {words!r}"

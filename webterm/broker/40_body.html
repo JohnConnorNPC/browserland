@@ -343,7 +343,16 @@
                         git — with Admin checked it contains the admin token too.
                         Its <code>command</code>, <code>PYTHONPATH</code> and
                         <code>url</code> are this broker's own; edit them for a client
-                        on another machine.</div>
+                        on another machine. For the broker serving this page the file
+                        also lists each of its peers (<code>/peer/&lt;id&gt;</code>),
+                        named <code>local.&lt;id&gt;</code>, with a placeholder where
+                        the token goes: paste that peer's own MCP token over it, or
+                        delete the entry if you do not use that peer. The scope above
+                        applies to this broker's entry only; peer entries are
+                        unscoped unless you add one. Once peer entries exist,
+                        <code>launch_terminal</code> needs a <code>host</code>. An MCP
+                        config with only this broker's entry shows only this broker's
+                        own windows.</div>
                 </div>
                 <!-- #157: the mods THIS TAB'S BROKER serves, and the on/off it
                      pins for every browser that loads its page. Deliberately a

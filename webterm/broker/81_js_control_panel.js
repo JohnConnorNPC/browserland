@@ -936,7 +936,13 @@
                     setMcpCopyErr.classList.add('show');
                     return;
                 }
-                const text = buildMcpJson({
+                // #261: for the broker serving this page the file also
+                // carries its peers (from the /info read the Hosts list
+                // already makes); mcpCopyPlan decides, and an error is shown
+                // here with nothing copied.
+                const plan = mcpCopyPlan({
+                    isLocal: host.id === 'local',
+                    info: localPeersKnown(),
                     name: mcpJsonHostName(host),
                     url: host.id === 'local' ? cfg.local_url
                         : String(host.url || '').replace(/\/+$/, ''),
@@ -946,6 +952,14 @@
                     python: cfg.python,
                     pythonpath: cfg.pythonpath,
                 });
+                if (plan.error) {
+                    setMcpCopyErr.textContent = plan.error;
+                    setMcpCopyErr.classList.add('show');
+                    // the answer may just be late: ask again for the next click
+                    try { localPeers().catch(() => {}); } catch (_) {}
+                    return;
+                }
+                const text = plan.text;
                 // Called inside the click itself: the legacy execCommand path
                 // needs the gesture.
                 copyTextToClipboard(text).then(ok => {
