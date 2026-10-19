@@ -1136,3 +1136,72 @@ async def test_the_agent_sees_the_refusal_text(hub2, upstream):
     assert (err.code, err.status) == ("hub_credential_refused", 403)
     assert str(err) == _ERROR_MESSAGES["hub_credential_refused"] + " (HTTP 403)"
     assert upstream.seen == []
+
+
+# ---- #261 review round 1 (S1): only an exact match is a hub credential --------
+
+_LOOKALIKES = {
+    "hub-plus-suffix": lambda t: t + "x",
+    "hub-minus-last": lambda t: t[:-1],
+    "prefix-plus-hub": lambda t: "x" + t,
+    "contains-hub": lambda t: "pre-" + t + "-post",
+}
+
+
+@pytest.mark.parametrize("variant", sorted(_LOOKALIKES))
+@pytest.mark.parametrize("which", sorted(_HUB_TOKENS))
+async def test_a_peer_token_that_only_resembles_a_hub_token_still_relays(
+        hub2, upstream, which, variant):
+    """A peer's own MCP token may share a prefix, a suffix or a whole hub
+    token inside it: only an exact match is the hub's credential."""
+    peer_token = _LOOKALIKES[variant](_HUB_TOKENS[which])
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+    client = _client()
+    try:
+        r = await client.get(hub2.url + "/peer/m/mcp/terminals",
+                             headers={"Authorization": "Bearer " + peer_token})
+    finally:
+        await client.aclose()
+    assert r.status_code == 200, (which, variant, r.text)
+    assert upstream.seen[0].one("Authorization") == "Bearer " + peer_token
+
+
+async def test_a_lookalike_in_the_admin_header_still_relays(hub2, upstream):
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+    client = _client()
+    try:
+        r = await client.get(
+            hub2.url + "/peer/m/mcp/terminals",
+            headers={"Authorization": "Bearer " + B_MCP,
+                     MCP_ADMIN_HEADER: HUB_MCP_ADMIN + "x"})
+    finally:
+        await client.aclose()
+    assert r.status_code == 200, r.text
+
+
+async def test_every_candidate_meets_every_hub_token_in_compare_digest(
+        hub2, upstream, monkeypatch):
+    """The compare is hmac.compare_digest (constant time), and a hit does not
+    stop the others: with the hub's MCP token as the bearer and its MCP admin
+    token in the admin header, all 2 x 4 pairs are compared."""
+    import hmac
+    calls = []
+    real = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+    monkeypatch.setattr(hmac, "compare_digest", spy)
+    client = _client()
+    try:
+        r = await client.get(
+            hub2.url + "/peer/m/mcp/terminals",
+            headers={"Authorization": "Bearer " + HUB_MCP,
+                     MCP_ADMIN_HEADER: HUB_MCP_ADMIN})
+    finally:
+        await client.aclose()
+    assert r.status_code == 403 and upstream.seen == []
+    for candidate in (HUB_MCP, HUB_MCP_ADMIN):
+        for token in _HUB_TOKENS.values():
+            assert (candidate.encode(), token.encode()) in calls, (
+                candidate[:8], token[:8])
