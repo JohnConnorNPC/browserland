@@ -3,27 +3,35 @@
 
 # Browserland
 
-**A remote control plane for every machine you own: install Browserland on
-each one, and a single browser tab becomes a desktop of live terminals across
-all of them — including the AI coding agents running inside.**
+**A desktop of live terminals in one browser tab — on this machine and on
+every machine you install it on, with the AI coding agents you run inside
+them.**
 
-Point a browser at one broker and you get a full windowed desktop of live
+Point a browser at one broker and you get a windowed desktop of live
 terminals: tile them, tab them, split them, and drag them across virtual
 desktops. Each terminal is a real PTY running on some machine, streamed to the
-browser over a WebSocket. Add your other machines as hosts (token-auth'd, e.g.
-over [Tailscale](https://tailscale.com/)) and their terminals appear in the
-same desktop — launch a shell on the laptop, the desktop, and the server from
-one **+** menu, side by side.
+browser over a WebSocket. Add your other machines as hosts (token-authenticated,
+e.g. over [Tailscale](https://tailscale.com/)) and their terminals appear in
+the same desktop — a shell on the laptop, the desktop, and the server from one
+**+** menu, side by side.
 
-The shells keep running even when no browser is attached. Close the tab, come
-back tomorrow, and the screen heals from a snapshot — exactly where you left it.
+The shells keep running when no browser is attached. Close the tab, come back
+tomorrow, and each terminal's screen heals from a snapshot.
 
-The name says it plainly: a whole little desktop — windows, terminals, and your
-fleet of AI coding agents — living entirely in a browser tab. (`webterm` is the
-Python package and module name.)
+Browserland also ships an **MCP server**, so an MCP client or AI harness can
+read and drive the same terminals — full-screen TUIs included — under
+per-window access modes you control.
 
-Browserland also exposes an **MCP server**, letting LLM harnesses drive the
-terminals directly — including full-screen TUIs.
+Browserland runs on Windows and Linux with Python 3.10 or newer. (`webterm` is
+the Python package and module name.)
+
+## Screenshots
+
+The desktop with tiled and floating terminals
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/135f7d46-617e-40f4-a195-f1ce43a625eb" />
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/db268062-9932-498c-9e55-1fab4ce50422" />
 
 ## What is this?
 
@@ -56,13 +64,86 @@ Because the PTY lives in the agent, not the browser, terminals survive browser
 reloads and even broker restarts — the agent reconnects with backoff and the
 browser's attach triggers a snapshot redraw from the ring buffer.
 
+## Quick start
+
+You need **Python ≥ 3.10**. Install from a checkout — on Windows take the
+`windows` extra, which adds the PTY backend (`pywinpty`) an agent needs there:
+
+```bash
+pip install -e .                 # Linux
+pip install -e ".[windows]"      # Windows
+```
+
+### Windows
+
+```powershell
+# broker (default 127.0.0.1:4445) — mints a token on first run and prints
+# the URL to open, token included
+python -m webterm.broker
+
+# the token again, any time (never mints one):
+python -m webterm.broker --print-token
+
+# an agent running cmd.exe, registered with the local broker
+python -m webterm.agent -- cmd.exe
+
+# then open the printed http://127.0.0.1:4445/?token=... and click the
+# session (or "new terminal")
+```
+
+### Linux
+
+```bash
+./launchers/run-broker.sh                  # broker
+./launchers/run-agent.sh -- bash -l        # agent
+```
+
+The launcher scripts bootstrap a virtualenv with the runtime dependencies on
+first run, so the `pip install` above is optional on Linux. The broker prints
+the URL to open, token included; `python -m webterm.broker --print-token`
+reprints it later. `run-agent.sh` picks the token up from `webterm_token.json`
+automatically, so a hand-started agent on the same box needs no setup.
+
+### Extras
+
+```bash
+pip install -e .                       # core: broker + agent
+pip install -e ".[windows]"            # + pywinpty (Windows PTY backend)
+pip install -e ".[pyte]"               # + pyte (screen rendering for snapshots and read_screen)
+pip install -e ".[procs]"              # + psutil (task manager, agent badge, live cwd)
+pip install -e ".[mcp]"                # + the stdio MCP server
+pip install -e ".[proxy]"              # + httpx, websockets 15 (the "from server" peer proxy, #252)
+pip install -e ".[dev]"                # + pytest for the test suite
+```
+
+Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. Every part, the `mcp`
+extra included, needs **Python ≥ 3.10**.
+
+`psutil` (the `procs` extra) is best-effort: it powers the **task-manager
+process list**, the **foreground-agent badge**, and **live-cwd tracking**.
+Without it the agent still runs and still destroys windows — those three views
+just degrade (empty list / no badge / no cwd).
+
+### Where next
+
+- **First session:** [Getting Started](wiki/Getting-Started.md) — the taskbar,
+  the **+** menu, and your first window.
+- **More than one machine:** [Setup & Onboarding](wiki/Setup-and-Onboarding.md)
+  — joining machines over Tailscale and running the broker unattended.
+- **Letting an AI harness drive terminals:**
+  [MCP & AI agent access](#mcp--ai-agent-access) below.
+- **What 1.0 supports, and what stays stable within 1.x:**
+  [What 1.0 promises](#what-10-promises) below.
+- **Upgrading an existing install:** [Upgrading](wiki/Upgrading.md) — the
+  breaking-change record.
+
 ## One tab, every machine
 
-The part people miss: Browserland is a **remote control plane**, not just a
-terminal for the machine it runs on. Run a broker on each of your machines,
-then register them as **hosts** in the UI (**Control Panel → Browser → Hosts** — a name,
-a URL, and that broker's token; a [Tailscale](https://tailscale.com/) address
-works great). One browser tab then fronts the whole fleet:
+Browserland is a **remote control plane**, not just a terminal for the machine
+it runs on. Run a broker on each of your machines, then register them as
+**hosts** in the UI (**Control Panel → Browser → Hosts** — a name, a URL, and
+that broker's token; a [Tailscale](https://tailscale.com/) address works). One
+browser tab then fronts the whole fleet:
 
 ```
                        one browser tab
@@ -101,15 +182,6 @@ works great). One browser tab then fronts the whole fleet:
 **[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)** walks through joining machines step by
 step.
 
-## Screenshots 
-
-The desktop with tiled and floating terminals
-
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/135f7d46-617e-40f4-a195-f1ce43a625eb" />
-
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/db268062-9932-498c-9e55-1fab4ce50422" />
-
-
 ## Features
 
 - **In-browser tiling window manager** (niri-style): floating *and* tiled
@@ -147,10 +219,10 @@ The desktop with tiled and floating terminals
   observe, drive, and launch terminals — including live interactive TUIs and the
   console you're working in — under per-window access modes you control.
   See **[MCP & AI agent access](#mcp--ai-agent-access)** below.
-- **Token auth, no open RCE**: one token gates **every** connection — every
-  route, every interface, loopback included — and doubles as the UI password.
-  Nothing to set up: a broker with no token configured mints one and prints the
-  URL to open. Launching is **profiles-only** (the client can never supply a raw
+- **Token auth on every connection**: one token gates **every** connection —
+  every route, every interface, loopback included — and doubles as the UI
+  password. A broker with no token configured mints one and prints the URL to
+  open. Launching is **profiles-only** (the client can never supply a raw
   command).
 - **Launch profiles you can edit in the UI**: add WSL/zsh/PowerShell shells from
   **Control Panel → (a host tab) → Terminals → Launch profiles** (one-click WSL-distro / shell **Detect…**),
@@ -226,7 +298,7 @@ is gated by the same per-window access modes and the master enable switch.
   apps (btop, htop, vim, less) — not just line-oriented scrollback — and
   `send_input` types into them. Without pyte the read falls back to a
   dependency-free in-house renderer that still returns a **bounded** rendered
-  grid (`degraded: true` is now reserved for a rare last-ditch raw decode).
+  grid (`degraded: true` is reserved for a rare last-ditch raw decode).
 - **The live session you're working in** — `list_terminals` enumerates running
   sessions (id, title, cwd, agent, kind, cols/rows, mode), so a harness can
   attach to the exact console a person is using right now, read its state, and
@@ -277,7 +349,7 @@ tagged for it and starts in `readwrite`; tag a hand-started one from its robot
 button or title-bar menu. **Control Panel → Access → MCP access → Copy
 .mcp.json** writes a ready-to-save client file for a scope. A scope is a
 convention, not security (every client holds the same token), and a window's
-scope and MCP mode now survive a broker restart. See
+scope and MCP mode survive a broker restart. See
 [wiki/MCP-and-AI-Agents.md](wiki/MCP-and-AI-Agents.md#scopes).
 
 > The `send_input` **tool** maps newlines in `data` to a carriage return — the
@@ -312,15 +384,8 @@ Access is layered and opt-in — nothing is reachable until you turn it on:
 
 ### Register with a harness
 
-```bash
-claude mcp add browserland \
-  --env BROWSERLAND_MCP_TOKEN=… \
-  --env BROWSERLAND_MCP_URL=http://127.0.0.1:4445 \
-  -- python -m webterm.mcptool
-```
-
-Any other **stdio** MCP client (Hermes, your own, …) registers the same way —
-point it at the launch command and pass the two env vars:
+Any **stdio** MCP client registers the same way: point it at the launch command
+and pass the two env vars. For a client that reads a JSON config:
 
 ```json
 {
@@ -335,6 +400,16 @@ point it at the launch command and pass the two env vars:
     }
   }
 }
+```
+
+For example, a client with an `mcp add` command takes the same two values on
+its command line:
+
+```bash
+claude mcp add browserland \
+  --env BROWSERLAND_MCP_TOKEN=… \
+  --env BROWSERLAND_MCP_URL=http://127.0.0.1:4445 \
+  -- python -m webterm.mcptool
 ```
 
 Or run the server directly, talking to the local broker:
@@ -360,68 +435,6 @@ Edge and Firefox. **Within 1.x:**
 
 A change that would break one of these three waits for 2.0. Details, and what
 is not covered: **[`wiki/Upgrading.md`](wiki/Upgrading.md#what-10-promises)**.
-
-## Quick start
-
-You need **Python ≥ 3.10**. Install from a checkout:
-
-```bash
-pip install -e .
-```
-
-### Windows
-
-```powershell
-# broker (default 127.0.0.1:4445) — mints a token on first run and prints
-# the URL to open, token included
-python -m webterm.broker
-
-# the token again, any time (never mints one):
-python -m webterm.broker --print-token
-
-# an agent running cmd.exe, registered with the local broker
-python -m webterm.agent -- cmd.exe
-
-# then open the printed http://127.0.0.1:4445/?token=... and click the
-# session (or "new terminal")
-```
-
-Windows agents also need a PTY backend: `pip install -e ".[windows]"` (pulls in
-`pywinpty`).
-
-### Linux
-
-```bash
-./launchers/run-broker.sh                  # broker
-./launchers/run-agent.sh -- bash -l        # agent
-```
-
-The launcher scripts bootstrap a virtualenv with the runtime dependencies on
-first run. The broker prints the URL to open, token included; `python -m
-webterm.broker --print-token` reprints it later. `run-agent.sh` picks the token
-up from `webterm_token.json` automatically, so a hand-started agent on the same
-box needs no setup.
-
-## Install & extras
-
-```bash
-pip install -e .                       # core: broker + agent
-pip install -e ".[windows]"            # + pywinpty (Windows PTY backend)
-pip install -e ".[pyte]"               # + pyte (tier-2 snapshot rendering)
-pip install -e ".[procs]"              # + psutil (task manager, agent badge, live cwd)
-pip install -e ".[mcp]"                # + the stdio MCP server
-pip install -e ".[proxy]"              # + httpx, websockets 15 (the "from server" peer proxy, #252)
-pip install -e ".[dev]"                # + pytest for the test suite
-```
-
-`psutil` (the `procs` extra) is best-effort: it powers the **task-manager
-process list**, the **foreground-agent badge**, and **live-cwd tracking**.
-Without it the agent still runs and still destroys windows — those three views
-just degrade (empty list / no badge / no cwd).
-
-Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. Every part, the `mcp`
-extra included, needs **Python ≥ 3.10**.
-See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 
 ## Project layout
 
@@ -450,12 +463,12 @@ too, behind **Include developer docs**.
 | **Multi-host & AI** | [Hosts & Multi-Browser](wiki/Hosts-and-Multi-Browser.md) · [MCP & AI Agents](wiki/MCP-and-AI-Agents.md) |
 | **For developers** | [Setup & Onboarding](wiki/Setup-and-Onboarding.md) · [Launch Profiles](wiki/Launch-Profiles.md) · [Writing a Mod](wiki/Writing-a-Mod.md) · [Technical Reference](wiki/Technical-Reference.md) · [Upgrading](wiki/Upgrading.md) |
 
-New here, or setting up more than one machine? Start with
-**[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)** — the onboarding guide: the broker / agent /
-browser mental model, joining machines over Tailscale via Control Panel → Browser → Hosts,
-what *not* to hand-edit, and running the broker unattended in the background
-(Windows Task Scheduler / Linux systemd). It's written to be followed by a human
-or a coding agent.
+Setting up more than one machine? **[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)**
+is the onboarding guide: the broker / agent / browser mental model, joining
+machines over Tailscale via Control Panel → Browser → Hosts, what *not* to
+hand-edit, and running the broker unattended in the background (Windows Task
+Scheduler / Linux systemd). It's written to be followed by a human or a coding
+agent.
 
 Upgrading an existing install? **[`wiki/Upgrading.md`](wiki/Upgrading.md)** is
 the breaking-change record — what changed, whether it affects you, and how to
