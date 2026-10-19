@@ -58,6 +58,10 @@ _ERROR_MESSAGES = {
     "mcp_disabled": "MCP interface is disabled on the broker "
                     "(enable it and set a token in Control Panel → MCP access).",
     "auth_required": "MCP token missing or invalid.",
+    # #260: a broker draining for a restart refuses new work (a launch).
+    "restarting": "The broker is restarting and is not accepting new work "
+                  "(such as a launch) right now; nothing was started. Retry "
+                  "in a few seconds, once it is back.",
     "peer_origin_changed": "The hub now publishes this peer at another "
                            "address than this host's peer_origin; check "
                            "peer_origin (and the hub's peers config).",

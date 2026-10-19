@@ -3486,6 +3486,24 @@ def test_a_dropped_connection_midway_is_not_called_not_sent():
 
 
 
+def test_restarting_has_its_own_text_and_says_to_retry():
+    """#260: a broker draining for a restart answers /mcp/launch with 503
+    `restarting` (plus its lifecycle); the agent gets advice, not the bare
+    fallback."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"ok": False, "error": "restarting",
+                                         "lifecycle": "quiescing"})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+    msg = str(ei.value)
+    assert ei.value.code == "restarting" and ei.value.status == 503
+    assert "Broker error:" not in msg
+    assert "is restarting" in msg and "Retry in a few seconds" in msg
+    assert "(HTTP 503)" in msg
+
+
 def test_the_hub_credential_text_says_to_give_the_peer_its_own_token():
     """#261 review: a peer that shares the hub's token is refused too, and the
     text names the fix."""
