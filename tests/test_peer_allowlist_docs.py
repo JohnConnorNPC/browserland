@@ -258,8 +258,8 @@ def _mcp_error_table():
 
 
 def test_every_relay_code_has_its_row_in_the_mcp_error_table():
-    """#261: client.py names this table as its source of truth, so each of
-    relay refusal in RELAY_CODES has a row with its status, and a status the broker
+    """#261: client.py names this table as its source of truth, so each
+    refusal in RELAY_CODES has a row with its status, and a status the broker
     actually returns (not_relayed and peer_hop_refused get theirs from the
     classify table, so only their rows are pinned)."""
     assert set(_RELAY_STATUS) == RELAY_CODES

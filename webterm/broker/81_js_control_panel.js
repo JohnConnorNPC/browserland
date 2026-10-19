@@ -53,9 +53,14 @@
             if (!modal) return null;   // markup missing — nothing to host
             // #261: Copy's peer entries read this broker's /info answer
             // synchronously (localPeersKnown); start that read as the panel
-            // opens, so the first click already has it. A failed read is
-            // asked again by the next caller.
-            try { localPeers().catch(() => {}); } catch (_) {}
+            // opens, so the first click already has it. It runs whatever the
+            // "Include peer entries" option says (one same-origin /info
+            // read; the Hosts list makes the same one). forgetLocalPeers
+            // drops the memo first, so each open reads the answer again
+            // instead of reusing one from earlier in the page's life; the
+            // answer already known stays readable until the new one lands.
+            // A failed read is asked again by the next caller.
+            try { forgetLocalPeers(); localPeers().catch(() => {}); } catch (_) {}
 
             const title = appData.title || 'Control Panel';
             const geom = clampGeom(appData.geom || controlPanelDefaultGeom());
@@ -786,12 +791,12 @@
         // peer's `peer_origin` and a PLACEHOLDER where that peer's MCP token
         // goes. Copy never writes a peer's token (a peer opened as a
         // from-server host loads its own for its own tab; none of it goes
-        // into this file) and never copies this broker's own onto a
-        // peer; a peer entry never gets the
-        // host's `scope` or `admin_token` either (the process-wide --scope
-        // still reaches it, in the mcptool). Returns null when the entries
-        // cannot be written as hosts the mcptool accepts (a repeated name,
-        // or a ':' in one). Without peers the output is what it always was.
+        // into this file) and never copies this broker's own onto a peer.
+        // A peer entry never gets the host's `scope` or `admin_token`
+        // either (the process-wide --scope still reaches it, in the
+        // mcptool). Returns null when the entries cannot be written as hosts
+        // the mcptool accepts (a repeated name, or a ':' in one). Without
+        // peers the output is what it always was.
         function buildMcpJson(o) {
             const host = { name: o.name, url: o.url, token: o.token };
             if (o.scope) host.scope = o.scope;

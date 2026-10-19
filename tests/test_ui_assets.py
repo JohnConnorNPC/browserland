@@ -34233,8 +34233,9 @@ def test_the_control_panel_opening_starts_the_peer_read():
     Panel window starts that read as it opens (observed on a fresh page in
     issue-261/live.md; this pins that the call is on the open path)."""
     fn = _fn237("81_js_control_panel.js", "function openControlPanelWindow(appData)")
-    assert "try { localPeers().catch(() => {}); } catch (_) {}" in fn
-    assert fn.index("localPeers()") > fn.index("if (!modal) return null;")
+    call = "try { forgetLocalPeers(); localPeers().catch(() => {}); } catch (_) {}"
+    assert call in fn
+    assert fn.index(call) > fn.index("if (!modal) return null;")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
