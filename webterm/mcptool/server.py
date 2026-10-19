@@ -645,20 +645,44 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
     return client.send_input(int_id, _newlines_to_enter(data))
 
 
+#: Codes whose refusal means the key never reached the terminal: the hub or
+#: the broker refused the request before acting on it. Every other failure
+#: (peer_timeout, peer_unreachable, connection_error, a 5xx with no code, ...)
+#: may have been typed already, so a paced send_keys must not promise "not
+#: sent" for it.
+_NOT_SENT_CODES = frozenset({
+    "peer_busy", "body_too_large", "body_timeout", "bad_length",
+    "not_relayed", "peer_hop_refused", "hub_credential_refused",
+    "proxy_unavailable", "unknown_peer", "peer_origin_changed",
+    "auth_required", "mcp_disabled", "bad_scope", "admin_required",
+    "scope_unsupported", "read_only", "unknown_or_off", "bad_id", "bad_data",
+    "too_large"})
+
+
 def _partial_send_error(exc: BrowserlandError, typed: int,
                         total: int) -> BrowserlandError:
-    """#261: a paced send_keys writes one POST per key, so a refusal on key
+    """#261: a paced send_keys writes one POST per key, so a failure on key
     k+1 (through a hub: peer_busy, body_timeout, ...) arrives after k keys
-    were typed. The refusal's own text speaks of ONE call ("not sent, retry");
-    the agent must be told how far the keys got, and to resume, not to send
-    the whole list again. Same code, status and body, so callers that branch
-    on them still can."""
+    were typed. The failure's own text speaks of ONE call ("not sent, retry");
+    the agent must be told how far the keys got, and not to send the whole
+    list again. Whether key k+1 itself arrived depends on the code: refused
+    before acting (_NOT_SENT_CODES) -> resume from it; anything else -> it may
+    or may not have been typed, so read the screen first. Same code, status
+    and body, so callers that branch on them still can."""
     k = typed + 1
+    if exc.code in _NOT_SENT_CODES:
+        verdict = (f"(key {k} was not sent). Resume from key {k}; do not "
+                   f"retry the whole call, or the first {typed} keys are "
+                   f"typed twice.")
+    else:
+        verdict = (f"(key {k} may or may not have been typed). Read the "
+                   f"screen (read_screen) before resuming from key {k} or "
+                   f"key {k + 1}; do not retry the whole call, or the first "
+                   f"{typed} keys are typed twice.")
     return BrowserlandError(
         exc.status, exc.code,
-        f"{typed} of {total} keys sent: send_keys stopped at key {k} (key {k} "
-        f"was not sent). Resume from key {k}; do not retry the whole call, or "
-        f"the first {typed} keys are typed twice. The refusal was: {exc}",
+        f"{typed} of {total} keys sent: send_keys stopped at key {k} "
+        f"{verdict} The refusal was: {exc}",
         exc.body)
 
 

@@ -3372,7 +3372,8 @@ def _paced_broker(refuse_on, code="peer_busy", status=503):
 
 @pytest.mark.parametrize("code,status", [("peer_busy", 503),
                                          ("body_timeout", 408),
-                                         ("peer_timeout", 504)])
+                                         ("body_too_large", 413),
+                                         ("hub_credential_refused", 403)])
 def test_a_paced_send_keys_refused_on_key_three_of_five(code, status):
     handler, posts = _paced_broker(3, code, status)
     server = _install({"h": handler})
@@ -3433,3 +3434,52 @@ def test_the_operator_texts_are_addressed_to_the_operator(code):
     assert ("not the agent" in text), code
     assert "ask the person who" in text or "ask them to" in text, code
     assert "Set " not in text and "Install it" not in text, code
+
+
+
+@pytest.mark.parametrize("code,status", [("peer_timeout", 504),
+                                         ("peer_unreachable", 502),
+                                         ("something_new", 500)])
+def test_a_paced_send_keys_that_may_have_arrived_does_not_say_not_sent(
+        code, status):
+    """peer_timeout and the like say the call may still have reached the
+    peer: key 3 may be typed already, so the text must not promise "not sent"
+    or say to resume from it; it says to read the screen first."""
+    handler, posts = _paced_broker(3, code, status)
+    server = _install({"h": handler})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_keys("h:7", ["a", "b", "c", "d", "e"], delay_ms=1)
+    finally:
+        _reset_server()
+    msg = " ".join(str(ei.value).split())
+    assert posts == ["a", "b", "c"]
+    assert (ei.value.code, ei.value.status) == (code, status)
+    assert "2 of 5 keys sent" in msg
+    assert "key 3 may or may not have been typed" in msg
+    assert "read_screen" in msg and "do not retry the whole call" in msg
+    assert "was not sent" not in msg and "Resume from key 3" not in msg
+
+
+def test_a_dropped_connection_midway_is_not_called_not_sent():
+    """No HTTP answer at all (connection_error, status 0) is the least certain
+    case: the keys already typed are counted, key 3 is not promised."""
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/mcp/input":
+            calls.append(1)
+            if len(calls) == 3:
+                raise httpx.ConnectError("gone", request=req)
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json=[{"id": 7, "pace_ms": 0}])
+    server = _install({"h": handler})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_keys("h:7", ["a", "b", "c", "d", "e"], delay_ms=1)
+    finally:
+        _reset_server()
+    msg = " ".join(str(ei.value).split())
+    assert ei.value.code == "connection_error"
+    assert "2 of 5 keys sent" in msg and "may or may not have been typed" in msg
+    assert "was not sent" not in msg
