@@ -1753,11 +1753,12 @@ passes the scanner there. That boot-time scan applies the same rules as `POST
 /mods/rescan` and asks for no admin header. Those rules are coherence checks,
 not a barrier against someone who can write `mods_dir`: a generation whose own
 `.gen.json` says the store installed it is not re-linted for `permissions`, and
-a writer can write that file too. So with `admin_token` set, install, uninstall, rescan and the two policy writes
-still need the header, but a page-token holder can still get a package served
-after a restart by writing it into `mods_dir` directly. A check that refuses
-`/file/*` writes inside `mods_dir` is not part of 1.0; keep `mods_dir` as
-protected as the broker's own configuration.
+a writer can write that file too. So with `admin_token` set, install,
+uninstall, rescan and the two policy writes still need the header, but a
+page-token holder can still get a package served after a restart by writing it
+into `mods_dir` directly. A check that refuses `/file/*` writes inside
+`mods_dir` is not part of 1.0; keep `mods_dir` as protected as the broker's own
+configuration.
 
 **A mod is not sandboxed.** It runs same-origin with the page's full authority
 and can reach `/file/*`, `/session/*`, `/state` and `/mcp/*` directly; `ctx`
