@@ -216,7 +216,7 @@ browserland-mcp --hosts '[
   and peer worked before and is refused now (see `wiki/Upgrading.md`).
 - When something is missing: a peer with no entry is simply absent.
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
-  `"mcp": true` (one answer for both); `proxy_unavailable` (503) means the hub
+  `"mcp": true` (one answer for both, whatever the bearer is); `proxy_unavailable` (503) means the hub
   lacks the `proxy` extra; the peer's own `auth_required` / `mcp_disabled` is
   that peer's token or MCP switch, not the hub's. Each message says who has
   to act: the hub's operator for `unknown_peer` and `proxy_unavailable`, the

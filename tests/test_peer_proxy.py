@@ -945,7 +945,8 @@ def hub2(upstream, tmp_path_factory):
                 "WEB_TERMINAL_MCP_ADMIN_TOKEN"):
         mp.delenv(var, raising=False)
     app = _make_app(
-        tmp, {"m": {"origin": upstream.origin, "mcp": True}},
+        tmp, {"m": {"origin": upstream.origin, "mcp": True},
+              "n": {"origin": upstream.origin}},
         auth_token=HUB_BROWSER, mcp_enabled=True, mcp_token=HUB_MCP,
         mcp_admin_token=HUB_MCP_ADMIN, admin_token=HUB_ADMIN,
         mcp_state_path=str(tmp / "webterm_mcp.json"))
@@ -1097,15 +1098,36 @@ async def test_a_hub_token_as_the_peer_bearer_is_refused(hub2, upstream,
         assert canary not in text
 
 
-async def test_the_hub_refuses_its_token_before_it_looks_the_peer_up(
-        hub2, upstream):
+@pytest.mark.parametrize("peer_id", ["nosuch", "n"])
+async def test_an_unknown_peer_answers_the_same_whatever_the_bearer(
+        hub2, upstream, peer_id):
+    """#260: a hub token as the bearer must not tell "no such peer" from any
+    other bearer. ``nosuch`` is no peer at all, ``n`` exists without
+    ``mcp: true``: status, body and refusal marker are byte-identical for an
+    unrelated bearer, each of the hub's four tokens, and an unrelated bearer
+    with the hub's MCP admin token in the admin header; nothing is dialed.
+    (The hub-token refusal itself is for a known ``mcp: true`` peer only, see
+    test_a_hub_token_as_the_peer_bearer_is_refused.)"""
+    cases = [{"Authorization": "Bearer unrelated-bearer"}]
+    cases += [{"Authorization": "Bearer " + secret}
+              for secret in _HUB_TOKENS.values()]
+    cases.append({"Authorization": "Bearer unrelated-bearer",
+                  MCP_ADMIN_HEADER: HUB_MCP_ADMIN})
     client = _client()
     try:
-        r = await client.get(hub2.url + "/peer/nosuch/mcp/terminals",
-                             headers={"Authorization": "Bearer " + HUB_MCP})
+        answers = []
+        for headers in cases:
+            r = await client.get(hub2.url + f"/peer/{peer_id}/mcp/terminals",
+                                 headers=headers)
+            answers.append((r.status_code, r.content,
+                            r.headers.get(peers.PEER_REFUSAL_HEADER)))
     finally:
         await client.aclose()
-    assert r.status_code == 403 and upstream.seen == []
+    assert answers[0][0] == 404
+    assert json.loads(answers[0][1]) == {"error": "unknown_peer"}
+    assert answers[0][2] == "unknown_peer"
+    assert len(cases) == 6 and answers == [answers[0]] * len(cases)
+    assert upstream.seen == []
 
 
 async def test_a_hub_mcp_admin_in_the_admin_header_is_refused(hub2, upstream):

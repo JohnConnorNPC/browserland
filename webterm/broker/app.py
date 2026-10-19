@@ -8967,20 +8967,24 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # The bearer is checked FIRST, so a caller holding nothing learns
             # nothing about which peers exist or which opted in. (A caller
             # with any bearer can still tell an opted-in peer by B's own
-            # answer; A cannot validate B's MCP token to hide that.)
+            # answer; A cannot validate B's MCP token to hide that.) Then an
+            # unknown or not-opted-in peer answers 404 whatever the bearer is,
+            # hub token or not; only a known mcp: true peer can answer 403.
             bearer = _peer_bearer(request)
             if not bearer:
                 LOGGER.warning("rejected unauthenticated /peer mcp from %s",
                                request.ip)
                 return _peer_refusal(True, 401, "auth_required")
+            if peer is None or not peer["mcp"]:
+                return _peer_refusal(True, 404, "unknown_peer")
             if _is_hub_credential(request, bearer):
-                # BEFORE the peer lookup: it says nothing about any peer, and
-                # nothing is forwarded or dialed. (#261)
+                # AFTER the peer lookup (#260): a hub token as the bearer must
+                # not make an unknown peer answer differently from any other
+                # bearer, so 403 is only for a peer that exists and opted in.
+                # Nothing is forwarded or dialed. (#261)
                 LOGGER.warning("refused a hub credential as a /peer mcp "
                                "bearer from %s", request.ip)
                 return _peer_refusal(True, 403, "hub_credential_refused")
-            if peer is None or not peer["mcp"]:
-                return _peer_refusal(True, 404, "unknown_peer")
             if not app.ctx.peer_proxy:
                 return _peer_refusal(True, 503, "proxy_unavailable")
         else:
