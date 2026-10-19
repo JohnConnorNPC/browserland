@@ -94,6 +94,7 @@ Several MCP clients often share one broker: for example a "manager" and a "worke
 - It names absolute paths on the broker's machine (its Python and its Browserland folder), which the Control Panel shows only to someone already signed in.
 - `command`, `PYTHONPATH` and `url` are the broker machine's own: edit them for an MCP client on another machine. For the broker serving this page the URL is `http://127.0.0.1:<port>`; a broker listening only on a non-loopback address needs that address instead.
 - If the browser refuses the clipboard, the text opens in a dialog so you can copy it by hand.
+- On the broker serving this page, the file also lists that broker's peers (its `peers` config): one more entry per peer, named `local.<id>`, at `http://127.0.0.1:<port>/peer/<id>`, with the peer's `peer_origin` and the placeholder `<paste this peer's MCP token>` where its token goes. Paste that peer's own MCP token over the placeholder, or delete the entry if you do not use that peer. The page never fetches a peer's token, and the hub does not store one. A placeholder left in place is refused by the MCP server before anything is sent (`token_placeholder`, one row under `errors` in `list_terminals`). The scope you typed goes on the broker's own entry only, so the peer entries are unscoped unless you add a `scope` to them; the process-wide `--scope` is covered under *A broker behind another one* below. Once peer entries exist, `launch_terminal` needs `host=` (`host_required` otherwise).
 
 ## Tools overview
 
@@ -123,11 +124,16 @@ Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`.
 
 ### A broker behind another one (#252)
 
-An agent that can reach only one broker can still drive a broker behind it, if that broker's operator allows it:
+An agent that can reach only one broker can still drive a broker behind it, if that broker's operator allows it. An MCP config with only the hub's entry shows only the hub's own windows: the hub does not list its peers' windows itself, so each peer needs an entry of its own. For a peer's windows to appear, all of these must be true:
 
 - **The operator** sets `"mcp": true` on that peer in this broker's `peers` config (see [[Technical-Reference#peer-proxy-252]]).
+- **The peer** has MCP enabled with a token of its own (its Control Panel → MCP access).
 - **The agent** adds `http://<this broker>/peer/<id>` as another host in `BROWSERLAND_MCP_HOSTS`, with the **other** broker's MCP token. It may also add `"peer_origin"` (the origin this broker's `peers` names for it): this broker then refuses the call with 409 `peer_origin_changed` instead of passing the token on if the operator later points `<id>` elsewhere. A value that is not a plain origin is refused when the MCP server starts, never trimmed.
-- That host entry's `scope` and `admin_token` are the other broker's, passed through unchanged; this broker's own MCP token, scopes and admin credential play no part.
+- That host entry's `scope` and `admin_token` are the other broker's, passed through unchanged; this broker's own MCP token, scopes and admin credential play no part. A process-wide `--scope` (or `$BROWSERLAND_MCP_SCOPE`) is different: it reaches every entry that names no scope of its own, peer entries included. **Copy .mcp.json** writes the hub entry's scope only.
+- **Copy .mcp.json** on the hub writes these entries for you, with a placeholder where each peer's token goes (see *Copy .mcp.json* above). With more than one host configured, `launch_terminal` needs `host=`.
+- **When something is missing**, a peer with no entry is simply absent (nothing reports it). `unknown_peer` (404) means the hub has no peer by that id **or** the peer is not set to `"mcp": true`: the hub gives one answer for both. `proxy_unavailable` (503) means the hub lacks the `proxy` extra. `token_placeholder` means the entry still holds the Copy placeholder. The peer's own `auth_required` or `mcp_disabled` is that peer's token or MCP switch, not the hub's. Each message tells the agent what to do.
+- **Limits.** The hub relays at most 2 calls per peer (8 in all), a pool of its own that cannot take a browser window's slot. A `read_screen` that waits (`wait_for_change`, `wait_for_text`, `wait_for_idle`) holds one for up to 15 s. Over the limit the hub answers `peer_busy` at once: the call is not sent and never queued, so retry when another call finishes.
+- **One hop.** The hub relays one hop only: a broker behind a peer is not reachable through the hub (`peer_hop_refused`).
 
 ## Launch handles
 

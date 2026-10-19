@@ -149,3 +149,72 @@ def test_the_relay_code_set_is_texted_and_documented():
     assert relay == RELAY_CODES, sorted(relay ^ RELAY_CODES)
     missing = sorted(c for c in RELAY_CODES if c not in _ERROR_MESSAGES)
     assert not missing, f"no client text for {missing}"
+# #261: what the docs tell an agent about a hub and its peers. The sentences
+# are matched after joining wrapped lines and dropping code ticks.
+
+_HUB_ALONE = {
+    "wiki/MCP-and-AI-Agents.md":
+        "An MCP config with only the hub's entry shows only the hub's own "
+        "windows",
+    "webterm/mcptool/README.md":
+        "An MCP config with only the hub's entry shows only the hub's own "
+        "windows",
+    "wiki/Hosts-and-Multi-Browser.md":
+        "An MCP config with only this broker's entry shows only this "
+        "broker's own windows",
+    "README.md": "shows only that broker's own windows",
+}
+
+
+def _flat(text):
+    return " ".join(text.replace("`", "").replace("**", "").split())
+
+
+def _doc(rel):
+    return _flat((REPO / rel).read_text(encoding="utf-8"))
+
+
+def _corpus_text():
+    import json
+
+    def strings(x):
+        if isinstance(x, str):
+            yield x
+        elif isinstance(x, dict):
+            for v in x.values():
+                yield from strings(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from strings(v)
+    raw = json.loads((REPO / "webterm" / "broker" /
+                      "help_corpus.json").read_text(encoding="utf-8"))
+    return _flat(" ".join(strings(raw)))
+
+
+def test_the_hub_alone_is_documented():
+    for rel, sentence in _HUB_ALONE.items():
+        assert sentence in _doc(rel), rel
+    # the in-app guide is generated from the wiki: it says it too
+    corpus = _corpus_text()
+    for rel in ("wiki/MCP-and-AI-Agents.md", "wiki/Hosts-and-Multi-Browser.md"):
+        assert _HUB_ALONE[rel] in corpus, rel
+
+
+def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
+    from webterm.broker.app import MAX_MCP_WAIT_MS
+    for rel in ("wiki/MCP-and-AI-Agents.md", "webterm/mcptool/README.md"):
+        text = _doc(rel)
+        for phrase in (
+                "reaches every entry that names no scope of its own, peer "
+                "entries included",
+                "writes the hub entry's scope only",
+                f"at most {peers.PEER_MCP_MAX_DIALS_PER_PEER} calls per peer "
+                f"({peers.PEER_MCP_MAX_DIALS} in all)",
+                f"up to {MAX_MCP_WAIT_MS // 1000} s",
+                "never queued",
+                "<paste this peer's MCP token>",
+                "token_placeholder", "unknown_peer", "proxy_unavailable",
+                "peer_busy", "peer_hop_refused",
+                "launch_terminal needs host=",
+                "delete the entry if you do not use that peer"):
+            assert phrase in text, (rel, phrase)

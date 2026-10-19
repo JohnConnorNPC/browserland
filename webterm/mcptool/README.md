@@ -167,8 +167,11 @@ writes the host's `admin_token` for you.)
 ### A broker behind another one (#252)
 
 A broker whose operator sets `"mcp": true` on a peer in its `peers` config
-relays that peer's `/mcp/*` surface. Add it as another `--hosts` entry at
-`http://<this broker>/peer/<id>` with the **other** broker's MCP token:
+relays that peer's `/mcp/*` surface. An MCP config with only the hub's entry
+shows only the hub's own windows: the hub does not list its peers' windows
+itself, so add each peer as another `--hosts` entry at
+`http://<this broker>/peer/<id>` with the **other** broker's MCP token (the
+peer needs MCP enabled with a token of its own):
 
 ```bash
 browserland-mcp --hosts '[
@@ -187,7 +190,29 @@ browserland-mcp --hosts '[
   carries it.
 - That entry's `scope` and `admin_token` are the other broker's, passed
   through unchanged; the hub's own MCP token, scopes and admin credential play
-  no part.
+  no part. A process-wide `--scope` (or `$BROWSERLAND_MCP_SCOPE`) is
+  different: it reaches every entry that names no scope of its own, peer
+  entries included.
+- **Control Panel → Access → MCP access → Copy .mcp.json** on the hub writes
+  these entries for you: one per peer, named `<hub>.<id>`, with the peer's
+  `peer_origin` and the placeholder `<paste this peer's MCP token>` where its
+  token goes. Paste that peer's own token over it, or delete the entry if you
+  do not use that peer. The page never fetches a peer's token and the hub does
+  not store one; a placeholder left in place is refused before anything is sent
+  (`token_placeholder`, one row under `errors` in `list_terminals`). The scope
+  field writes the hub entry's scope only. With more than one host configured,
+  `launch_terminal` needs `host=` (`host_required` otherwise).
+- When something is missing: a peer with no entry is simply absent.
+  `unknown_peer` (404) means no peer by that id **or** the peer is not set to
+  `"mcp": true` (one answer for both); `proxy_unavailable` (503) means the hub
+  lacks the `proxy` extra; the peer's own `auth_required` / `mcp_disabled` is
+  that peer's token or MCP switch, not the hub's. Each message says what to do.
+- The hub relays at most 2 calls per peer (8 in all), a pool of its own that
+  cannot take a browser window's slot. A `read_screen` that waits holds one for
+  up to 15 s. Over the limit the hub answers `peer_busy` at once: the call is
+  not sent and never queued, so retry when another call finishes.
+- One hop only: a broker behind a peer is not reachable through the hub
+  (`peer_hop_refused`).
 
 ### Launch handles (#243)
 

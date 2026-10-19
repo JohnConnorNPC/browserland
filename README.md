@@ -261,8 +261,11 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 **Multi-host.** Pass `--hosts` (or `$BROWSERLAND_MCP_HOSTS`) a JSON array of
 `{name, url, token}` descriptors to serve N brokers from one server process;
 every id-taking tool routes on the `"<host>:…"` prefix. The single
-`--broker-url`/`--token` form is the one-host shorthand (`default`). See
-[`webterm/mcptool/README.md`](webterm/mcptool/README.md) for details.
+`--broker-url`/`--token` form is the one-host shorthand (`default`). An entry
+for a hub shows only that broker's own windows: a peer behind it (#252) needs
+an entry of its own at `http://<hub>/peer/<id>` with the peer's MCP token, and
+**Control Panel → Copy .mcp.json** on the hub writes those with a placeholder.
+See [`webterm/mcptool/README.md`](webterm/mcptool/README.md) for details.
 
 **Scopes.** Several MCP clients can share one broker without seeing each other's
 windows: a server started with `--scope projA` (or `BROWSERLAND_MCP_SCOPE`, or a
