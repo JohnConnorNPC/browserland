@@ -230,6 +230,10 @@ def test_upgrading_says_the_full_policy_is_report_only_at_1_0(tmp_path,
     assert ("is sent on every response as "
             "`Content-Security-Policy-Report-Only` at 1.0: the browser "
             "reports what it would block and blocks nothing") in section
+    # #260 review R3/R4: no release is promised, and the section does not
+    # point at a list that is not there.
+    assert "no release is promised" in section
+    assert "1.x" not in section and "Third-party code" not in section
     app = _make_app(tmp_path, monkeypatch)
     headers = _get(app, host="dev:1").headers
     assert "default-src" not in _directives(headers["Content-Security-Policy"])

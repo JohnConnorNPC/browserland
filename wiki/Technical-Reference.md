@@ -1399,10 +1399,11 @@ mode override, it never carries over a reconnect.
 are global: a declared scope never changes this list, and a scoped caller may
 launch any of them.
 
-**`POST /mcp/launch`** — after the MCP token check (**401 `auth_required`**)
+**`POST /mcp/launch`** — after the shared `/mcp/*` refusals (**403
+`mcp_disabled`**, **401 `auth_required`**, the scope and admin-header errors)
 it is refused with **503 `restarting`** while the broker quiesces (#260, the
 same order `POST /launch` uses, before every refusal below and before the body
-is read), then with **403 `terminals_disabled`** when the
+is parsed), then with **403 `terminals_disabled`** when the
 broker has `terminals: false` (#253, checked before `allow_launch`, whatever it
 says), then requires `allow_launch` (else **403 `launch_disabled`**).
 Body reuses the `/launch` shape plus an MCP-only `mode`: `{"profile": <str>,
@@ -1748,9 +1749,11 @@ being able to administer a broker somebody else is using right now.
 holder of the page token from writing files into `mods_dir` through `/file/*`:
 those routes are host-wide (no root confines them), carry no admin gate, and a
 broker that serves the UI scans `mods_dir` at its next boot and serves whatever
-validates there. That boot-time scan applies the same rules as `POST
-/mods/rescan` (including the `permissions` lint) and asks for no admin header.
-So with `admin_token` set, install, uninstall, rescan and the two policy writes
+passes the scanner there. That boot-time scan applies the same rules as `POST
+/mods/rescan` and asks for no admin header. Those rules are coherence checks,
+not a barrier against someone who can write `mods_dir`: a generation whose own
+`.gen.json` says the store installed it is not re-linted for `permissions`, and
+a writer can write that file too. So with `admin_token` set, install, uninstall, rescan and the two policy writes
 still need the header, but a page-token holder can still get a package served
 after a restart by writing it into `mods_dir` directly. A check that refuses
 `/file/*` writes inside `mods_dir` is not part of 1.0; keep `mods_dir` as

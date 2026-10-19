@@ -412,7 +412,13 @@ def test_a_page_token_holder_can_still_write_into_mods_dir(tmp_path,
                                                            monkeypatch):
     """With admin_token set, /file/write into mods_dir needs only the page
     token (the documented 1.0 limit). If this goes red, the containment check
-    landed: update Technical-Reference, Writing-a-Mod and Upgrading."""
+    landed: update Technical-Reference, Writing-a-Mod and Upgrading.
+
+    This observes the write only (and only /file/write, not upload, mkdir,
+    copy, move or unzip: they share the host-wide resolver, not this test).
+    That the next boot serves what validates there is
+    tests/test_mod_install.py: test_scan_reads_a_planted_mod and
+    test_a_pre_lint_generation_survives_a_rescan_and_a_restart."""
     app = _admin_app(tmp_path, monkeypatch)
     target = tmp_path / "mods" / "x-probe"
     target.mkdir(parents=True)

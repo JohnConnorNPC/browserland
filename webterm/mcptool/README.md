@@ -210,14 +210,16 @@ browserland-mcp --hosts '[
 - The hub never hands its own credentials to a peer: a call on a peer entry
   whose bearer, or `X-Browserland-Mcp-Admin` header, is one of the hub's own
   tokens (MCP, browser or admin) is refused with `hub_credential_refused`
-  (403) and nothing is forwarded, even for a peer that was given the same
+  (403), for a peer that exists and has `"mcp": true` (an unknown or
+  not-opted-in peer answers `unknown_peer` instead), and nothing is
+  forwarded, even for a peer that was given the same
   token as the hub: give that peer its own MCP token (different from the
   hub's) and put it in the entry. A relay that shared one token between hub
   and peer worked before and is refused now (see `wiki/Upgrading.md`).
 - When something is missing: a peer with no entry is simply absent.
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
-  `"mcp": true` (one answer for both, whatever the bearer is); `proxy_unavailable` (503) means the hub
-  lacks the `proxy` extra; the peer's own `auth_required` / `mcp_disabled` is
+  `"mcp": true` (one answer for both, whatever the bearer is);
+  `proxy_unavailable` (503) means the hub lacks the `proxy` extra; the peer's own `auth_required` / `mcp_disabled` is
   that peer's token or MCP switch, not the hub's. Each message says who has
   to act: the hub's operator for `unknown_peer` and `proxy_unavailable`, the
   owner of the MCP config for a placeholder.

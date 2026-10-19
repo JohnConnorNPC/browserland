@@ -2762,8 +2762,9 @@ refusal list below: it comes from the admin gate, before the install code runs.)
 **The admin token guards routes, not files.** The admin token does not stop a
 holder of the page token from writing files into `mods_dir` through `/file/*`:
 those routes are host-wide and carry no admin gate, and a broker that serves
-the UI scans `mods_dir` at its next boot and serves whatever validates there,
-asking for no admin header. So `admin_token` closes "an installed mod installs
+the UI scans `mods_dir` at its next boot and serves whatever passes the scanner
+there, asking for no admin header (the scanner is a coherence check, not a
+barrier against someone who can write `mods_dir`). So `admin_token` closes "an installed mod installs
 the next one" through `POST /mods/install`, not through a direct file write. A
 check that refuses `/file/*` writes inside `mods_dir` is not part of 1.0; keep
 `mods_dir` as protected as the broker's own configuration.

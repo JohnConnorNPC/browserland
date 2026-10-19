@@ -455,7 +455,9 @@ _UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled",
 # update/status consent gates. The page token is a STANDING capability every
 # page and every running mod holds; with it alone gating these routes, one
 # installed mod can install the next. When `admin_token` is configured these
-# routes additionally require it; when it is absent the wire is byte-identical
+# routes additionally require it (these routes only: /file/* writes into
+# mods_dir, which the next boot adopts, are not covered -- #260 documents
+# that); when it is absent the wire is byte-identical
 # to before, plus one loud boot line naming the exposure.
 #
 # The credential travels ONLY in the dedicated header below -- never

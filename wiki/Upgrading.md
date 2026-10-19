@@ -77,8 +77,9 @@ unaffected. See [[Technical-Reference#peer-proxy-252]].
 **What changed.** The hub refuses to pass any of its own tokens (MCP, browser,
 MCP admin or broker admin) to a peer: a call on a `/peer/<id>/mcp/*` entry
 whose bearer, or `X-Browserland-Mcp-Admin` header, equals one of them answers
-403 `hub_credential_refused` and nothing is forwarded. Before, the hub relayed
-whatever bearer it was given.
+403 `hub_credential_refused` (for a peer that exists and has `mcp: true`; an
+unknown or not-opted-in peer answers `unknown_peer` instead) and nothing is
+forwarded. Before, the hub relayed whatever bearer it was given.
 
 **Does this affect me?** Only if a hub and a peer share one MCP token and an
 MCP client's peer entry (`http://<hub>/peer/<id>`) carries it. That setup
@@ -169,8 +170,8 @@ routes apart from the page token; it is not a boundary around `mods_dir`.
 
 **What to do.** Treat the page token as able to change what the next boot
 serves, and keep `mods_dir` as protected as the broker's config. A check that
-refuses `/file/*` writes inside `mods_dir` is not part of 1.0. See
-[[Technical-Reference#mods-browser-auth_token-gated-157-163-172]].
+refuses `/file/*` writes inside `mods_dir` is not part of 1.0. See the *Mods*
+section of [[Technical-Reference]].
 
 ---
 
@@ -212,8 +213,7 @@ file manager. Bringing the mod back is a source-tree change, described in
 
 **What changed.** Nothing new is enforced. The policy a browser enforces is
 still the narrow one: `script-src` (the broker's own scripts, with a hash for
-the page's one inline script) and `frame-ancestors 'none'`. The fuller policy
-(`default-src`, `connect-src`, `form-action`, `base-uri` and `frame-src`) is
+the page's one inline script) and `frame-ancestors 'none'`. The fuller policy is
 sent on every response as `Content-Security-Policy-Report-Only` at 1.0: the
 browser reports what it would block and blocks nothing. Enforcing it waits for
 a re-soak in the deployed shape (https and wss behind a proxy).
@@ -221,9 +221,8 @@ a re-soak in the deployed shape (https and wss behind a proxy).
 **Does this affect me?** Only if you count on the CSP to restrict more than
 scripts and framing. It does not, yet.
 
-**What to do.** Nothing. A later 1.x release makes the fuller policy the
-enforced one; its sources are listed in
-[[Technical-Reference]] under *Third-party code*.
+**What to do.** Nothing. Enforcing the fuller policy is planned after a
+re-soak in the deployed shape; no release is promised.
 
 ---
 

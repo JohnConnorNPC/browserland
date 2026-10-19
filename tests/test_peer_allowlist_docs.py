@@ -233,6 +233,8 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "with it, the op answers not_home",
                 "take the same relayed route to the peer unchanged",
                 "even for a peer that was given the same token as the hub",
+                "for a peer that exists and has \"mcp\": true (an unknown or "
+                "not-opted-in peer answers unknown_peer instead)",
                 "give that peer its own MCP token",
                 "after a peer_timeout it may have been typed, so read the "
                 "screen first",
@@ -290,7 +292,9 @@ def test_upgrading_and_the_changelog_say_a_peer_needs_its_own_token():
     are refused now, so the page an owner reads on upgrading says so."""
     upg = _doc("wiki/Upgrading.md")
     assert "## A peer's MCP token must differ from the hub's (#261)" in upg
-    for phrase in ("answers 403 hub_credential_refused and nothing is "
+    for phrase in ("answers 403 hub_credential_refused (for a peer that "
+                   "exists and has mcp: true; an unknown or not-opted-in "
+                   "peer answers unknown_peer instead) and nothing is "
                    "forwarded",
                    "Give the peer its own MCP token",
                    "only an exact match is refused"):
@@ -303,3 +307,34 @@ def test_upgrading_and_the_changelog_say_a_peer_needs_its_own_token():
 def test_the_peer_proxy_section_says_a_shared_token_is_refused():
     assert "a peer configured with the same token is refused too" in \
         " ".join(_section().split())
+
+
+def _row(text, start):
+    """The one table row of ``text`` that begins with ``start``, flattened."""
+    rows = [ln for ln in text.splitlines() if ln.startswith(start)]
+    assert len(rows) == 1, (start, len(rows))
+    return " ".join(rows[0].split())
+
+
+def test_the_docs_pin_the_mcp_ladder_order_and_what_is_never_relayed():
+    """#260 review R1: the reader-facing words of the S1 and M1 changes are
+    pinned, not only the code. The `/peer/<id>/mcp/*` ladder row lists the
+    404 for an unknown peer before the 403 for a hub token (and the 403 only
+    for a known `mcp: true` peer); the 403 row of the error table names the
+    same condition; "Never relayed" names `/mcp/config`."""
+    ladder = _row(_section(), "| `/peer/<id>/mcp/*` |")
+    assert (ladder.index("404 `unknown_peer`")
+            < ladder.index("403 `hub_credential_refused`")
+            < ladder.index("503 `proxy_unavailable`")), ladder
+    assert "only for a known `mcp: true` peer" in ladder
+    row = _row(_mcp_error_table(), "| 403 | `hub_credential_refused` |")
+    assert "for a peer that exists and has `mcp: true`" in row
+    assert "`unknown_peer` instead" in row
+    s = _section()
+    para = []
+    for line in s[s.index("Never relayed:"):].splitlines():
+        if not line.strip():
+            break
+        para.append(line)
+    never = " ".join(" ".join(para).split())
+    assert "`GET`/`POST /mcp/config`" in never, never
