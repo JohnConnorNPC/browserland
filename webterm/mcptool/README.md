@@ -213,6 +213,13 @@ browserland-mcp --hosts '[
   not sent and never queued, so retry when another call finishes.
 - One hop only: a broker behind a peer is not reachable through the hub
   (`peer_hop_refused`).
+- Desktop tools: `get_desktop` and `arrange_window` on a peer entry go to the
+  browser that holds the **peer's** control lease, not to a page of the hub
+  because the hub relayed the call: with no browser on the peer the answer is
+  `no_active_browser`. A hub page that has the peer added as a *from server*
+  host does hold the peer's lease; its snapshot carries `home: false`, and a
+  `workspaces` op through the peer entry answers `not_home` (workspace data
+  belongs to a browser's home broker: run those from the home broker's entry).
 
 ### Launch handles (#243)
 

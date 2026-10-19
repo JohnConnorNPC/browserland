@@ -216,6 +216,10 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "token_placeholder", "unknown_peer", "proxy_unavailable",
                 "peer_busy", "peer_hop_refused",
                 "launch_terminal needs host=",
+                "browser that holds the peer's control lease",
+                "no browser on the peer the answer is no_active_browser",
+                "carries home: false",
+                "answers not_home",
                 "delete the entry if you do not use that peer"):
             assert phrase in text, (rel, phrase)
 _RELAY_STATUS = {
