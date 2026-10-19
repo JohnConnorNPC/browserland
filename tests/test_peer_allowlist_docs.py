@@ -229,9 +229,18 @@ def test_the_peer_entry_rules_are_documented_with_the_hubs_numbers():
                 "browser that holds the peer's control lease",
                 "no browser on the peer the answer is no_active_browser",
                 "carries home: false",
-                "workspaces op through the peer entry answers not_home",
+                "workspaces op needs that peer's admin token on the entry",
+                "with it, the op answers not_home",
+                "take the same relayed route to the peer unchanged",
+                "even for a peer that was given the same token as the hub",
+                "give that peer its own MCP token",
+                "after a peer_timeout it may have been typed, so read the "
+                "screen first",
                 "delete the entry if you do not use that peer"):
             assert phrase in text, (rel, phrase)
+        # arrange_window through a peer was never run live: the docs do not
+        # say it goes to the peer's lease holder, only that it is relayed
+        assert "get_desktop and arrange_window" not in text, rel
 
 
 _RELAY_STATUS = {
@@ -273,3 +282,24 @@ def test_a_client_only_code_is_not_a_wire_row():
     assert "`token_placeholder`" in table
     rows = [ln for ln in table.splitlines() if ln.startswith("|")]
     assert not [ln for ln in rows if "token_placeholder" in ln]
+
+
+
+def test_upgrading_and_the_changelog_say_a_peer_needs_its_own_token():
+    """#261 review: a hub and peer that shared one MCP token relayed before and
+    are refused now, so the page an owner reads on upgrading says so."""
+    upg = _doc("wiki/Upgrading.md")
+    assert "## A peer's MCP token must differ from the hub's (#261)" in upg
+    for phrase in ("answers 403 hub_credential_refused and nothing is "
+                   "forwarded",
+                   "Give the peer its own MCP token",
+                   "only an exact match is refused"):
+        assert phrase in upg, phrase
+    log = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    one_zero = log[log.index("## [1.0.0]"):log.index("## [0.8.0]")]
+    assert "**A peer behind a hub needs its own MCP token** (#261)" in one_zero
+
+
+def test_the_peer_proxy_section_says_a_shared_token_is_refused():
+    assert "a peer configured with the same token is refused too" in \
+        " ".join(_section().split())

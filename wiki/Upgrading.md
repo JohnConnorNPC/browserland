@@ -72,6 +72,27 @@ unaffected. See [[Technical-Reference#peer-proxy-252]].
 
 ---
 
+## A peer's MCP token must differ from the hub's (#261)
+
+**What changed.** The hub refuses to pass any of its own tokens (MCP, browser,
+MCP admin or broker admin) to a peer: a call on a `/peer/<id>/mcp/*` entry
+whose bearer, or `X-Browserland-Mcp-Admin` header, equals one of them answers
+403 `hub_credential_refused` and nothing is forwarded. Before, the hub relayed
+whatever bearer it was given.
+
+**Does this affect me?** Only if a hub and a peer share one MCP token and an
+MCP client's peer entry (`http://<hub>/peer/<id>`) carries it. That setup
+worked before and is refused now, on purpose: with one token on both brokers a
+wrong paste hands the hub's token to the peer.
+
+**What to do.** Give the peer its own MCP token (Control Panel → MCP
+access on the peer, **Generate**), different from the hub's, and put it in the
+peer entry. Nothing else changes: a peer token that only looks like a hub token
+(a shared prefix, say) still relays; only an exact match is refused. See
+[[MCP-and-AI-Agents#a-broker-behind-another-one-252]].
+
+---
+
 ## Broker roles: hub and node, and `terminals: false` (#253)
 
 Nothing changes for an existing deploy. A config without the new `terminals`

@@ -3483,3 +3483,13 @@ def test_a_dropped_connection_midway_is_not_called_not_sent():
     assert ei.value.code == "connection_error"
     assert "2 of 5 keys sent" in msg and "may or may not have been typed" in msg
     assert "was not sent" not in msg
+
+
+
+def test_the_hub_credential_text_says_to_give_the_peer_its_own_token():
+    """#261 review: a peer that shares the hub's token is refused too, and the
+    text names the fix."""
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    text = " ".join(_ERROR_MESSAGES["hub_credential_refused"].split())
+    assert "not even to a peer that was given the same token" in text
+    assert "give that peer its own MCP token (different from the hub's)" in text

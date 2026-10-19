@@ -75,11 +75,13 @@ _ERROR_MESSAGES = {
                     "(that peer's Control Panel → MCP access).",
     "hub_credential_refused": "The hub refused this host's token: it is one "
                               "of the hub's own tokens (MCP, browser or "
-                              "admin), which the hub never sends to a peer. "
-                              "Nothing was sent. This is for the person who "
-                              "set up this MCP config, not the agent: ask "
-                              "them to put that peer's own MCP token in this "
-                              "entry.",
+                              "admin), which the hub never sends to a peer, "
+                              "not even to a peer that was given the same "
+                              "token. Nothing was sent. This is for the "
+                              "person who set up this MCP config, not the "
+                              "agent: ask them to give that peer its own MCP "
+                              "token (different from the hub's) and put it "
+                              "in this entry.",
     "proxy_unavailable": "The hub this host's URL goes through cannot relay to "
                          "peers: its proxy extra is missing or too old (it "
                          "needs httpx and websockets 15). That is the hub "

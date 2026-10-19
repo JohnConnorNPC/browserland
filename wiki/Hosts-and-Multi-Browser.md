@@ -89,9 +89,10 @@ token on if the operator later points `b` elsewhere; without it, re-pointing
 the other broker's, passed through unchanged; this broker's own MCP token,
 scopes and admin credential play no part. **Copy .mcp.json** (Control Panel →
 Access → MCP access) on this broker, with *Include peer entries* ticked,
-writes one such entry per peer, with a placeholder where that peer's token goes. An MCP config with only this
-broker's entry shows only this broker's own windows; a peer's windows appear
-once it has an entry with its own MCP token. See [[MCP-and-AI-Agents]].
+writes one such entry per peer, with a placeholder where that peer's token
+goes. An MCP config with only this broker's entry shows only this broker's own
+windows; a peer's windows appear once it has an entry with its own MCP token,
+which must differ from this broker's. See [[MCP-and-AI-Agents]].
 
 Its terminals open through the same prefix: each window's connection first
 takes a one-time ticket from this broker, so no password ever appears in a

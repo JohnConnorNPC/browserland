@@ -210,7 +210,10 @@ browserland-mcp --hosts '[
 - The hub never hands its own credentials to a peer: a call on a peer entry
   whose bearer, or `X-Browserland-Mcp-Admin` header, is one of the hub's own
   tokens (MCP, browser or admin) is refused with `hub_credential_refused`
-  (403) and nothing is forwarded. Put the peer's own MCP token in the entry.
+  (403) and nothing is forwarded, even for a peer that was given the same
+  token as the hub: give that peer its own MCP token (different from the
+  hub's) and put it in the entry. A relay that shared one token between hub
+  and peer worked before and is refused now (see `wiki/Upgrading.md`).
 - When something is missing: a peer with no entry is simply absent.
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
   `"mcp": true` (one answer for both); `proxy_unavailable` (503) means the hub
@@ -221,16 +224,25 @@ browserland-mcp --hosts '[
 - The hub relays at most 2 calls per peer (8 in all), a pool of its own that
   cannot take a browser window's slot. A `read_screen` that waits holds one for
   up to 15 s. Over the limit the hub answers `peer_busy` at once: the call is
-  not sent and never queued, so retry when another call finishes. A `send_keys` paced over several keys that is refused partway says how many keys were typed (`2 of 5 keys sent`): resume from the next key, never the whole call.
+  not sent and never queued, so retry when another call finishes. A
+  `send_keys` paced over several keys that fails partway says how many keys
+  were typed (`2 of 5 keys sent`) and whether the next one arrived: after a
+  refusal before sending (`peer_busy`) resume from it; after a `peer_timeout`
+  it may have been typed, so read the screen first. Never repeat the whole
+  call.
 - One hop only: a broker behind a peer is not reachable through the hub
   (`peer_hop_refused`).
-- Desktop tools: `get_desktop` and `arrange_window` on a peer entry go to the
-  browser that holds the **peer's** control lease, not to a page of the hub
-  because the hub relayed the call: with no browser on the peer the answer is
-  `no_active_browser`. A hub page that has the peer added as a *from server*
-  host does hold the peer's lease; its snapshot carries `home: false`, and a
-  `workspaces` op through the peer entry answers `not_home` (workspace data
-  belongs to a browser's home broker: run those from the home broker's entry).
+- Desktop tools: `get_desktop` on a peer entry goes to the browser that holds
+  the **peer's** control lease, not to a page of the hub because the hub
+  relayed the call: with no browser on the peer the answer is
+  `no_active_browser`. The other desktop calls (`arrange_window`,
+  `workspaces`) take the same relayed route to the peer unchanged. A hub page
+  that has the peer added as a *from server* host does hold the peer's lease;
+  its snapshot carries `home: false`. A `workspaces` op needs that peer's
+  admin token on the entry (Copy never writes one, and the tool exists only
+  when a host has an admin token); with it, the op answers `not_home`
+  (workspace data belongs to a browser's home broker: run those from the home
+  broker's entry).
 
 ### Launch handles (#243)
 

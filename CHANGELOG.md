@@ -277,6 +277,12 @@ again, unless they change a dependency file too.
 
 ### Changed
 
+- **A peer behind a hub needs its own MCP token** (#261). The hub now refuses
+  to pass any of its own tokens to a peer: a peer entry whose bearer is the
+  hub's MCP, browser or admin token answers `hub_credential_refused`, so a hub
+  and a peer that shared one MCP token must be given different ones. See
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#a-peers-mcp-token-must-differ-from-the-hubs-261).
+
 - **Python 3.10 is the minimum** (#260). `requires-python` is now `>=3.10` (it
   was `>=3.9`), so `pip install` refuses a 3.9 interpreter; the launcher
   scripts do not check the version. See
