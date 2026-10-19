@@ -1362,3 +1362,92 @@ def test_the_claim_is_a_compare_and_swap(tmp_path, monkeypatch):
     app_mod.resume_from_quiesce(app)
     assert app_mod._claim_restart(app) is True, \
         "an abandoned restart left the claim held forever"
+
+
+# ---- #260: /mcp/launch refuses while quiescing, like /launch --------------------
+
+MCP_TOKEN = "restart-mcp-token"
+
+
+def _mcp_launch_app(tmp_path, monkeypatch, **cfg):
+    """A broker with MCP on and a launcher that behaves like the real one as
+    far as the MCP row goes: it runs the pre-spawn hook (which writes the
+    window's MCP row) before answering, so a launch that gets past every gate
+    leaves BOTH a call and a row behind."""
+    monkeypatch.delenv("WEB_TERMINAL_MCP_TOKEN", raising=False)
+    base = {"mcp_state_path": str(tmp_path / "webterm_mcp.json"),
+            "mcp_enabled": True, "mcp_token": MCP_TOKEN,
+            "mcp_allow_launch": True}
+    base.update(cfg)
+    app = _make_app(tmp_path, monkeypatch, **base)
+    calls = []
+
+    async def _fake_launch(profile, pre_spawn=None, **kw):
+        calls.append(profile)
+        if pre_spawn is not None:
+            await pre_spawn(777)
+        return 200, {"ok": True, "id": 777}
+
+    app.ctx.launcher.launch = _fake_launch
+    return app, calls
+
+
+def _post_mcp_launch(app, body=None, data=None, token=MCP_TOKEN):
+    kw = {"data": data} if data is not None else {"json": body or {}}
+    return app.test_client.post(
+        "/mcp/launch", headers=[("Authorization", f"Bearer {token}")], **kw)
+
+
+def test_an_mcp_launch_that_passes_every_gate_calls_the_launcher_and_tags(
+        tmp_path, monkeypatch):
+    """The control for the cells below: not quiescing, the same launch calls
+    the launcher AND leaves its pre-spawn row, so 'no call, no row' in the
+    quiescing cells is a real observation."""
+    app, calls = _mcp_launch_app(tmp_path, monkeypatch)
+    _, r = _post_mcp_launch(app)
+    assert r.status == 200, r.text
+    assert len(calls) == 1
+    assert app.ctx.mcp_windows.get(777) is not None
+
+
+@pytest.mark.parametrize("cfg,body_kw", [
+    ({}, {}),
+    ({"terminals": False}, {}),
+    ({"mcp_allow_launch": False}, {}),
+    ({}, {"data": "{not json"}),
+], ids=["plain", "beats-terminals-disabled", "beats-launch-disabled",
+        "beats-a-malformed-body"])
+def test_an_mcp_launch_is_refused_while_quiescing(tmp_path, monkeypatch, cfg,
+                                                  body_kw):
+    """503 `restarting` outranks every later refusal (the cells make each of
+    them the answer it would otherwise be), the launcher is never called, and
+    no MCP window row is written."""
+    app, calls = _mcp_launch_app(tmp_path, monkeypatch, **cfg)
+    app.ctx.lifecycle = app_mod.LIFECYCLE_QUIESCING
+    _, r = _post_mcp_launch(app, **body_kw)
+    assert r.status == 503, r.text
+    assert r.json["ok"] is False
+    assert r.json["error"] == "restarting"
+    assert r.json["lifecycle"] == "quiescing"
+    assert calls == []
+    assert len(app.ctx.mcp_windows) == 0
+
+
+def test_an_unauthenticated_mcp_launch_is_401_while_quiescing(tmp_path,
+                                                              monkeypatch):
+    app, calls = _mcp_launch_app(tmp_path, monkeypatch)
+    app.ctx.lifecycle = app_mod.LIFECYCLE_QUIESCING
+    _, r = _post_mcp_launch(app, token="wrong-" + MCP_TOKEN)
+    assert r.status == 401
+    assert r.json["error"] == "auth_required"
+    assert calls == []
+
+
+def test_the_docs_put_restarting_first_on_mcp_launch():
+    text = (Path(__file__).resolve().parents[1] / "wiki"
+            / "Technical-Reference.md").read_text(encoding="utf-8")
+    a = text.index("**`POST /mcp/launch`** —")
+    para = " ".join(text[a:text.index("\n\n", a)].split())
+    assert para.index("503 `restarting`") < para.index("403 `terminals_disabled`")
+    assert para.index("403 `terminals_disabled`") < para.index(
+        "403 `launch_disabled`")

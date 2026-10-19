@@ -1399,9 +1399,12 @@ mode override, it never carries over a reconnect.
 are global: a declared scope never changes this list, and a scoped caller may
 launch any of them.
 
-**`POST /mcp/launch`** — refused with **403 `terminals_disabled`** when the
-broker has `terminals: false` (#253, checked first, whatever `allow_launch` says),
-then requires `allow_launch` (else **403 `launch_disabled`**).
+**`POST /mcp/launch`** — after the MCP token check (**401 `auth_required`**)
+it is refused with **503 `restarting`** while the broker quiesces (#260, the
+same order `POST /launch` uses, before every refusal below and before the body
+is read), then with **403 `terminals_disabled`** when the
+broker has `terminals: false` (#253, checked before `allow_launch`, whatever it
+says), then requires `allow_launch` (else **403 `launch_disabled`**).
 Body reuses the `/launch` shape plus an MCP-only `mode`: `{"profile": <str>,
 "cols": 80, "rows": 24, "title": <str>, "cwd": <str>,
 "mode": "off"|"read"|"readwrite"}`, all optional (dims default 80×24 and are clamped to

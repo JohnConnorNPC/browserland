@@ -7548,6 +7548,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _mcp_auth_error(request)
         if err is not None:
             return err
+        # #260: AFTER the auth gate and before every other refusal, in the
+        # order _launch uses: a launch started on a quiescing broker would put
+        # a fresh agent (and its pre-spawn MCP row) behind a process that is
+        # about to stop. An unauthenticated caller still gets 401 first.
+        err = _refuse_if_quiescing(app, "launch")
+        if err is not None:
+            return err
         # #253: the broker refusing (terminals: false) is checked BEFORE the
         # agent switch, so the two reasons stay distinct.
         err = _refuse_if_no_terminals(app)
