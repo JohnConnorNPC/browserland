@@ -215,3 +215,22 @@ def test_state_put_changing_hosts_shows_in_the_next_response(tmp_path,
     assert _directives(_get(app, host="dev:1").headers[REPORT_ONLY])[
         "connect-src"] == \
         "'self' http://box-a:4445 ws://box-a:4445 ws://dev:1 wss://dev:1"
+
+
+def test_upgrading_says_the_full_policy_is_report_only_at_1_0(tmp_path,
+                                                              monkeypatch):
+    """#260 (N3): the 1.0 upgrade notes name the Report-Only state, and what
+    they say matches the wire: the enforced header has no default-src, the
+    Report-Only one does."""
+    from pathlib import Path
+    up = (Path(__file__).resolve().parents[1] / "wiki"
+          / "Upgrading.md").read_text(encoding="utf-8")
+    a = up.index("## The full CSP is Report-Only at 1.0 (#190)")
+    section = " ".join(up[a:up.index("\n---", a)].split())
+    assert ("is sent on every response as "
+            "`Content-Security-Policy-Report-Only` at 1.0: the browser "
+            "reports what it would block and blocks nothing") in section
+    app = _make_app(tmp_path, monkeypatch)
+    headers = _get(app, host="dev:1").headers
+    assert "default-src" not in _directives(headers["Content-Security-Policy"])
+    assert "default-src" in _directives(headers[REPORT_ONLY])

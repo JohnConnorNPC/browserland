@@ -208,6 +208,25 @@ file manager. Bringing the mod back is a source-tree change, described in
 
 ---
 
+## The full CSP is Report-Only at 1.0 (#190)
+
+**What changed.** Nothing new is enforced. The policy a browser enforces is
+still the narrow one: `script-src` (the broker's own scripts, with a hash for
+the page's one inline script) and `frame-ancestors 'none'`. The fuller policy
+(`default-src`, `connect-src`, `form-action`, `base-uri` and `frame-src`) is
+sent on every response as `Content-Security-Policy-Report-Only` at 1.0: the
+browser reports what it would block and blocks nothing. Enforcing it waits for
+a re-soak in the deployed shape (https and wss behind a proxy).
+
+**Does this affect me?** Only if you count on the CSP to restrict more than
+scripts and framing. It does not, yet.
+
+**What to do.** Nothing. A later 1.x release makes the fuller policy the
+enforced one; its sources are listed in
+[[Technical-Reference]] under *Third-party code*.
+
+---
+
 ## Publishing passwords needs https, localhost or encryption off (#175)
 
 **What changed.** The Broker registry encrypts what it publishes in the
