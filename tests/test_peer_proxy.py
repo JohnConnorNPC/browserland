@@ -906,3 +906,117 @@ async def test_the_process_scope_crosses_the_hub_once(live, upstream):
     assert await loop.run_in_executor(None, call, None) == []
     assert [s.path for s in upstream.seen] == ["/mcp/terminals"]
     assert upstream.seen[0].all(SCOPE_HEADER) == []
+
+
+# ---- #261: the credential pair, hub side ------------------------------------
+# A hub of its own, with a browser token, an MCP token, an MCP admin token
+# and a broker admin token that are canaries: none may reach the peer, and
+# the peer's MCP token is never written anywhere on the hub.
+
+HUB_BROWSER = "hub-browser-canary-" + "b" * 24
+HUB_MCP = "hub-mcp-canary-" + "m" * 24
+HUB_MCP_ADMIN = "hub-mcp-admin-canary-" + "a" * 24
+HUB_ADMIN = "hub-admin-canary-" + "x" * 32
+HUB_CANARIES = (HUB_BROWSER, HUB_MCP, HUB_MCP_ADMIN, HUB_ADMIN)
+B_MCP_ADMIN = "b-mcp-admin-token"
+
+
+@pytest.fixture(scope="module")
+def hub2(upstream, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("peer-hub2")
+    mp = pytest.MonkeyPatch()
+    for var in ("WEB_TERMINAL_TOKEN", "WEB_TERMINAL_MCP_TOKEN",
+                "WEB_TERMINAL_MCP_ADMIN_TOKEN"):
+        mp.delenv(var, raising=False)
+    app = _make_app(
+        tmp, {"m": {"origin": upstream.origin, "mcp": True}},
+        auth_token=HUB_BROWSER, mcp_enabled=True, mcp_token=HUB_MCP,
+        mcp_admin_token=HUB_MCP_ADMIN, admin_token=HUB_ADMIN,
+        mcp_state_path=str(tmp / "webterm_mcp.json"))
+    srv = LiveApp(app).start()
+    srv.tmp = tmp
+    yield srv
+    srv.stop()
+    mp.undo()
+
+
+def _hub_calls(live, loop):
+    """The mcptool client's own calls through the hub, with B's tokens."""
+    def run():
+        c = _hub_client(live, "m", admin_token=B_MCP_ADMIN)
+        try:
+            c.list_terminals()
+            c.desktop_op("get", {})
+        finally:
+            c.close()
+    return loop.run_in_executor(None, run)
+
+
+async def test_no_hub_credential_reaches_the_peer(hub2, upstream):
+    """#261: through the real client AND through a raw request that carries
+    every hub credential a caller could attach (query token, hub admin
+    header, hub MCP admin header, a cookie, the hub's peer-token header),
+    the fake peer sees B's bearer only: no canary in any header value or in
+    the target, and the query keeps its harmless parts."""
+    import asyncio
+    for path in ("/mcp/terminals", "/mcp/desktop"):
+        upstream.routes[path] = lambda s: json_answer([])
+    await _hub_calls(hub2, asyncio.get_running_loop())
+    client = _client()
+    try:
+        r = await client.get(
+            hub2.url + "/peer/m/mcp/terminals?x=1&token=" + HUB_BROWSER
+            + "&Auth=" + HUB_MCP,
+            headers={"Authorization": "Bearer " + B_MCP,
+                     ADMIN_HEADER: HUB_ADMIN,
+                     peers.PEER_TOKEN_HEADER: HUB_BROWSER,
+                     "Cookie": "session=" + HUB_BROWSER})
+        assert r.status_code == 200, r.text
+    finally:
+        await client.aclose()
+    assert len(upstream.seen) == 3
+    for s in upstream.seen:
+        assert s.one("Authorization") == "Bearer " + B_MCP
+        flat = s.target + " " + " ".join(v for _, v in s.headers)
+        for canary in HUB_CANARIES:
+            assert canary not in flat, (canary, s.target, s.headers)
+        assert s.one(ADMIN_HEADER) is None and s.one("Cookie") is None
+    assert upstream.seen[0].one(MCP_ADMIN_HEADER) == B_MCP_ADMIN
+    assert upstream.seen[2].query == "x=1"
+
+
+async def test_the_hub_persists_no_peer_token(hub2, upstream, caplog):
+    """#261: B's MCP token and MCP admin token are used for the call and
+    written nowhere on the hub: not in any file under its state dir, not in
+    its peers table, not in its /info or /mcp/info, not in a log record."""
+    import asyncio
+    import json
+    import logging
+    for path in ("/mcp/terminals", "/mcp/desktop"):
+        upstream.routes[path] = lambda s: json_answer([])
+    with caplog.at_level(logging.DEBUG):
+        await _hub_calls(hub2, asyncio.get_running_loop())
+        client = _client()
+        try:
+            info = await client.get(
+                hub2.url + "/info",
+                headers={"Authorization": "Bearer " + HUB_BROWSER})
+            mcp_info = await client.get(
+                hub2.url + "/mcp/info",
+                headers={"Authorization": "Bearer " + HUB_MCP})
+        finally:
+            await client.aclose()
+    assert info.status_code == 200 and mcp_info.status_code == 200
+    files = [p for p in hub2.tmp.rglob("*") if p.is_file()]
+    held = {
+        "peers table": json.dumps(hub2.app.ctx.peers, default=str),
+        "/info": info.text, "/mcp/info": mcp_info.text,
+        "log": "\n".join(r.getMessage() for r in caplog.records),
+    }
+    for p in files:
+        held["file " + p.name] = p.read_bytes().decode("utf-8", "replace")
+    for secret in (B_MCP, B_MCP_ADMIN):
+        for where, text in held.items():
+            assert secret not in text, (secret, where)
+    assert any(k.startswith("file ") for k in held), \
+        "unmeasured: the hub wrote no file to scan"
