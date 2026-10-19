@@ -772,6 +772,17 @@
         // escaped twice, which is right: the mcptool parses the env value.
         // `scope` is present only when non-empty (absent = unscoped, the admin
         // view), PYTHONPATH only when the broker named one.
+        //
+        // #261: `o.peers`, an optional array of {id, origin} (the serving
+        // broker's own peers, from its /info), adds one entry per peer after
+        // the host's: named "<name>.<id>", at <url>/peer/<id>, with the
+        // peer's `peer_origin` and a PLACEHOLDER where that peer's MCP token
+        // goes. This page has no such token, never fetches one, and never
+        // copies this broker's own onto a peer; a peer entry never gets the
+        // host's `scope` or `admin_token` either (the process-wide --scope
+        // still reaches it, in the mcptool). Returns null when the entries
+        // cannot be written as hosts the mcptool accepts (a repeated name,
+        // or a ':' in one). Without peers the output is what it always was.
         function buildMcpJson(o) {
             const host = { name: o.name, url: o.url, token: o.token };
             if (o.scope) host.scope = o.scope;
@@ -779,7 +790,26 @@
             // the host entry carries both, and mcptool sends the admin header
             // only when admin_token is present.
             if (o.adminToken) host.admin_token = o.adminToken;
-            const env = { BROWSERLAND_MCP_HOSTS: JSON.stringify([host]) };
+            const hosts = [host];
+            if (o.peers && o.peers.length) {
+                // Reserved: the mcptool client refuses to send this string
+                // (webterm/mcptool/client.py, PEER_TOKEN_PLACEHOLDER).
+                const placeholder = "<paste this peer's MCP token>";
+                const hubUrl = String(o.url).replace(/\/+$/, '');
+                for (const p of o.peers) {
+                    hosts.push({ name: o.name + '.' + p.id,
+                                 url: hubUrl + '/peer/' + p.id,
+                                 token: placeholder,
+                                 peer_origin: p.origin });
+                }
+                const names = new Set();
+                for (const h of hosts) {
+                    if (String(h.name).indexOf(':') !== -1
+                            || names.has(h.name)) return null;
+                    names.add(h.name);
+                }
+            }
+            const env = { BROWSERLAND_MCP_HOSTS: JSON.stringify(hosts) };
             if (o.pythonpath) env.PYTHONPATH = o.pythonpath;
             return JSON.stringify({ mcpServers: { browserland: {
                 command: o.python,
@@ -793,6 +823,58 @@
             if (!host || host.id === 'local') return 'local';
             const n = String(host.label || '').replace(/:/g, '').trim();
             return n || 'host';
+        }
+        // #261: the peers Copy writes, from this broker's /info answer
+        // (localPeersKnown(): {proxy, peers: {id: origin}}) -> {peers: [{id,
+        // origin}]} sorted by id, or {error}. null is a read that has not
+        // answered: an unmeasured list is never read as "no peers". Every
+        // peer /info publishes gets an entry, proxying or not (an entry that
+        // cannot work says why when it is used), and a peer Copy cannot write
+        // is an error naming it, never a silent omission.
+        function mcpJsonPeers(info) {
+            if (!info || typeof info !== 'object' || !info.peers
+                    || typeof info.peers !== 'object') {
+                return { error: 'could not read this broker’s peer list: '
+                    + 'reopen the Control Panel and try again' };
+            }
+            const out = [];
+            for (const id of Object.keys(info.peers).sort()) {
+                const origin = info.peers[id];
+                if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+                    return { error: 'peer ' + JSON.stringify(id) + ' has an '
+                        + 'id Copy cannot write as a host name (1-64 of '
+                        + 'A-Z a-z 0-9 _ -)' };
+                }
+                if (typeof origin !== 'string' || !origin) {
+                    return { error: 'peer ' + JSON.stringify(id)
+                        + ' has no origin in this broker’s peer list' };
+                }
+                out.push({ id: id, origin: origin });
+            }
+            return { peers: out };
+        }
+        // #261: what a click on Copy would put on the clipboard, pure:
+        // {text} or {error} (never both, and never a text from an error).
+        // `o` is buildMcpJson's input plus `isLocal` (the host is the broker
+        // serving this page: only then does the file carry peers) and `info`
+        // (localPeersKnown()).
+        function mcpCopyPlan(o) {
+            let peers = null;
+            if (o.isLocal) {
+                const p = mcpJsonPeers(o.info);
+                if (p.error) return { error: p.error };
+                peers = p.peers;
+            }
+            const text = buildMcpJson({
+                name: o.name, url: o.url, token: o.token, scope: o.scope,
+                adminToken: o.adminToken, python: o.python,
+                pythonpath: o.pythonpath, peers: peers,
+            });
+            if (text === null) {
+                return { error: 'cannot write the peer entries: two entries '
+                    + 'would share a name, or a name holds a “:”' };
+            }
+            return { text: text };
         }
         // The clipboard refused (a denied permission, no gesture): show the
         // text so it can still be selected and copied by hand.

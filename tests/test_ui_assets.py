@@ -34016,3 +34016,264 @@ let recData = null, duration = 1000;
     assert r["marker"] == {"t": 500, "k": "c", "s": "controlled", "l": "Pixel 9"}
     assert r["marks"] == [["recplay-mark recplay-mark-ctl", "50%",
                            "controlled from Pixel 9 @ 0:00"]]
+
+
+# --------------------------------------------------------------------------- #
+# #261: Copy .mcp.json writes the serving broker's peer entries
+# --------------------------------------------------------------------------- #
+
+def _js261():
+    """buildMcpJson + the two pure #261 helpers, ready to eval in node."""
+    return "\n".join(
+        _fn237("81_js_control_panel.js", sig)
+        for sig in ("function buildMcpJson(o)", "function mcpJsonPeers(info)",
+                    "function mcpCopyPlan(o)"))
+
+
+_PEERS261 = ("[{id: 'b', origin: 'http://100.64.0.2:4445'},"
+             " {id: 'x_y-1', origin: 'https://h.example:4445'}]")
+
+
+def _hosts261(text):
+    """The hosts list inside a copied file (the value is JSON in JSON)."""
+    env = json.loads(text)["mcpServers"]["browserland"]["env"]
+    return json.loads(env["BROWSERLAND_MCP_HOSTS"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_peer_entries_round_trip_through_the_mcptool(tmp_path):
+    """#261: with peers the file lists the host, then one entry per peer:
+    named `<host>.<id>`, at `<url>/peer/<id>` however the url ends, with the
+    peer's origin and the reserved placeholder token, and neither the host's
+    token, scope nor admin token. The mcptool accepts the whole list."""
+    pytest.importorskip("mcp")
+    from webterm.mcptool import __main__ as m
+    from webterm.mcptool.client import PEER_TOKEN_PLACEHOLDER
+    hub_token, admin = 'hub"tok\\en', "hub-admin-tok"
+    r = _node237(tmp_path, _js261() + r"""
+const base = {name: 'local', token: """ + json.dumps(hub_token) + r""",
+              scope: 'projA', adminToken: """ + json.dumps(admin) + r""",
+              python: 'py', pythonpath: '', peers: """ + _PEERS261 + r"""};
+process.stdout.write(JSON.stringify({
+    plain: buildMcpJson(Object.assign({url: 'http://127.0.0.1:4445'}, base)),
+    slash: buildMcpJson(Object.assign({url: 'http://127.0.0.1:4445/'}, base)),
+}) + '\n');
+""")
+    for case, hub_url in (("plain", "http://127.0.0.1:4445"),
+                          ("slash", "http://127.0.0.1:4445/")):
+        hosts = _hosts261(r[case])
+        assert hosts[0] == {"name": "local", "url": hub_url,
+                            "token": hub_token, "scope": "projA",
+                            "admin_token": admin}, case
+        assert hosts[1:] == [
+            {"name": "local.b", "url": "http://127.0.0.1:4445/peer/b",
+             "token": PEER_TOKEN_PLACEHOLDER,
+             "peer_origin": "http://100.64.0.2:4445"},
+            {"name": "local.x_y-1",
+             "url": "http://127.0.0.1:4445/peer/x_y-1",
+             "token": PEER_TOKEN_PLACEHOLDER,
+             "peer_origin": "https://h.example:4445"}], case
+        peer_text = json.dumps(hosts[1:])
+        for secret in (hub_token, admin, "projA", "admin_token", '"scope"'):
+            assert json.dumps(secret)[1:-1] not in peer_text, (case, secret)
+        raw = json.dumps(hosts)
+        # the mcptool takes the list; the process-wide scope reaches the
+        # peers (and only it), the host's own stays its own
+        got = m._parse_hosts(raw, None)
+        assert [(h[0], h[3]) for h in got] == [
+            ("local", "projA"), ("local.b", None), ("local.x_y-1", None)]
+        assert got[1][5] == "http://100.64.0.2:4445"
+        assert [(h[0], h[3]) for h in m._parse_hosts(raw, "proc")] == [
+            ("local", "projA"), ("local.b", "proc"),
+            ("local.x_y-1", "proc")]
+    # the JS and the client spell the placeholder the same
+    js = _js261()
+    assert 'const placeholder = "' + PEER_TOKEN_PLACEHOLDER + '";' in js
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_no_peers_is_byte_identical_to_the_pre_261_file(tmp_path):
+    """#261: no `peers` (absent, null or empty) writes exactly the file the
+    button always wrote, pinned against a golden built here, not against the
+    new code's own output."""
+    r = _node237(tmp_path, _js261() + r"""
+const base = {name: 'local', url: 'http://[::1]:4445', token: 'tok',
+              python: 'C:\\Py\\python.exe', pythonpath: 'X:\\repo'};
+process.stdout.write(JSON.stringify({
+    absent: buildMcpJson(base),
+    nul: buildMcpJson(Object.assign({peers: null}, base)),
+    empty: buildMcpJson(Object.assign({peers: []}, base)),
+    colon: buildMcpJson(Object.assign({}, base, {name: 'a:b'})),
+}) + '\n');
+""")
+    golden = json.dumps({"mcpServers": {"browserland": {
+        "command": "C:\\Py\\python.exe",
+        "args": ["-m", "webterm.mcptool"],
+        "env": {"BROWSERLAND_MCP_HOSTS": json.dumps(
+            [{"name": "local", "url": "http://[::1]:4445", "token": "tok"}],
+            separators=(",", ":")), "PYTHONPATH": "X:\\repo"}}}}, indent=2)
+    for case in ("absent", "nul", "empty"):
+        assert r[case] == golden, case
+    # a ':' in the host's own name is the existing behaviour without peers
+    assert r["colon"] is not None and '"name":"a:b"' in r["colon"].replace(
+        '\\"', '"')
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_build_refuses_names_the_mcptool_would_not_take(tmp_path):
+    """#261: with peers, a ':' in a name or a repeated name is no file
+    (null), never a file that stops the MCP server at startup."""
+    r = _node237(tmp_path, _js261() + r"""
+const base = {url: 'http://h:4445', token: 't', python: 'py', pythonpath: ''};
+const peers = [{id: 'b', origin: 'http://o:1'}];
+process.stdout.write(JSON.stringify({
+    colon: buildMcpJson(Object.assign({name: 'a:b', peers: peers}, base)),
+    dup: buildMcpJson(Object.assign({name: 'x', peers: [
+        {id: 'b', origin: 'http://o:1'}, {id: 'b', origin: 'http://o:2'}]},
+        base)),
+    ok: buildMcpJson(Object.assign({name: 'x', peers: peers}, base)) !== null,
+}) + '\n');
+""")
+    assert r == {"colon": None, "dup": None, "ok": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_peers_step_for_copy(tmp_path):
+    """#261: /info's answer -> peers, sorted, whether or not the broker can
+    proxy; a read that has not answered, or a peer Copy cannot write, is an
+    error naming it, never an empty or shorter list."""
+    r = _node237(tmp_path, _js261() + r"""
+const peers = (o) => Object.assign(Object.create(null), o);
+process.stdout.write(JSON.stringify({
+    unread: mcpJsonPeers(null),
+    nopeers: mcpJsonPeers({proxy: true}),
+    none: mcpJsonPeers({proxy: true, peers: peers({})}),
+    noproxy: mcpJsonPeers({proxy: false, peers: peers(
+        {b: 'http://o:1', a: 'http://p:2'})}),
+    badid: mcpJsonPeers({proxy: true, peers: peers({'a b': 'http://o:1'})}),
+    badorigin: mcpJsonPeers({proxy: true, peers: peers({q: 5})}),
+    emptyorigin: mcpJsonPeers({proxy: true, peers: peers({q: ''})}),
+}) + '\n');
+""")
+    assert "peer list" in r["unread"]["error"] and "peers" not in r["unread"]
+    assert "error" in r["nopeers"]
+    assert r["none"] == {"peers": []}
+    assert r["noproxy"] == {"peers": [
+        {"id": "a", "origin": "http://p:2"},
+        {"id": "b", "origin": "http://o:1"}]}
+    assert '"a b"' in r["badid"]["error"] and "peers" not in r["badid"]
+    assert '"q"' in r["badorigin"]["error"]
+    assert '"q"' in r["emptyorigin"]["error"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_copy_plan_emits_or_refuses(tmp_path):
+    """#261: the click's whole decision, run in node: the local broker's file
+    carries its peers; another host's does not; an unread peer list or an
+    unwritable name is an error and NO text (so nothing is copied)."""
+    r = _node237(tmp_path, _js261() + r"""
+const info = {proxy: true, peers: {b: 'http://100.64.0.2:4445'}};
+const base = {name: 'local', url: 'http://127.0.0.1:4445', token: 'tok',
+              scope: '', adminToken: null, python: 'py', pythonpath: ''};
+const plan = (extra) => mcpCopyPlan(Object.assign({}, base, extra));
+const hostsOf = (p) => JSON.parse(JSON.parse(p.text).mcpServers.browserland
+    .env.BROWSERLAND_MCP_HOSTS).map(h => h.name);
+process.stdout.write(JSON.stringify({
+    local: hostsOf(plan({isLocal: true, info: info})),
+    remote: hostsOf(plan({isLocal: false, info: info})),
+    remoteNoInfo: hostsOf(plan({isLocal: false, info: null})),
+    unread: plan({isLocal: true, info: null}),
+    noproxy: hostsOf(plan({isLocal: true,
+        info: {proxy: false, peers: {b: 'http://o:1'}}})),
+    nopeers: hostsOf(plan({isLocal: true, info: {proxy: true, peers: {}}})),
+    badName: plan({isLocal: true, info: info, name: 'a:b'}),
+}) + '\n');
+""")
+    assert r["local"] == ["local", "local.b"]
+    assert r["remote"] == ["local"] and r["remoteNoInfo"] == ["local"]
+    assert r["noproxy"] == ["local", "local.b"] and r["nopeers"] == ["local"]
+    assert "text" not in r["unread"] and "peer list" in r["unread"]["error"]
+    assert "text" not in r["badName"] and "share a name" in r["badName"]["error"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_copied_hub_file_lists_and_routes_both(tmp_path, monkeypatch):
+    """#261: the file Copy writes for a hub, with the owner's paste over the
+    placeholder, is read by the mcptool as two hosts: one list_terminals holds
+    the hub's window and the peer's (`local.b:7`), a call on the peer's id
+    goes to `<hub>/peer/b` with the PEER's token and pairing, and the hub's
+    own windows to the hub. A placeholder left in place is one `errors` row
+    and no request. With peers configured, launch_terminal needs host=."""
+    pytest.importorskip("mcp")
+    import httpx
+    from webterm.mcptool import BrowserlandClient, BrowserlandError
+    from webterm.mcptool import __main__ as m
+    from webterm.mcptool import server
+    from webterm.protocol import PEER_ORIGIN_HEADER
+    r = _node237(tmp_path, _js261() + r"""
+const p = mcpCopyPlan({isLocal: true, name: 'local',
+    info: {proxy: true, peers: {b: 'http://100.64.0.2:4445'}},
+    url: 'http://127.0.0.1:4445', token: 'hub-tok', scope: '',
+    adminToken: null, python: 'py', pythonpath: ''});
+process.stdout.write(JSON.stringify({text: p.text}) + '\n');
+""")
+    hosts = _hosts261(r["text"])
+    seen = []
+
+    def handler_for(name):
+        def handle(req):
+            seen.append((name, req.url.path,
+                         req.headers["authorization"],
+                         req.headers.get(PEER_ORIGIN_HEADER)))
+            if req.url.path.endswith("/mcp/terminals"):
+                return httpx.Response(
+                    200, json=[{"id": 1 if name == "local" else 7}])
+            return httpx.Response(200, json={"ok": True})
+        return handle
+
+    def factory(base, token, scope=None, admin_token=None, name=None,
+                peer_origin=None, **kw):
+        return BrowserlandClient(
+            base=base, token=token, scope=scope, admin_token=admin_token,
+            name=name, peer_origin=peer_origin,
+            transport=httpx.MockTransport(handler_for(name)))
+
+    def configure(entries):
+        monkeypatch.setattr(server, "BrowserlandClient", factory)
+        server.configure(m._parse_hosts(json.dumps(entries), None))
+
+    def reset():
+        for c in server._clients.values():
+            c.close()
+        server._host_configs = {}
+        server._clients = {}
+
+    pasted = [dict(h, token="peer-tok") if h["name"] == "local.b" else h
+              for h in hosts]
+    configure(pasted)
+    try:
+        out = server.list_terminals()
+        assert sorted(t["id"] for t in out["terminals"]) == [
+            "local.b:7", "local:1"] and out["errors"] == {}
+        seen.clear()
+        server.read_screen("local.b:7")
+        assert seen == [("local.b", "/peer/b/mcp/read", "Bearer peer-tok",
+                         "http://100.64.0.2:4445")]
+        seen.clear()
+        server.read_screen("local:1")
+        assert seen == [("local", "/mcp/read", "Bearer hub-tok", None)]
+        # once peer entries exist the single-host default is gone
+        with pytest.raises(BrowserlandError) as ei:
+            server.launch_terminal()
+        assert ei.value.code == "host_required"
+    finally:
+        reset()
+    seen.clear()
+    configure(hosts)                    # the placeholder left in place
+    try:
+        out = server.list_terminals()
+        assert [t["id"] for t in out["terminals"]] == ["local:1"]
+        assert "paste that peer's own MCP token" in out["errors"]["local.b"]
+        assert [s[0] for s in seen] == ["local"]
+    finally:
+        reset()
