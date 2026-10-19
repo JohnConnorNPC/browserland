@@ -1020,3 +1020,29 @@ async def test_the_hub_persists_no_peer_token(hub2, upstream, caplog):
             assert secret not in text, (secret, where)
     assert any(k.startswith("file ") for k in held), \
         "unmeasured: the hub wrote no file to scan"
+async def test_desktop_ops_reach_the_peers_relay(live, upstream):
+    """#261: through /peer/<id> the desktop calls are the PEER's: the hub
+    relays GET and POST /mcp/desktop with the peer's bearer and body, adds
+    nothing, and the agent gets exactly the peer's answer. (Which browser the
+    peer asks is the peer's lease, not provable with a fake peer: the live
+    check in issue-261 covers it.)"""
+    import asyncio
+    upstream.routes["/mcp/desktop"] = lambda s: json_answer(
+        {"ok": True, "from": "peer", "method": s.method})
+
+    def run():
+        c = _hub_client(live, "m")
+        try:
+            return (c.get_desktop(), c.desktop_op("focus", {"id": 3}))
+        finally:
+            c.close()
+
+    got = await asyncio.get_running_loop().run_in_executor(None, run)
+    assert got == ({"ok": True, "from": "peer", "method": "GET"},
+                   {"ok": True, "from": "peer", "method": "POST"})
+    assert [(s.method, s.path) for s in upstream.seen] == [
+        ("GET", "/mcp/desktop"), ("POST", "/mcp/desktop")]
+    assert all(s.one("Authorization") == "Bearer " + B_MCP
+               for s in upstream.seen)
+    assert json.loads(upstream.seen[1].body) == {"op": "focus",
+                                                 "args": {"id": 3}}
