@@ -3335,3 +3335,67 @@ def test_a_peer_entry_takes_the_process_scope_not_the_hubs():
                                                  ("hub.b", "proc")]
     without = m._parse_hosts(raw, None)
     assert [(h[0], h[3]) for h in without] == [("hub", "s1"), ("hub.b", None)]
+
+
+
+# ---- #261: a paced send_keys refused midway says how far it got ----------------
+
+def _paced_broker(refuse_on, code="peer_busy", status=503):
+    """A host whose /mcp/input refuses the `refuse_on`th POST."""
+    posts = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/mcp/input":
+            posts.append(json.loads(req.content)["data"])
+            if len(posts) == refuse_on:
+                return httpx.Response(status, json={"error": code})
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json=[{"id": 7, "pace_ms": 0}])
+    return handler, posts
+
+
+@pytest.mark.parametrize("code,status", [("peer_busy", 503),
+                                         ("body_timeout", 408),
+                                         ("peer_timeout", 504)])
+def test_a_paced_send_keys_refused_on_key_three_of_five(code, status):
+    handler, posts = _paced_broker(3, code, status)
+    server = _install({"h": handler})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_keys("h:7", ["a", "b", "c", "d", "e"], delay_ms=1)
+    finally:
+        _reset_server()
+    msg = str(ei.value)
+    assert posts == ["a", "b", "c"]            # 2 typed, the 3rd refused
+    assert (ei.value.code, ei.value.status) == (code, status)
+    assert "2 of 5 keys sent" in msg
+    assert "Resume from key 3" in msg and "do not retry the whole call" in msg
+    assert f"(HTTP {status})" in msg           # the refusal's own text is kept
+    assert msg.index("2 of 5 keys sent") < msg.index("The refusal was")
+
+
+def test_a_paced_send_keys_refused_on_the_first_key_keeps_its_text():
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    handler, posts = _paced_broker(1)
+    server = _install({"h": handler})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_keys("h:7", ["a", "b", "c"], delay_ms=1)
+    finally:
+        _reset_server()
+    assert posts == ["a"]
+    assert str(ei.value) == _ERROR_MESSAGES["peer_busy"] + " (HTTP 503)"
+
+
+def test_a_single_shot_send_keys_keeps_the_not_sent_text():
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    handler, posts = _paced_broker(1)
+    server = _install({"h": handler})
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_keys("h:7", ["a", "b", "c"], delay_ms=0)
+    finally:
+        _reset_server()
+    assert posts == ["abc"]                    # one burst, one POST
+    assert str(ei.value) == _ERROR_MESSAGES["peer_busy"] + " (HTTP 503)"
+    assert "keys sent" not in str(ei.value)

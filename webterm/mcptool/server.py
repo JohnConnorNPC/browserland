@@ -645,6 +645,23 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
     return client.send_input(int_id, _newlines_to_enter(data))
 
 
+def _partial_send_error(exc: BrowserlandError, typed: int,
+                        total: int) -> BrowserlandError:
+    """#261: a paced send_keys writes one POST per key, so a refusal on key
+    k+1 (through a hub: peer_busy, body_timeout, ...) arrives after k keys
+    were typed. The refusal's own text speaks of ONE call ("not sent, retry");
+    the agent must be told how far the keys got, and to resume, not to send
+    the whole list again. Same code, status and body, so callers that branch
+    on them still can."""
+    k = typed + 1
+    return BrowserlandError(
+        exc.status, exc.code,
+        f"{typed} of {total} keys sent: send_keys stopped at key {k} (key {k} "
+        f"was not sent). Resume from key {k}; do not retry the whole call, or "
+        f"the first {typed} keys are typed twice. The refusal was: {exc}",
+        exc.body)
+
+
 @mcp.tool()
 def send_keys(id: str, keys: List[str],
               delay_ms: Optional[int] = None) -> Dict[str, Any]:
@@ -754,7 +771,13 @@ def send_keys(id: str, keys: List[str],
         for i, tok in enumerate(keys):
             if i:
                 time.sleep(pace / 1000.0)
-            result = client.send_input(int_id, _token_to_text(str(tok), app_cursor))
+            try:
+                result = client.send_input(
+                    int_id, _token_to_text(str(tok), app_cursor))
+            except BrowserlandError as exc:
+                if not i:
+                    raise           # nothing typed yet: the text is accurate
+                raise _partial_send_error(exc, i, len(keys)) from exc
         return result
     return client.send_input(int_id, text)
 
