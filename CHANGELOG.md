@@ -283,6 +283,29 @@ again, unless they change a dependency file too.
   and a peer that shared one MCP token must be given different ones. See
   [`wiki/Upgrading.md`](wiki/Upgrading.md#a-peers-mcp-token-must-differ-from-the-hubs-261).
 
+- **An unknown peer no longer tells a hub token from any other bearer** (#260).
+  A call on `/peer/<id>/mcp/*` for an unknown peer, or one not set to
+  `"mcp": true`, now answers 404 `unknown_peer` whatever the bearer is. Before,
+  a bearer equal to one of the hub's own tokens answered 403
+  `hub_credential_refused` first, whether or not the peer existed, so a caller
+  holding no credential could test a guessed token against that answer; the 403
+  is now only for a known `"mcp": true` peer. A client that tells the two codes
+  apart sees 404 where it saw 403 for such a peer.
+
+- **`/peer/<id>/mcp/config` is not relayed** (#260). On the peer it is a
+  browser-realm route, so the hub no longer sends the peer's MCP bearer to it:
+  GET and POST answer 404 `not_relayed`. The rest of the MCP relay is
+  unchanged.
+
+- **Two limits are written down** (#260, documentation only). The broker's
+  `admin_token` makes install, uninstall, rescan and the policy writes need
+  the `X-Webterm-Admin` header, but it does not stop a holder of the page token
+  from writing files into `mods_dir` through `/file/*`, which the next boot
+  serves if they validate; and the fuller CSP (#190) is sent
+  `Content-Security-Policy-Report-Only` at 1.0, while the enforced policy stays
+  `script-src` plus `frame-ancestors`. See
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#the-admin-token-guards-routes-not-files-191).
+
 - **Python 3.10 is the minimum** (#260). `requires-python` is now `>=3.10` (it
   was `>=3.9`), so `pip install` refuses a 3.9 interpreter; the launcher
   scripts do not check the version. See
@@ -301,6 +324,11 @@ again, unless they change a dependency file too.
   own issue says otherwise.
 
 ### Fixed
+
+- **`POST /mcp/launch` is refused while the broker restarts** (#260). Like
+  `POST /launch`, it answers 503 `restarting` once a restart has begun
+  draining, instead of starting a terminal and its MCP row on a process that is
+  about to stop. An unauthenticated call still gets 401.
 
 - **A window launched over MCP opens on the desktop, and desktop ops reach it
   before any click** (#262). `launch_terminal` used to leave only a taskbar
