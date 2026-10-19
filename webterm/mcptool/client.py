@@ -28,9 +28,12 @@ import httpx
 from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
                         normalize_origin)
 
-#: #261: a hosts url that goes through a hub's relay: the id is the hub's
-#: PEER_ID_RE (a path with another segment after it does not match).
-_PEER_BASE_RE = re.compile(r"^.*/peer/([A-Za-z0-9_-]{1,64})$")
+#: #261: a hosts url that goes through a hub's relay: exactly
+#: scheme://authority/peer/<id>, the id being the hub's PEER_ID_RE. A path
+#: before /peer/ (a broker behind some other reverse proxy) or after the id
+#: does not match.
+_PEER_BASE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/peer/([A-Za-z0-9_-]{1,64})$")
 
 #: #261: through a hub, mcp_disabled and auth_required are the PEER's answers
 #: (the relay forwards the call with the host's own token), so the generic
@@ -65,10 +68,11 @@ _ERROR_MESSAGES = {
     "unknown_peer": "The hub this host's URL goes through has no MCP relay to "
                     "this peer: no peer has that id, or the peer is not set to "
                     "\"mcp\": true in the hub's peers config (the hub gives "
-                    "one answer for both). Set \"mcp\": true on that peer in "
-                    "the hub's config and restart the hub; the peer also needs "
-                    "MCP enabled with its own token (that peer's Control "
-                    "Panel → MCP access).",
+                    "one answer for both). That is the hub operator's to "
+                    "change, not the agent's: ask the person who runs the "
+                    "hub to set \"mcp\": true on that peer and restart the "
+                    "hub; the peer also needs MCP enabled with its own token "
+                    "(that peer's Control Panel → MCP access).",
     "hub_credential_refused": "The hub refused this host's token: it is one "
                               "of the hub's own tokens (MCP, browser or "
                               "admin), which the hub never sends to a peer. "
@@ -78,9 +82,10 @@ _ERROR_MESSAGES = {
                               "entry.",
     "proxy_unavailable": "The hub this host's URL goes through cannot relay to "
                          "peers: its proxy extra is missing or too old (it "
-                         "needs httpx and websockets 15; pip install "
-                         "\".[proxy]\" on the hub). Install it and restart "
-                         "the hub.",
+                         "needs httpx and websockets 15). That is the hub "
+                         "operator's to fix, not the agent's: ask the person "
+                         "who runs the hub to install it (pip install "
+                         "\".[proxy]\") and restart the hub.",
     "peer_busy": "The hub this host's URL goes through relays at most 2 calls "
                  "per peer (8 in all, shared by every MCP client of that "
                  "hub), and a read_screen that waits holds one for up to "
@@ -143,10 +148,12 @@ _ERROR_MESSAGES = {
                          "call to this host is refused.",
     # Raised by this client, never sent by a broker: see _send. status 0.
     "token_placeholder": "This host's token is still the placeholder that "
-                         "Copy .mcp.json writes for a peer. Nothing was sent: "
-                         "paste that peer's own MCP token (never the hub's) "
-                         "over it in the hosts entry and restart this server, "
-                         "or delete the entry if you do not use that peer.",
+                         "Copy .mcp.json writes for a peer. Nothing was sent. "
+                         "This is for the person who set up this MCP config, "
+                         "not the agent: ask them to paste that peer's own "
+                         "MCP token (never the hub's) over it in the hosts "
+                         "entry and restart this server, or to delete the "
+                         "entry if that peer is not used.",
     # #245: the admin credential's error surface.
     "admin_required": "The broker did not accept this server's admin "
                       "credential. While the broker has an admin token, a "
@@ -274,10 +281,12 @@ class BrowserlandClient:
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
         self._read_timeout = read_timeout
-        # #261: kept as a flag, not the token, so a repr or debug dump of this
-        # client never carries the credential.
+        # #261: the reserved placeholder never becomes a bearer: no
+        # Authorization header is built for it, and _send refuses before any
+        # request. (Any other token is held in that header, as before.)
         self._placeholder = token == PEER_TOKEN_PLACEHOLDER
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = ({} if self._placeholder
+                   else {"Authorization": f"Bearer {token}"})
         if self.scope:
             headers[SCOPE_HEADER] = self.scope
         if self.admin_token:

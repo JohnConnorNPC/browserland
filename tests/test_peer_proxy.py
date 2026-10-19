@@ -877,7 +877,8 @@ async def test_a_peer_without_mcp_reads_the_enable_text(live, upstream):
     assert isinstance(err, BrowserlandError), err
     assert (err.code, err.status) == ("unknown_peer", 404)
     text = " ".join(str(err).split())
-    assert 'Set "mcp": true on that peer' in text and "restart the hub" in text
+    assert "ask the person who runs the hub to set" in text
+    assert '"mcp": true on that peer and restart the hub' in text
     assert upstream.seen == []
 
 

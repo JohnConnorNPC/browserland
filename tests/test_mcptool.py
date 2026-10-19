@@ -3185,7 +3185,8 @@ def test_unknown_peer_names_both_causes_and_the_fix():
     from webterm.mcptool.client import _ERROR_MESSAGES
     text = " ".join(_ERROR_MESSAGES["unknown_peer"].split())
     for words in ("no peer has that id", 'is not set to "mcp": true',
-                  'Set "mcp": true on that peer', "restart the hub",
+                  "ask the person who runs the hub",
+                  'to set "mcp": true on that peer', "restart the hub",
                   "MCP enabled", "its own token"):
         assert words in text, words
 
@@ -3254,11 +3255,22 @@ def test_a_real_token_is_not_refused():
     assert sent == ["Bearer " + PEER_TOKEN_PLACEHOLDER + " "]
 
 
-def test_the_placeholder_is_not_kept_on_the_client():
+def test_a_placeholder_client_holds_no_bearer():
+    """#261: no Authorization header is built for the reserved string, so
+    nothing on the client (a field, the HTTP client's headers) holds it; a
+    real token still has its bearer, as before."""
     from webterm.mcptool.client import PEER_TOKEN_PLACEHOLDER
     c, _ = _placeholder_client()
-    c.close()
-    assert not any(v == PEER_TOKEN_PLACEHOLDER for v in vars(c).values())
+    try:
+        assert "authorization" not in {k.lower() for k in c._client.headers}
+        assert PEER_TOKEN_PLACEHOLDER not in repr(dict(c._client.headers))
+        assert not any(v == PEER_TOKEN_PLACEHOLDER for v in vars(c).values())
+    finally:
+        c.close()
+    with BrowserlandClient(base="http://hub:4445/peer/b", token="real",
+                           transport=httpx.MockTransport(
+                               lambda r: httpx.Response(200, json=[]))) as r:
+        assert r._client.headers["authorization"] == "Bearer real"
 
 
 def test_a_placeholder_host_is_listed_under_errors():
@@ -3289,7 +3301,10 @@ def test_a_placeholder_host_is_listed_under_errors():
     ("http://hub:4445/peer/x_y-1", "x_y-1"),
     ("http://hub:4445", None),
     ("http://hub:4445/peer/b/extra", None),
-], ids=["peer", "peer-slash", "peer-id-chars", "direct", "extra-segment"])
+    ("http://hub:4445/prefix/peer/b", None),
+    ("http://[::1]:4445/peer/b", "b"),
+], ids=["peer", "peer-slash", "peer-id-chars", "direct", "extra-segment",
+        "prefixed", "ipv6"])
 def test_peer_answered_codes_through_a_hub(code, status, base, peer):
     from webterm.mcptool.client import _ERROR_MESSAGES
 
@@ -3400,3 +3415,21 @@ def test_a_single_shot_send_keys_keeps_the_not_sent_text():
     assert posts == ["abc"]                    # one burst, one POST
     assert str(ei.value) == _ERROR_MESSAGES["peer_busy"] + " (HTTP 503)"
     assert "keys sent" not in str(ei.value)
+
+
+
+# ---- #261: three texts are the operator's to act on, not the agent's -----------
+
+@pytest.mark.parametrize("code", ["unknown_peer", "proxy_unavailable",
+                                  "token_placeholder",
+                                  "hub_credential_refused"])
+def test_the_operator_texts_are_addressed_to_the_operator(code):
+    """An agent with a shell treats an error text as an instruction. These
+    four need the hub's operator or the owner of the MCP config, so each says
+    so, in words an agent will read as "report this", and none tells the agent
+    itself to edit a config or restart anything."""
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    text = " ".join(_ERROR_MESSAGES[code].split())
+    assert ("not the agent" in text), code
+    assert "ask the person who" in text or "ask them to" in text, code
+    assert "Set " not in text and "Install it" not in text, code
