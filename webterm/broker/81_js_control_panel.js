@@ -51,6 +51,11 @@
             }
             const modal = document.getElementById('settings-modal');
             if (!modal) return null;   // markup missing — nothing to host
+            // #261: Copy's peer entries read this broker's /info answer
+            // synchronously (localPeersKnown); start that read as the panel
+            // opens, so the first click already has it. A failed read is
+            // asked again by the next caller.
+            try { localPeers().catch(() => {}); } catch (_) {}
 
             const title = appData.title || 'Control Panel';
             const geom = clampGeom(appData.geom || controlPanelDefaultGeom());
@@ -593,6 +598,8 @@
         const setMcpScopeEl = document.getElementById('set-mcp-scope');
         const setMcpCopyJson = document.getElementById('set-mcp-copy-json');
         const setMcpCopyErr = document.getElementById('set-mcp-copy-err');
+        // #261: off by default; on, the file also carries the peers.
+        const setMcpCopyPeers = document.getElementById('set-mcp-copy-peers');
         // The connect URL an external MCP server dials (the host's base + /mcp).
         // Local host has no stored url -> use this page's origin.
         function mcpConnectUrl(host) {
@@ -777,8 +784,10 @@
         // broker's own peers, from its /info), adds one entry per peer after
         // the host's: named "<name>.<id>", at <url>/peer/<id>, with the
         // peer's `peer_origin` and a PLACEHOLDER where that peer's MCP token
-        // goes. This page has no such token, never fetches one, and never
-        // copies this broker's own onto a peer; a peer entry never gets the
+        // goes. Copy never writes a peer's token (a peer opened as a
+        // from-server host loads its own for its own tab; none of it goes
+        // into this file) and never copies this broker's own onto a
+        // peer; a peer entry never gets the
         // host's `scope` or `admin_token` either (the process-wide --scope
         // still reaches it, in the mcptool). Returns null when the entries
         // cannot be written as hosts the mcptool accepts (a repeated name,
@@ -834,8 +843,7 @@
         function mcpJsonPeers(info) {
             if (!info || typeof info !== 'object' || !info.peers
                     || typeof info.peers !== 'object') {
-                return { error: 'could not read this broker’s peer list: '
-                    + 'reopen the Control Panel and try again' };
+                return { error: 'peer list still loading: click Copy again' };
             }
             const out = [];
             for (const id of Object.keys(info.peers).sort()) {
@@ -854,16 +862,24 @@
             return { peers: out };
         }
         // #261: what a click on Copy would put on the clipboard, pure:
-        // {text} or {error} (never both, and never a text from an error).
-        // `o` is buildMcpJson's input plus `isLocal` (the host is the broker
-        // serving this page: only then does the file carry peers) and `info`
-        // (localPeersKnown()).
+        // {text} (plus a {note} when the file lacks something the option
+        // asked for) or {error}, never both an error and a text. `o` is
+        // buildMcpJson's input plus `includePeers` (the option, off by
+        // default: off is the file Copy always wrote, with no peer read at
+        // all), `isLocal` (the host is the broker serving this page: peers
+        // come only from its own tab) and `info` (localPeersKnown()).
         function mcpCopyPlan(o) {
             let peers = null;
-            if (o.isLocal) {
-                const p = mcpJsonPeers(o.info);
-                if (p.error) return { error: p.error };
-                peers = p.peers;
+            let note = '';
+            if (o.includePeers) {
+                if (!o.isLocal) {
+                    note = 'peer entries come only from this broker’s own '
+                        + 'tab: this file has none';
+                } else {
+                    const p = mcpJsonPeers(o.info);
+                    if (p.error) return { error: p.error };
+                    peers = p.peers;
+                }
             }
             const text = buildMcpJson({
                 name: o.name, url: o.url, token: o.token, scope: o.scope,
@@ -874,7 +890,7 @@
                 return { error: 'cannot write the peer entries: two entries '
                     + 'would share a name, or a name holds a “:”' };
             }
-            return { text: text };
+            return note ? { text: text, note: note } : { text: text };
         }
         // The clipboard refused (a denied permission, no gesture): show the
         // text so it can still be selected and copied by hand.
@@ -941,6 +957,7 @@
                 // already makes); mcpCopyPlan decides, and an error is shown
                 // here with nothing copied.
                 const plan = mcpCopyPlan({
+                    includePeers: !!(setMcpCopyPeers && setMcpCopyPeers.checked),
                     isLocal: host.id === 'local',
                     info: localPeersKnown(),
                     name: mcpJsonHostName(host),
@@ -960,6 +977,12 @@
                     return;
                 }
                 const text = plan.text;
+                // A note is not a refusal: the file is copied, and the line
+                // beside the button says what it lacks.
+                if (plan.note) {
+                    setMcpCopyErr.textContent = plan.note;
+                    setMcpCopyErr.classList.add('show');
+                }
                 // Called inside the click itself: the legacy execCommand path
                 // needs the gesture.
                 copyTextToClipboard(text).then(ok => {

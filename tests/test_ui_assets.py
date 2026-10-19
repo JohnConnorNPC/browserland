@@ -34168,9 +34168,11 @@ process.stdout.write(JSON.stringify({
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_copy_plan_emits_or_refuses(tmp_path):
-    """#261: the click's whole decision, run in node: the local broker's file
-    carries its peers; another host's does not; an unread peer list or an
-    unwritable name is an error and NO text (so nothing is copied)."""
+    """#261: the click's whole decision, run in node. The option decides: off
+    is the file Copy always wrote, with no peer read at all; on, the local
+    broker's file carries its peers, another host's does not (and says so),
+    and an unread peer list or an unwritable name is an error and NO text, so
+    nothing is copied."""
     r = _node237(tmp_path, _js261() + r"""
 const info = {proxy: true, peers: {b: 'http://100.64.0.2:4445'}};
 const base = {name: 'local', url: 'http://127.0.0.1:4445', token: 'tok',
@@ -34178,22 +34180,61 @@ const base = {name: 'local', url: 'http://127.0.0.1:4445', token: 'tok',
 const plan = (extra) => mcpCopyPlan(Object.assign({}, base, extra));
 const hostsOf = (p) => JSON.parse(JSON.parse(p.text).mcpServers.browserland
     .env.BROWSERLAND_MCP_HOSTS).map(h => h.name);
+const off = plan({isLocal: true, info: info});
 process.stdout.write(JSON.stringify({
-    local: hostsOf(plan({isLocal: true, info: info})),
-    remote: hostsOf(plan({isLocal: false, info: info})),
-    remoteNoInfo: hostsOf(plan({isLocal: false, info: null})),
-    unread: plan({isLocal: true, info: null}),
-    noproxy: hostsOf(plan({isLocal: true,
+    off: hostsOf(off), offNote: off.note || null,
+    offSame: off.text === buildMcpJson(base),
+    offUnread: hostsOf(plan({isLocal: true, info: null})),
+    on: hostsOf(plan({isLocal: true, info: info, includePeers: true})),
+    remote: plan({isLocal: false, info: info, includePeers: true}),
+    remoteOff: plan({isLocal: false, info: info}),
+    unread: plan({isLocal: true, info: null, includePeers: true}),
+    noproxy: hostsOf(plan({isLocal: true, includePeers: true,
         info: {proxy: false, peers: {b: 'http://o:1'}}})),
-    nopeers: hostsOf(plan({isLocal: true, info: {proxy: true, peers: {}}})),
-    badName: plan({isLocal: true, info: info, name: 'a:b'}),
+    nopeers: hostsOf(plan({isLocal: true, includePeers: true,
+        info: {proxy: true, peers: {}}})),
+    badName: plan({isLocal: true, includePeers: true, info: info,
+                   name: 'a:b'}),
 }) + '\n');
 """)
-    assert r["local"] == ["local", "local.b"]
-    assert r["remote"] == ["local"] and r["remoteNoInfo"] == ["local"]
+    assert r["off"] == ["local"] and r["offNote"] is None
+    assert r["offSame"] is True        # byte for byte the pre-#261 file
+    assert r["offUnread"] == ["local"]  # off needs no peer read
+    assert r["on"] == ["local", "local.b"]
+    remote = json.loads(json.loads(r["remote"]["text"])["mcpServers"]
+                        ["browserland"]["env"]["BROWSERLAND_MCP_HOSTS"])
+    assert [h["name"] for h in remote] == ["local"]
+    assert "only from this broker" in r["remote"]["note"]
+    assert "note" not in r["remoteOff"] and "text" in r["remoteOff"]
+    assert "text" not in r["unread"]
+    assert r["unread"]["error"] == "peer list still loading: click Copy again"
     assert r["noproxy"] == ["local", "local.b"] and r["nopeers"] == ["local"]
-    assert "text" not in r["unread"] and "peer list" in r["unread"]["error"]
-    assert "text" not in r["badName"] and "share a name" in r["badName"]["error"]
+    assert "text" not in r["badName"]
+    assert "share a name" in r["badName"]["error"]
+
+
+def test_the_peer_entries_option_is_off_by_default():
+    """#261: the checkbox is in the Copy row, unticked, and says what ticking
+    it asks the owner to do."""
+    import html
+    body = _src237("40_body.html")
+    mcp = body[body.index('<div class="set-title">MCP access</div>'):]
+    mcp = mcp[:mcp.index("<!-- #157:")]
+    m = re.search(r'<label class="set-check"><input type="checkbox" '
+                  r'id="set-mcp-copy-peers"([^>]*)/>\s*([^<]*)</label>', mcp)
+    assert m, "the peer-entries checkbox is missing from the Copy row"
+    assert "checked" not in m.group(1), "it must default to off"
+    assert html.unescape(" ".join(m.group(2).split())) == \
+        "Include peer entries (paste each peer's MCP token)"
+
+
+def test_the_control_panel_opening_starts_the_peer_read():
+    """#261: the first Copy click needs localPeersKnown(), so the Control
+    Panel window starts that read as it opens (observed on a fresh page in
+    issue-261/live.md; this pins that the call is on the open path)."""
+    fn = _fn237("81_js_control_panel.js", "function openControlPanelWindow(appData)")
+    assert "try { localPeers().catch(() => {}); } catch (_) {}" in fn
+    assert fn.index("localPeers()") > fn.index("if (!modal) return null;")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -34211,7 +34252,7 @@ def test_a_copied_hub_file_lists_and_routes_both(tmp_path, monkeypatch):
     from webterm.mcptool import server
     from webterm.protocol import PEER_ORIGIN_HEADER
     r = _node237(tmp_path, _js261() + r"""
-const p = mcpCopyPlan({isLocal: true, name: 'local',
+const p = mcpCopyPlan({isLocal: true, includePeers: true, name: 'local',
     info: {proxy: true, peers: {b: 'http://100.64.0.2:4445'}},
     url: 'http://127.0.0.1:4445', token: 'hub-tok', scope: '',
     adminToken: null, python: 'py', pythonpath: ''});
@@ -34288,6 +34329,12 @@ def test_the_copy_click_asks_the_plan_and_copies_nothing_on_error():
     assert "const plan = mcpCopyPlan({" in click
     assert "isLocal: host.id === 'local'," in click
     assert "info: localPeersKnown()," in click
+    assert ("includePeers: !!(setMcpCopyPeers && setMcpCopyPeers.checked),"
+            in click)
+    note = click[click.index("if (plan.note) {"):]
+    assert "setMcpCopyErr.textContent = plan.note;" in note
+    assert click.index("if (plan.note) {") > click.index("const text = plan.text;")
+    assert click.index("if (plan.note) {") < click.index("copyTextToClipboard(text)")
     assert "const text = plan.text;" in click
     err = click[click.index("if (plan.error) {"):click.index("const text = plan.text;")]
     assert "setMcpCopyErr.textContent = plan.error;" in err
@@ -34309,14 +34356,19 @@ def test_the_copy_hint_explains_peer_entries():
     mcp = mcp[:mcp.index("<!-- #157:")]
     hint = mcp[mcp.index("Copy .mcp.json puts"):]
     hint = hint[:hint.index("</div>")]
-    hint = html.unescape(re.sub(r"\s+", " ", re.sub(r"</?code>", "", hint)))
-    for words in ("also lists each of its peers (/peer/<id>)",
+    hint = html.unescape(re.sub(
+        r"\s+", " ", re.sub(r"</?(?:code|strong)>", "", hint)))
+    for words in ("With Include peer entries ticked",
+                  "also lists each of its peers (/peer/<id>)",
                   "named local.<id>",
                   "with a placeholder where the token goes",
                   "paste that peer's own MCP token",
                   "delete the entry if you do not use that peer",
-                  "applies to this broker's entry only",
+                  "Peer entries come only from this broker's own tab",
+                  "applies to this broker's entry only (scope tags are per "
+                  "broker)",
                   "unscoped unless you add one",
                   "launch_terminal needs a host",
-                  "shows only this broker's own windows"):
+                  "without them (the default) shows only this broker's own "
+                  "windows"):
         assert words in hint, f"the hint must say {words!r}"
