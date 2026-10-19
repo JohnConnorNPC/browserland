@@ -37,6 +37,48 @@ _ERROR_MESSAGES = {
     "peer_origin_changed": "The hub now publishes this peer at another "
                            "address than this host's peer_origin; check "
                            "peer_origin (and the hub's peers config).",
+    # #261: the refusals of the hub's /peer/<id> MCP relay, as an agent sees
+    # them from a host whose url is http://<hub>/peer/<id>. One text per
+    # code, each saying what to do; the numbers equal the hub's constants
+    # (pinned by tests/test_mcptool.py).
+    "unknown_peer": "The hub this host's URL goes through has no MCP relay to "
+                    "this peer: no peer has that id, or the peer is not set to "
+                    "\"mcp\": true in the hub's peers config (the hub gives "
+                    "one answer for both). Set \"mcp\": true on that peer in "
+                    "the hub's config and restart the hub; the peer also needs "
+                    "MCP enabled with its own token (that peer's Control "
+                    "Panel → MCP access).",
+    "proxy_unavailable": "The hub this host's URL goes through cannot relay to "
+                         "peers: its proxy extra is missing or too old (it "
+                         "needs httpx and websockets 15; pip install "
+                         "\".[proxy]\" on the hub). Install it and restart "
+                         "the hub.",
+    "peer_busy": "The hub this host's URL goes through relays at most 2 calls "
+                 "per peer (8 in all, shared by every MCP client of that "
+                 "hub), and a read_screen that waits holds one for up to "
+                 "15 s. This call was not sent and is not queued: retry when "
+                 "another call finishes.",
+    "peer_timeout": "The peer did not answer the hub in time. The call may "
+                    "still have reached it: check the window's state before "
+                    "repeating anything that changes it.",
+    "peer_unreachable": "The hub could not reach the peer (it is down, or its "
+                        "origin in the hub's peers config is wrong). Check "
+                        "that peer and the hub's peers config.",
+    "not_relayed": "The hub relays only the MCP routes this server uses, at "
+                   "http://<hub>/peer/<id>/mcp/...: check that this host's "
+                   "url ends exactly in /peer/<id>.",
+    "peer_hop_refused": "The hub relays one hop only: this host's url names "
+                        "another /peer/ hop behind the peer. Point this host "
+                        "at the hub that serves that peer directly.",
+    "body_too_large": "The call's body is over the hub's 1 MiB relay limit; "
+                      "nothing was relayed. Send less in one call (split the "
+                      "input).",
+    "body_timeout": "The hub did not receive the whole request within 5 s (a "
+                    "slow link, or a proxy stalling between this server and "
+                    "the hub); nothing was relayed. Retry.",
+    "bad_length": "The request's Content-Length was malformed (usually a "
+                  "proxy between this server and the hub); nothing was "
+                  "relayed.",
     "bad_json": "Broker rejected the request body as malformed JSON.",
     "bad_id": "Window id is missing or not an integer.",
     "unknown_or_off": "No such terminal, or its MCP access mode is 'off'.",

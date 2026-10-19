@@ -3137,3 +3137,68 @@ def test_workspaces_258_ops_are_known():
     from webterm.mcptool import server as srv
     for op in ("move", "color", "stack", "unstack"):
         assert op in srv._WORKSPACE_OPS, op
+
+
+# ---- #261: the hub's /peer/<id> relay refusals have client texts ----------
+
+_RELAY_TEXTS = [
+    ("unknown_peer", 404, '"mcp": true'),
+    ("proxy_unavailable", 503, "proxy extra"),
+    ("peer_busy", 503, "not queued"),
+    ("peer_timeout", 504, "did not answer"),
+    ("peer_unreachable", 502, "could not reach"),
+    ("not_relayed", 404, "/peer/<id>"),
+    ("peer_hop_refused", 404, "one hop"),
+    ("body_too_large", 413, "1 MiB"),
+    ("body_timeout", 408, "5 s"),
+    ("bad_length", 400, "Content-Length"),
+]
+
+
+@pytest.mark.parametrize("code,status,fragment", _RELAY_TEXTS,
+                         ids=[c for c, _, _ in _RELAY_TEXTS])
+def test_the_relay_codes_have_texts(code, status, fragment):
+    """#261: each relay refusal reads as advice, never the bare fallback."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": code})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+    msg = str(ei.value)
+    assert ei.value.code == code and ei.value.status == status
+    assert f"(HTTP {status})" in msg
+    assert fragment in msg, msg
+    assert "Broker error:" not in msg
+
+
+def test_the_relay_texts_are_all_different():
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    texts = [_ERROR_MESSAGES[c] for c, _, _ in _RELAY_TEXTS]
+    assert len(set(texts)) == len(texts)
+
+
+def test_unknown_peer_names_both_causes_and_the_fix():
+    """#261: the hub answers one way for a missing peer and for one without
+    mcp:true, so the text names both and says how to enable it."""
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    text = " ".join(_ERROR_MESSAGES["unknown_peer"].split())
+    for words in ("no peer has that id", 'is not set to "mcp": true',
+                  'Set "mcp": true on that peer', "restart the hub",
+                  "MCP enabled", "its own token"):
+        assert words in text, words
+
+
+def test_the_relay_texts_state_the_hubs_numbers():
+    """#261: the numbers an agent is told are the hub's constants."""
+    from webterm.broker import peers
+    from webterm.broker.app import MAX_MCP_WAIT_MS
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    busy = " ".join(_ERROR_MESSAGES["peer_busy"].split())
+    assert (f"at most {peers.PEER_MCP_MAX_DIALS_PER_PEER} calls per peer "
+            f"({peers.PEER_MCP_MAX_DIALS} in all") in busy
+    assert f"up to {MAX_MCP_WAIT_MS // 1000} s" in busy
+    assert f"{peers.PEER_MCP_MAX_BODY // 2**20} MiB" in \
+        _ERROR_MESSAGES["body_too_large"]
+    assert f"within {peers.PEER_MCP_BODY_DEADLINE_S:g} s" in \
+        _ERROR_MESSAGES["body_timeout"]

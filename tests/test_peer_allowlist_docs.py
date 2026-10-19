@@ -126,3 +126,26 @@ def test_the_sockets_part_states_what_the_code_does():
     assert "| %d `ticket` |" % ps.PEER_TICKET_REFUSED in s
     assert "| %d `revoked` |" % ps.PEER_TICKET_REFUSED in s
     assert "4401 `ticket`" not in s and "4401 `revoked`" not in s
+
+
+# #261: the ten refusals the hub's MCP relay adds, as an agent's client
+# must be able to explain them. Spelled out here, not derived from the wiki
+# row, so deleting a code from both the wiki and the client table still fails.
+RELAY_CODES = {"unknown_peer", "proxy_unavailable", "peer_busy",
+               "peer_timeout", "peer_unreachable", "not_relayed",
+               "peer_hop_refused", "body_too_large", "body_timeout",
+               "bad_length"}
+
+
+def test_the_relay_code_set_is_texted_and_documented():
+    """The section's documented codes, less the ones that are not new relay
+    refusals (bad_ticket is the browser gate's; the other three already had
+    client texts), are exactly the ten, and each has a client text."""
+    from webterm.mcptool.client import _ERROR_MESSAGES
+    documented = set(re.findall(r"\b(?:4\d\d|5\d\d) `([a-z_]+)`",
+                                _section()))
+    relay = documented - {"bad_ticket", "auth_required", "bad_scope",
+                          "peer_origin_changed"}
+    assert relay == RELAY_CODES, sorted(relay ^ RELAY_CODES)
+    missing = sorted(c for c in RELAY_CODES if c not in _ERROR_MESSAGES)
+    assert not missing, f"no client text for {missing}"
