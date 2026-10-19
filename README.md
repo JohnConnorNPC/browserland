@@ -98,11 +98,12 @@ python -m webterm.agent -- cmd.exe
 ./launchers/run-agent.sh -- bash -l        # agent
 ```
 
-The launcher scripts bootstrap a virtualenv with the runtime dependencies on
-first run, so the `pip install` above is optional on Linux. The broker prints
-the URL to open, token included; `python -m webterm.broker --print-token`
-reprints it later. `run-agent.sh` picks the token up from `webterm_token.json`
-automatically, so a hand-started agent on the same box needs no setup.
+The launcher scripts bootstrap a virtualenv (`.venv` beside the checkout) with
+the runtime dependencies on first run, so the two launchers need no `pip
+install`. The broker prints the URL to open, token included;
+`./launchers/run-broker.sh --print-token` reprints it later. `run-agent.sh`
+picks the token up from `webterm_token.json` automatically, so a hand-started
+agent on the same box needs no setup.
 
 ### Extras
 
@@ -116,8 +117,10 @@ pip install -e ".[proxy]"              # + httpx, websockets 15 (the "from serve
 pip install -e ".[dev]"                # + pytest for the test suite
 ```
 
-Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. Every part, the `mcp`
-extra included, needs **Python ≥ 3.10**.
+Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. An extra lands in the
+interpreter whose `pip` you run, so under the Linux launchers install it into
+their venv (`.venv/bin/pip install -e ".[pyte]"`). Every part, the `mcp` extra
+included, needs **Python ≥ 3.10**.
 
 `psutil` (the `procs` extra) is best-effort: it powers the **task-manager
 process list**, the **foreground-agent badge**, and **live-cwd tracking**.
