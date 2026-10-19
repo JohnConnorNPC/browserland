@@ -34374,3 +34374,31 @@ def test_the_copy_hint_explains_peer_entries():
                   "without them (the default) shows only this broker's own "
                   "windows"):
         assert words in hint, f"the hint must say {words!r}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_no_peers_with_a_scope_and_an_admin_token_is_byte_identical(tmp_path):
+    """#261: the other established Copy inputs, scope and admin token, still
+    write exactly the file they always wrote, key order included (pinned
+    against goldens built here), with peers absent or null."""
+    r = _node237(tmp_path, _js261() + r"""
+const base = {name: 'local', url: 'http://127.0.0.1:4445', token: 'tok',
+              python: 'py', pythonpath: ''};
+process.stdout.write(JSON.stringify({
+    scoped: buildMcpJson(Object.assign({scope: 'projA'}, base)),
+    admin: buildMcpJson(Object.assign({scope: 'projA', adminToken: 'adm'},
+                                      base)),
+    adminNull: buildMcpJson(Object.assign(
+        {scope: 'projA', adminToken: 'adm', peers: null}, base)),
+}) + '\n');
+""")
+
+    def golden(host):
+        return json.dumps({"mcpServers": {"browserland": {
+            "command": "py", "args": ["-m", "webterm.mcptool"],
+            "env": {"BROWSERLAND_MCP_HOSTS": json.dumps(
+                [host], separators=(",", ":"))}}}}, indent=2)
+    plain = {"name": "local", "url": "http://127.0.0.1:4445", "token": "tok"}
+    assert r["scoped"] == golden(dict(plain, scope="projA"))
+    both = golden(dict(plain, scope="projA", admin_token="adm"))
+    assert r["admin"] == both and r["adminNull"] == both
