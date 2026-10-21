@@ -3981,3 +3981,66 @@ def test_a_second_configure_with_another_hub_keeps_none_of_the_first():
         mp.undo()
         _reset_server()
     assert list(out["errors"]) == ["new.c"]
+
+
+# ---- #261 round 1: which hosts count as a hub's configured peers -----------------
+
+def _rows_for(entries, info, peer_terminals):
+    from webterm.mcptool import server
+    handler_for, paths = _hub_answers(info, peer_terminals)
+    mp = pytest.MonkeyPatch()
+    try:
+        _parsed(mp, entries, handler_for)
+        return server.list_terminals(), paths
+    finally:
+        mp.undo()
+        _reset_server()
+
+
+@pytest.mark.parametrize("hub_url, hand_url", [
+    ("http://127.0.0.1:4445", "http://localhost:4445/peer/b"),
+    ("http://[::1]:4445", "http://127.0.0.1:4445/peer/b/"),
+    ("HTTP://HUB:4445", "http://hub:4445/peer/b"),
+    ("http://hub", "http://hub:80/peer/b")],
+    ids=["localhost", "ipv6-loopback", "case", "default-port"])
+def test_a_hand_entry_spelling_the_hub_url_differently_is_configured(
+        hub_url, hand_url):
+    """adv S1: a hand-written entry named `b` (NOT `hub.b`, so a match by
+    name cannot pass) at the hub's url spelt another way is that hub's
+    peer b: its windows are listed and there is no "no token" row."""
+    out, _ = _rows_for(
+        [dict(_HUB, url=hub_url, peers={}),
+         {"name": "b", "url": hand_url, "token": "b-t"}],
+        {"ok": True, "mcp_peers": ["b"]}, {"b": [{"id": 5, "mode": "read"}]})
+    assert out["errors"] == {}
+    assert sorted(t["id"] for t in out["terminals"]) == ["b:5", "hub:1"]
+
+
+def test_a_hub_url_with_a_trailing_slash_still_matches_its_peers():
+    out, _ = _rows_for(
+        [dict(_HUB, url="http://hub:4445/", peers={"b": {"token": "b-t"}})],
+        {"ok": True, "mcp_peers": ["b"]}, {"b": [{"id": 5, "mode": "read"}]})
+    assert out["errors"] == {}
+
+
+def test_a_host_below_a_peer_path_is_not_that_peer():
+    """A host at <hub>/peer/b/c is not "peer b/c" of the hub: no row says
+    the hub does not list it."""
+    out, _ = _rows_for(
+        [dict(_HUB, peers={"b": {"token": "b-t"}}),
+         {"name": "deep", "url": "http://hub:4445/peer/b/c", "token": "d-t"}],
+        {"ok": True, "mcp_peers": ["b"]},
+        {"b": [{"id": 5, "mode": "read"}], "b/c": []})
+    assert out["errors"] == {}
+
+
+@pytest.mark.parametrize("hand_url", [
+    "http://hub:4446/peer/b", "http://other:4445/peer/b",
+    "https://hub:4445/peer/b"], ids=["port", "host", "scheme"])
+def test_a_peer_path_on_another_broker_is_not_the_hubs_peer(hand_url):
+    """The other way round: /peer/b on another port, host or scheme is
+    some other broker's peer, so the hub's listed b still has no token."""
+    out, _ = _rows_for(
+        [dict(_HUB, peers={}), {"name": "b", "url": hand_url, "token": "b-t"}],
+        {"ok": True, "mcp_peers": ["b"]}, {"b": [{"id": 5, "mode": "read"}]})
+    assert list(out["errors"]) == ["hub.b"]

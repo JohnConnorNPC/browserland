@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
-from ..protocol import PEER_ID_RE
+from ..protocol import ORIGIN_DEFAULT_PORTS, PEER_ID_RE
 from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
@@ -223,10 +224,35 @@ def _probe_startup() -> None:
         _admin_tools_registered = True
 
 
+#: The names the loopback host goes by (#261 round 1): a hub entry at
+#: 127.0.0.1 and a hand-written peer entry at localhost name one broker.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _url_key(url: str) -> Optional[Tuple[str, str, Optional[int], str]]:
+    """What decides which broker and path a host url names: ``(scheme, host,
+    port, path)`` with the scheme and host in lower case, the loopback names
+    folded into one, the scheme's default port made explicit and the path
+    without a trailing slash. None for a url whose port does not parse."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    # urlsplit already gives the scheme and hostname in lower case
+    scheme, host = parts.scheme, parts.hostname or ""
+    if host in _LOOPBACK_HOSTS:
+        host = "loopback"
+    if port is None:
+        port = ORIGIN_DEFAULT_PORTS.get(scheme)
+    return scheme, host, port, parts.path.rstrip("/")
+
+
 def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
     """#261: compare what each discover_peers hub's ``/mcp/info`` said with
     the config. A hub's configured peers are the hosts whose base is
-    ``<hub base>/peer/<id>`` (a nested peer or a hand-written entry alike).
+    ``<hub base>/peer/<id>`` (a nested peer or a hand-written entry alike,
+    compared by :func:`_url_key`, so a spelling of the same url matches).
     Rows: a peer the hub lists that no host reaches, keyed ``<hub>.<id>``; a
     configured peer the hub does not list, keyed by that host; a hub whose
     probe failed or whose ``mcp_peers`` is not a list of peer ids, keyed by
@@ -234,12 +260,15 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
     listed ids only pick rows: nothing is ever sent to one."""
     rows: Dict[str, str] = {}
     for hub, info in _peer_probe.items():
-        prefix = cfgs[hub].base.rstrip("/") + "/peer/"
+        hub_key = _url_key(cfgs[hub].base)
         configured: Dict[str, List[str]] = {}
         for name, cfg in cfgs.items():
-            base = cfg.base.rstrip("/")
-            pid = base[len(prefix):]
-            if base.startswith(prefix) and PEER_ID_RE.fullmatch(pid):
+            key = _url_key(cfg.base)
+            if hub_key is None or key is None or key[:3] != hub_key[:3]:
+                continue
+            prefix = hub_key[3] + "/peer/"
+            pid = key[3][len(prefix):]
+            if key[3].startswith(prefix) and PEER_ID_RE.fullmatch(pid):
                 configured.setdefault(pid, []).append(name)
         if isinstance(info, Exception):
             rows[hub] = (
