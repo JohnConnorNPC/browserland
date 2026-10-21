@@ -4166,6 +4166,25 @@ def test_a_hub_listing_too_many_peers_yields_a_bounded_answer():
     assert f"hub.{last}" not in rows
 
 
+@pytest.mark.parametrize("extra", [0, 1], ids=["exactly-max", "max-plus-1"])
+def test_the_summary_row_starts_one_past_the_cap(extra):
+    """Round 2: a hub listing exactly MAX_MCP_PEERS ids had all of them
+    checked, so there is no summary row; one more id brings it."""
+    from webterm.protocol import MAX_MCP_PEERS
+    listed = [f"p{i}" for i in range(MAX_MCP_PEERS + extra)]
+    out, _ = _rows_for([dict(_HUB, peers={})],
+                       {"ok": True, "mcp_peers": listed}, {})
+    rows = out["errors"]
+    assert len(rows) == MAX_MCP_PEERS + extra
+    if extra:
+        assert rows["hub"] == (
+            f"Hub 'hub' lists {MAX_MCP_PEERS + 1} peers it relays MCP to; "
+            f"only the first {MAX_MCP_PEERS} were checked against this "
+            "config.")
+    else:
+        assert "hub" not in rows
+
+
 @pytest.mark.parametrize("raw", [
     '[{"name": "hub", "url": "http://hub:4445", "token": "hub-t", '
     '"peers": {"b": {"token": "first"}, "b": {"token": "second"}}}]',
