@@ -348,3 +348,18 @@ def test_screen_text_frame_stable_hash():
     f = json.loads(protocol.screen_text_frame(
         1, "hi", 80, 24, stable_hash="cafef00ddeadbeef"))
     assert f["stable_hash"] == "cafef00ddeadbeef"
+
+
+def test_one_peer_id_grammar_for_the_hub_and_the_mcptool():
+    # #261: the hub's peer ids and the mcptool's (a hosts entry's `peers`, a
+    # hub's /mcp/info `mcp_peers`, a /peer/<id> url) are one regex, not two
+    # spellings that can drift apart. (`is` holds for an equal pattern too,
+    # re.compile caches it: what this catches is a peers.py copy that drifted.)
+    import pytest
+    pytest.importorskip("httpx")
+    from webterm.broker import peers
+    from webterm.mcptool import client
+    assert peers.PEER_ID_RE is protocol.PEER_ID_RE
+    assert protocol.PEER_ID_RE.pattern in client._PEER_BASE_RE.pattern
+    assert client._PEER_BASE_RE.match("http://h:1/peer/" + "x" * 64)
+    assert not client._PEER_BASE_RE.match("http://h:1/peer/" + "x" * 65)

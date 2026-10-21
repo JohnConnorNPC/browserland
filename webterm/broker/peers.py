@@ -27,11 +27,13 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-# The pairing header and the origin's canonical form are shared with the
-# mcptool client (#252 phase 3), which must not import the broker.
+# The peer id, the pairing header and the origin's canonical form are shared
+# with the mcptool client (#252 phase 3, #261), which must not import the
+# broker.
 from ..protocol import (MCP_ADMIN_HEADER, ORIGIN_DEFAULT_PORTS as
                         _DEFAULT_PORTS, ORIGIN_RE as _ORIGIN_RE,
-                        PEER_ORIGIN_HEADER, SCOPE_HEADER, normalize_origin)
+                        PEER_ID_RE, PEER_ORIGIN_HEADER, SCOPE_HEADER,
+                        normalize_origin)
 
 #: The browser gate's second credential: B's browser token, carried beside A's
 #: own bearer. A never forwards it under this name (it becomes the upstream
@@ -104,9 +106,6 @@ def dial_ceiling(method: str, path: str) -> float:
         return PEER_RECORDING_DIAL_MAX_S
     return PEER_DIAL_MAX_S
 
-
-#: A peer id: what the client names, and the path segment after ``/peer/``.
-PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 #: The keys a peer entry may carry. Anything else is refused, so a typo
 #: (``"orgin"``) is an error instead of a peer with no origin.

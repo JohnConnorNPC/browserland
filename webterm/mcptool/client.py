@@ -25,15 +25,15 @@ import httpx
 # The header names come from the dependency-free protocol module, never from
 # webterm.broker: this package is the optional `mcp` extra and must not pull
 # in the broker (and sanic with it).
-from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
-                        normalize_origin)
+from ..protocol import (MCP_ADMIN_HEADER, PEER_ID_RE, PEER_ORIGIN_HEADER,
+                        SCOPE_HEADER, normalize_origin)
 
 #: #261: a hosts url that goes through a hub's relay: exactly
 #: scheme://authority/peer/<id>, the id being the hub's PEER_ID_RE. A path
 #: before /peer/ (a broker behind some other reverse proxy) or after the id
 #: does not match.
 _PEER_BASE_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/peer/([A-Za-z0-9_-]{1,64})$")
+    r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/peer/(" + PEER_ID_RE.pattern + r")$")
 
 #: #261: through a hub, mcp_disabled and auth_required are the PEER's answers
 #: (the relay forwards the call with the host's own token), so the generic

@@ -83,12 +83,18 @@ MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
 
 
 # ---------------------------------------------------------------------------
-# Peer proxy (#252): the pairing header and an origin's canonical form
+# Peer proxy (#252): the peer id, the pairing header and an origin's
+# canonical form
 # ---------------------------------------------------------------------------
 # Shared by the broker's /peer/ gates (webterm/broker/peers.py) and the
 # mcptool client, which sends the pairing for a host configured with a
 # ``peer_origin``: one spelling of the header, and one canonical form, so a
 # correct config never reads as a re-pointed peer.
+
+#: A peer id: what the client names, and the path segment after ``/peer/``.
+#: Always ``fullmatch``. The mcptool reads it too (#261): the ids in a hosts
+#: entry's ``peers`` and the ones a hub lists on ``/mcp/info``.
+PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 #: The pairing header: the origin the client paired the peer's token with.
 #: The browser gate requires it; the MCP gate checks it when it is sent. A
