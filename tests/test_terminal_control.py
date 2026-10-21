@@ -849,6 +849,39 @@ def test_a_stalled_controller_is_dropped_and_loses_control():
     asyncio.run(scenario())
 
 
+def test_drain_control_returns_when_a_finished_task_was_never_discarded():
+    # #260: a done task whose discard callback has not run yet. Since 3.12 a
+    # gather over done tasks completes without yielding, so the old loop spun
+    # here forever; drain_control drops what it gathered itself.
+    async def scenario():
+        reg = BrokerRegistry()
+
+        async def nothing():
+            return None
+        task = asyncio.ensure_future(nothing())
+        await task
+        reg._control_tasks.add(task)
+        await asyncio.wait_for(reg.drain_control(), 2)
+        assert reg._control_tasks == set()
+    asyncio.run(scenario())
+
+
+def test_drain_control_still_waits_for_pending_work():
+    async def scenario():
+        reg = BrokerRegistry()
+        done = []
+
+        async def slow():
+            await asyncio.sleep(0.05)
+            done.append(True)
+        task = asyncio.ensure_future(slow())
+        reg._control_tasks.add(task)
+        task.add_done_callback(reg._control_tasks.discard)
+        await asyncio.wait_for(reg.drain_control(), 2)
+        assert done == [True] and reg._control_tasks == set()
+    asyncio.run(scenario())
+
+
 
 
 # ---- end to end: a broker subprocess and real sockets ----------------------

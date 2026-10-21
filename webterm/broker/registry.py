@@ -823,8 +823,13 @@ class BrokerRegistry:
     async def drain_control(self) -> None:
         """Wait until every enqueued publication has run (tests, shutdown)."""
         while self._control_tasks:
-            await asyncio.gather(*list(self._control_tasks),
-                                 return_exceptions=True)
+            tasks = list(self._control_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Every task in `tasks` has finished: drop them HERE. Since 3.12 a
+            # gather over already-done tasks completes eagerly and never yields,
+            # so their discard callbacks would never get to run and this loop
+            # would spin.
+            self._control_tasks.difference_update(tasks)
 
     # -- launch waiters -----------------------------------------------------
 
