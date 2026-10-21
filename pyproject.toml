@@ -12,11 +12,16 @@ name = "webterm"
 # literal -- tests/test_packaging.py pins both halves of that.
 dynamic = ["version"]
 description = "Self-contained web terminal: headless PTY agents + WebSocket broker (Browserland's web-terminal producer protocol)"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "websockets>=12",
     "sanic>=23",
 ]
+
+[project.urls]
+Homepage = "https://github.com/JohnConnorNPC/browserland"
+Documentation = "https://github.com/JohnConnorNPC/browserland/wiki"
 
 [project.optional-dependencies]
 windows = ["pywinpty>=2"]
@@ -34,7 +39,7 @@ mcp = ["mcp>=1.2"]
 # peers without it logs one line and answers /peer/* with 503
 # proxy_unavailable.
 proxy = ["httpx>=0.27", "websockets>=15"]
-dev = ["pytest>=7", "pytest-asyncio>=0.24"]
+dev = ["pytest>=7", "pytest-asyncio>=0.24", "sanic-testing>=23"]
 
 [project.scripts]
 browserland-mcp = "webterm.mcptool.__main__:main"
