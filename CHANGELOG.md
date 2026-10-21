@@ -563,6 +563,11 @@ again, unless they change a dependency file too.
   windows keep it (their drag is a captured-pointer gesture that a pan claim
   would cancel); tiled ones no longer do.
 
+- **The `mcp` extra stays on the 1.x SDK** (#260). `pip install ".[mcp]"` could
+  pull mcp 2.x, which renamed `mcp.server.fastmcp`, so `browserland-mcp` could
+  not start. The extra now asks for `mcp>=1.2,<2`; reinstall the extra to get a
+  working SDK.
+
 ### Removed
 
 - **The Agent-docs mod is retired** (#177). Each terminal title bar carried a

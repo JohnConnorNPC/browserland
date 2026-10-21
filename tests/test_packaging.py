@@ -34,8 +34,12 @@ about table scoping anyway, ``_keys_in`` walks the file tracking the current
 """
 
 import ast
+import importlib
+import importlib.metadata
 import re
 from pathlib import Path
+
+import pytest
 
 import webterm
 
@@ -180,3 +184,20 @@ def test_version_is_the_newest_release_in_the_changelog():
     assert heads[0] == webterm.__version__, \
         f"newest CHANGELOG release {heads[0]!r} != __version__ " \
         f"{webterm.__version__!r}"
+
+
+def test_the_mcp_extra_stays_on_the_1_x_sdk():
+    # #260: mcp 2.x renamed the module server.py imports, so `.[mcp]` must
+    # stay below 2. The import half reads the module from server.py itself and
+    # checks it against the installed SDK, when one is installed.
+    extras = _keys_in("project.optional-dependencies")
+    assert extras["mcp"] == '["mcp>=1.2,<2"]'
+    src = (ROOT / "webterm" / "mcptool" / "server.py").read_text(
+        encoding="utf-8")
+    module = re.search(r"^from (mcp\.[\w.]+) import ", src, re.M).group(1)
+    try:
+        installed = importlib.metadata.version("mcp")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("no mcp distribution installed")
+    assert installed.split(".")[0] == "1", installed
+    importlib.import_module(module)

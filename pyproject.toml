@@ -32,7 +32,9 @@ pyte = ["pyte>=0.8"]
 procs = ["psutil>=5"]
 # The Browserland MCP server (webterm/mcptool/). `mcp` pulls in httpx, so it is
 # an optional extra, not a core dependency: core stays websockets + sanic.
-mcp = ["mcp>=1.2"]
+# `<2`: mcp 2.x renamed `mcp.server.fastmcp`, which webterm/mcptool/server.py
+# imports.
+mcp = ["mcp>=1.2,<2"]
 # The #252 peer proxy (/peer/<id>/...): its upstream HTTP client, and the
 # websockets asyncio client its sockets dial with (15+; core needs only 12).
 # Optional, like `mcp`, so core stays websockets + sanic; a broker that names
