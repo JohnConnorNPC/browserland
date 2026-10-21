@@ -204,11 +204,13 @@ browserland-mcp --hosts '[
   the peers it relays MCP to as `mcp_peers` (ids only, never an origin or a
   token). A hub entry that carries `peers` (`{}` too) is asked once, when the
   MCP server starts: a peer the hub lists but the config has no token for is
-  one row under `errors` in `list_terminals`, named `<hub>.<id>`; a
+  one row under `errors` in `list_terminals`, named `<hub>.<id>` (on the
+  hub's entry instead when another entry already has that name); a
   configured peer the hub does not list is a row on that peer's entry; a hub
-  that cannot be reached then is one row on the hub's entry, and its peers
-  are not checked again until the MCP server restarts. A listed peer without
-  an entry is never contacted.
+  that does not answer within the startup deadline is one row on the hub's
+  entry, and its peers are not checked again until the MCP server restarts.
+  At most 64 listed ids are checked per hub; one more row on the hub says
+  how many it lists. A listed peer without an entry is never contacted.
 
 - `"peer_origin"` (optional) is the origin the hub's `peers` names for that
   peer. The server sends it as `X-Browserland-Peer-Origin` on every call, so
@@ -246,7 +248,8 @@ browserland-mcp --hosts '[
   hub's) and put it in the entry. A relay that shared one token between hub
   and peer worked before and is refused now (see `wiki/Upgrading.md`).
 - When something is missing: a peer with no entry is absent, and is
-  reported only when the hub entry carries `peers`.
+  reported only when the hub entry carries `peers` and the hub is new
+  enough to list its peers (`mcp_peers`).
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
   `"mcp": true` (one answer for both, whatever the bearer is);
   `proxy_unavailable` (503) means the hub lacks the `proxy` extra; the peer's

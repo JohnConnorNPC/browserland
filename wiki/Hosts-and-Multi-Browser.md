@@ -93,7 +93,8 @@ writes one such entry per peer, with a placeholder where that peer's token
 goes. An MCP config with only this broker's entry, and no `peers` in it,
 shows only this broker's own windows; a peer's windows appear once the config
 has its own MCP token, which must differ from this broker's: in that entry's
-`peers` (the MCP server adds it as `<entry>.<id>`) or in an entry of its own. See [[MCP-and-AI-Agents]].
+`peers` (the MCP server adds it as `<entry>.<id>`) or in an entry of its own.
+See [[MCP-and-AI-Agents]].
 
 Its terminals open through the same prefix: each window's connection first
 takes a one-time ticket from this broker, so no password ever appears in a

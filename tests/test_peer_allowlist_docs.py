@@ -382,7 +382,12 @@ _NESTED_PEERS = {
                "restarts",
     "never contacted": "A listed peer without an entry is never contacted",
     "absent": "a peer with no entry is absent, and is reported only when "
-              "the hub entry carries peers",
+              "the hub entry carries peers and the hub is new enough to list "
+              "its peers (mcp_peers)",
+    "name taken": "named <hub>.<id> (on the hub's entry instead when another "
+                  "entry already has that name)",
+    "deadline": "a hub that does not answer within the startup deadline is "
+                "one row on the hub's entry",
 }
 
 
@@ -391,6 +396,10 @@ def test_the_nested_peers_entry_is_documented():
         text = _doc(rel)
         for key, phrase in _NESTED_PEERS.items():
             assert phrase in text, (rel, key)
+        # the cap the docs give is the code's
+        from webterm.protocol import MAX_MCP_PEERS
+        assert (f"At most {MAX_MCP_PEERS} listed ids are checked per hub; one "
+                "more row on the hub says how many it lists") in text, rel
         # the old wording said nothing reports a missing peer
         assert "simply absent" not in text, rel
     assert '"peers": {"b": {"token"' in (
@@ -400,7 +409,7 @@ def test_the_nested_peers_entry_is_documented():
     # (phrases whose inline code sits between spaces: the flattener joins
     # runs with one, so "list_terminals, named" would read "list_terminals ,")
     for key in ("mcp_peers", "startup", "never contacted", "absent"):
-        assert _NESTED_PEERS[key] in corpus, key
+        assert _NESTED_PEERS[key].split(" (mcp_peers)")[0] in corpus, key
 
 
 def test_mcp_peers_upgrading_and_the_changelog_are_documented():
@@ -429,6 +438,8 @@ def test_mcp_peers_upgrading_and_the_changelog_are_documented():
     assert lead in added
     assert ("a listed peer the config has no token for is reported by name "
             "under errors in list_terminals") in _flat(added)
+    assert ("never the hub entry's (the process-wide --scope still reaches "
+            "them)") in _flat(added)
     # the in-app guide is built from the wiki pages too
     corpus = _corpus_text()
     assert ("is refused when the MCP server starts (the names collide)"

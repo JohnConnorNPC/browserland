@@ -62,7 +62,8 @@ again, unless they change a dependency file too.
 - **One MCP entry for a hub and its peers** (#261). A `--hosts` entry may carry
   `"peers": {"<id>": {"token": …}}`; the MCP server adds each peer as
   `<hub>.<id>` through `/peer/<id>` with that peer's own token and its own
-  scope and admin token, never the hub entry's. The hub's `GET /mcp/info` lists
+  scope and admin token, never the hub entry's (the process-wide `--scope`
+  still reaches them). The hub's `GET /mcp/info` lists
   the peers it relays MCP to as `mcp_peers` (ids only), and a listed peer the
   config has no token for is reported by name under `errors` in
   `list_terminals`.
