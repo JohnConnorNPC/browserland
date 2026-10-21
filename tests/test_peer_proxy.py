@@ -1296,15 +1296,24 @@ async def test_mcp_info_lists_the_mcp_peers_by_id_only(hub2, upstream):
         assert secret not in r.text
 
 
-async def test_mcp_info_lists_no_peers_as_an_empty_list(tmp_path):
+@pytest.mark.parametrize("peer_map, want", [
+    ({}, []),
+    # registered out of order (z before a), with a not-opted-in one between:
+    # the list is sorted, as the Technical Reference says
+    ({"z": {"origin": "http://127.0.0.1:9", "mcp": True},
+      "m": {"origin": "http://127.0.0.1:9"},
+      "a": {"origin": "http://127.0.0.1:9", "mcp": True}}, ["a", "z"])],
+    ids=["no-peers", "unsorted-config"])
+async def test_mcp_info_lists_the_mcp_peers_sorted(tmp_path, peer_map, want):
     """#261: a broker with MCP on and no peers answers `mcp_peers: []` (the
-    key present, so a client can tell it from an older broker)."""
+    key present, so a client can tell it from an older broker); with peers,
+    the mcp:true ids in sorted order whatever the config order."""
     mp = pytest.MonkeyPatch()
     for var in ("WEB_TERMINAL_TOKEN", "WEB_TERMINAL_MCP_TOKEN",
                 "WEB_TERMINAL_MCP_ADMIN_TOKEN"):
         mp.delenv(var, raising=False)
     srv = LiveApp(_make_app(
-        tmp_path, {}, auth_token=HUB_BROWSER, mcp_enabled=True,
+        tmp_path, peer_map, auth_token=HUB_BROWSER, mcp_enabled=True,
         mcp_token=HUB_MCP,
         mcp_state_path=str(tmp_path / "webterm_mcp.json"))).start()
     try:
@@ -1312,7 +1321,7 @@ async def test_mcp_info_lists_no_peers_as_an_empty_list(tmp_path):
     finally:
         srv.stop()
         mp.undo()
-    assert r.json()["mcp_peers"] == []
+    assert r.json()["mcp_peers"] == want
 
 
 # ---- #261 phase B: one hosts entry for the hub and its peers, end to end ------
