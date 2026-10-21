@@ -92,6 +92,12 @@ peer entry. Nothing else changes: a peer token that only looks like a hub token
 (a shared prefix, say) still relays; only an exact match is refused. See
 [[MCP-and-AI-Agents#a-broker-behind-another-one-252]].
 
+**Hub entries with `peers`.** A hub entry may now carry its peers' tokens (see
+[[MCP-and-AI-Agents#a-broker-behind-another-one-252]]); existing configs are
+unchanged. A hub entry named `local` with `peers.b`, next to Copy's own
+`local.b` entry, is refused when the MCP server starts (the names collide): keep
+one of the two.
+
 ---
 
 ## Broker roles: hub and node, and `terminals: false` (#253)

@@ -59,6 +59,14 @@ again, unless they change a dependency file too.
   `launch_terminal` needs `host=`. See
   [`wiki/MCP-and-AI-Agents.md`](wiki/MCP-and-AI-Agents.md).
 
+- **One MCP entry for a hub and its peers** (#261). A `--hosts` entry may carry
+  `"peers": {"<id>": {"token": …}}`; the MCP server adds each peer as
+  `<hub>.<id>` through `/peer/<id>` with that peer's own token and its own
+  scope and admin token, never the hub entry's. The hub's `GET /mcp/info` lists
+  the peers it relays MCP to as `mcp_peers` (ids only), and a listed peer the
+  config has no token for is reported by name under `errors` in
+  `list_terminals`.
+
 - **Workspaces can be moved, coloured and stacked** (#258). Drag a pager dot to
   a new place, or use **Move left** / **Move right** in its menu (and two new
   key actions, unbound by default). **Colour…** gives a workspace a colour from

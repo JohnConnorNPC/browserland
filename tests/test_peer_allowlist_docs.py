@@ -401,3 +401,34 @@ def test_the_nested_peers_entry_is_documented():
     # runs with one, so "list_terminals, named" would read "list_terminals ,")
     for key in ("mcp_peers", "startup", "never contacted", "absent"):
         assert _NESTED_PEERS[key] in corpus, key
+
+
+def test_mcp_peers_upgrading_and_the_changelog_are_documented():
+    """#261 phase B: the /mcp/info key in the Technical Reference, the
+    Upgrading note on a name collision with Copy's own entries, and the
+    CHANGELOG entry INSIDE [1.0.0] (whose date line is not this issue's to
+    change)."""
+    ref = _doc("wiki/Technical-Reference.md")
+    assert ("mcp_peers (#261) lists the ids of this broker's peers that have "
+            "\"mcp\": true, sorted: ids only, never an origin or a "
+            "credential") in ref
+    assert '"mcp_peers": [<id>, …] #261' in ref
+    upg = _doc("wiki/Upgrading.md")
+    assert ("Hub entries with peers. A hub entry may now carry its peers' "
+            "tokens") in upg
+    assert "is refused when the MCP server starts (the names collide)" in upg
+    log = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    # (the date is #260's to set on the tag day: only the section is pinned)
+    assert "\n## [1.0.0] - " in log
+    start = log.index("## [1.0.0]")
+    one_zero = log[start:log.index("\n## [", start + 1)]
+    lead = "- **One MCP entry for a hub and its peers** (#261)."
+    assert log.count(lead) == 1 and lead in one_zero
+    added = one_zero[one_zero.index("### Added"):]
+    added = added[:added.index("\n### ")]
+    assert lead in added
+    assert ("a listed peer the config has no token for is reported by name "
+            "under errors in list_terminals") in _flat(added)
+    # the in-app guide is built from the wiki pages too
+    corpus = _corpus_text()
+    assert "is refused when the MCP server starts (the names collide)" in corpus

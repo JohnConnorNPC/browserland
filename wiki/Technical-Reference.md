@@ -951,7 +951,7 @@ up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/mcp/info` | feature flags (`allow_launch`, `terminals` #253, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244), the broker `version` and the declared `scope` echoed back (#230) |
+| GET | `/mcp/info` | feature flags (`allow_launch`, `terminals` #253, `default_mode`, `"admin": <bool>` #245, `"window_edit": true` #243, `"allow_desktop": <bool>` #244, `"mcp_peers": [<id>, …]` #261), the broker `version` and the declared `scope` echoed back (#230) |
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
@@ -1251,10 +1251,13 @@ effective mode to permit them.
 
 **`GET /mcp/info`** →
 `{"ok":true,"allow_launch":false,"terminals":true,"default_mode":"off","version":"1.0.0+ba4b62e",
-"scope":null,"admin":false,"window_edit":true,"allow_desktop":false}`.
+"scope":null,"admin":false,"window_edit":true,"allow_desktop":false,"mcp_peers":[]}`.
 `terminals` (#253) is `false` on a broker that hosts no terminals: every launch
 is refused with `terminals_disabled` whatever `allow_launch` says. Absent from an
 older broker, which launches.
+`mcp_peers` (#261) lists the ids of this broker's peers that have `"mcp": true`,
+sorted: ids only, never an origin or a credential. Absent from an older broker; a
+client reads absence as nothing advertised.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22). `scope` is the caller's own declared scope echoed back: `null`
