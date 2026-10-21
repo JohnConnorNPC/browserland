@@ -60,6 +60,7 @@ def _reset_server():
     # cleared here the way a real configure() would clear them.
     server._handles.clear()
     server._admin_hosts.clear()
+    server._peer_probe.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -3661,3 +3662,128 @@ def test_a_nested_peer_and_an_explicit_entry_may_share_a_url():
     assert [(h[0], h[1]) for h in hosts] == [
         ("hub", "http://hub:4445"), ("hub.b", "http://hub:4445/peer/b"),
         ("b-scoped", "http://hub:4445/peer/b")]
+
+
+# ---- #261 phase B: one startup probe for admin and for a hub's peers -----------
+# Placed after test_admin_tools_absent_when_no_host_admin: these register the
+# admin tools, which is process-lifetime.
+
+def test_a_legacy_tuple_reads_discover_peers_in_both_directions():
+    from webterm.mcptool import server
+    five = ("http://x:4445", "t", None, None, None)
+    assert server._as_host_config("x", five).discover_peers is False
+    assert server._as_host_config("x", five + (True,)).discover_peers is True
+    assert server.HostConfig("x", "http://x:4445", "t").discover_peers is False
+
+
+def _parsed(monkeypatch, entries, handler_for):
+    """configure() from a real --hosts value, every client on a mock."""
+    from webterm.mcptool import __main__ as m
+    _configure_with(monkeypatch, m._parse_hosts(json.dumps(entries), None),
+                    handler_for)
+
+
+_HUB = {"name": "hub", "url": "http://hub:4445", "token": "hub-t"}
+
+
+def test_a_hub_with_admin_and_peers_is_asked_once(monkeypatch):
+    from webterm.mcptool import server
+    broker = _ToolBroker(caps={"admin": True, "mcp_peers": []})
+    _parsed(monkeypatch, [dict(_HUB, admin_token="adm", peers={})],
+            lambda name: broker)
+    try:
+        assert broker.count("/mcp/info") == 1
+        assert server._admin_hosts == {"hub"}
+        assert server._peer_probe["hub"]["mcp_peers"] == []
+    finally:
+        _reset_server()
+
+
+def test_admin_and_discovery_probes_run_together(monkeypatch):
+    """The hub's discovery GET and two admin GETs (one of them a peer of the
+    hub) must all be in flight at once: each handler waits on a 3-party
+    barrier, so probes run one after another break it (5 s) and every probe
+    fails. No elapsed-time bound. Only hosts WITH an admin token are admin,
+    even though every answer says admin: true."""
+    import threading
+    from webterm.mcptool import server
+    barrier = threading.Barrier(3, timeout=5)
+
+    def handler(req):
+        barrier.wait()
+        return httpx.Response(200, json={"ok": True, "admin": True,
+                                         "mcp_peers": ["b"]})
+    _parsed(monkeypatch, [
+        dict(_HUB, peers={"b": {"token": "b-t", "admin_token": "b-adm"}}),
+        {"name": "c", "url": "http://c:4445", "token": "c-t",
+         "admin_token": "c-adm"}], lambda name: handler)
+    try:
+        assert server._admin_hosts == {"hub.b", "c"}
+        assert server._peer_probe["hub"]["mcp_peers"] == ["b"]
+        assert set(server._peer_probe) == {"hub"}
+    finally:
+        _reset_server()
+
+
+def _admin_if_header(token):
+    def handler(req):
+        return httpx.Response(200, json={
+            "ok": True, "mcp_peers": ["b"],
+            "admin": req.headers.get(MCP_ADMIN_HEADER) == token})
+    return handler
+
+
+def test_a_peer_only_admin_token_makes_that_peer_admin(monkeypatch):
+    from webterm.mcptool import server
+    seen = []
+
+    def handler_for(name):
+        inner = _admin_if_header("b-adm")
+
+        def handler(req):
+            seen.append((name, req.url.path))
+            return inner(req)
+        return handler
+    _parsed(monkeypatch, [
+        dict(_HUB, peers={"b": {"token": "b-t", "admin_token": "b-adm"}})],
+        handler_for)
+    try:
+        assert server._admin_hosts == {"hub.b"}
+        assert sorted(seen) == [("hub", "/mcp/info"), ("hub.b", "/peer/b/mcp/info")]
+    finally:
+        _reset_server()
+
+
+def test_admin_required_names_the_peer_host(monkeypatch):
+    """A peer whose admin token the probe did not confirm: set_mcp_knobs
+    refuses locally, naming `hub.b`, and nothing reaches /mcp/knobs."""
+    from webterm.mcptool import server
+    broker = _ToolBroker(caps={"admin": False, "mcp_peers": ["b"]})
+    _parsed(monkeypatch, [
+        dict(_HUB, peers={"b": {"token": "b-t", "admin_token": "b-adm"}})],
+        lambda name: broker)
+    try:
+        with pytest.raises(BrowserlandError) as ei:
+            server.set_mcp_knobs("hub.b", default_mode="read")
+    finally:
+        _reset_server()
+    assert ei.value.code == "admin_required"
+    assert "'hub.b'" in str(ei.value)
+    assert broker.count("/mcp/knobs") == 0 and broker.count(
+        "/peer/b/mcp/knobs") == 0
+
+
+def test_launch_needs_a_host_once_peers_are_expanded(monkeypatch):
+    from webterm.mcptool import server
+    broker = _ToolBroker(caps={"mcp_peers": ["b"]})
+    _parsed(monkeypatch, [dict(_HUB, peers={"b": {"token": "b-t"}})],
+            lambda name: broker)
+    try:
+        assert list(server._host_configs) == ["hub", "hub.b"]
+        with pytest.raises(BrowserlandError) as ei:
+            server.launch_terminal()
+    finally:
+        _reset_server()
+    assert ei.value.code == "host_required"
+    assert not [r for r in broker.requests
+                if r.url.path.endswith("/mcp/launch")]

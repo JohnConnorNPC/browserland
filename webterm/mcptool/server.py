@@ -7,10 +7,12 @@ tool output, and the type hints + docstrings drive the tool schema.
 The client is built **lazily** from config handed in by ``__main__`` via
 :func:`configure`, so importing this module has no side effects. The one
 deliberate exception to "never probe at startup" (#245, owner decision): the
-END of ``configure()`` probes every admin-token host's ``/mcp/info``
-concurrently under a single bounded deadline, because admin-only tools must be
-hidden unless a host confirms admin — that costs at most one timeout at stdio
-startup, then never blocks again. The first tool call surfaces a clean
+END of ``configure()`` GETs ``/mcp/info`` once on every host that carries an
+admin token or ``"peers"`` (#261), all concurrently under a single bounded
+deadline, because admin-only tools must be hidden unless a host confirms
+admin, and a hub's relayed peers are compared with the config once — that
+costs at most one timeout at stdio startup, then never blocks again. A config
+with neither sends nothing at startup. The first tool call surfaces a clean
 :class:`BrowserlandError` if the broker URL or token is wrong.
 """
 
@@ -60,7 +62,9 @@ def _as_host_config(name: str, raw: Any) -> HostConfig:
     scope = raw[2] if len(raw) > 2 else None
     admin = raw[3] if len(raw) > 3 else None
     peer_origin = raw[4] if len(raw) > 4 else None
-    return HostConfig(name, raw[0], raw[1], scope, admin, peer_origin)
+    discover = bool(raw[5]) if len(raw) > 5 else False
+    return HostConfig(name, raw[0], raw[1], scope, admin, peer_origin,
+                      discover)
 
 
 # Multi-host config (#24). configure() stores an ordered name -> HostConfig
@@ -100,9 +104,14 @@ _admin_hosts: set = set()
 # — documented as a limitation; the tests pin the refused-locally ladder.
 _admin_tools_registered = False
 
-# One overall deadline for the startup admin probe (#245): the browser's
+# #261: what the startup probe read from each discover_peers hub: its
+# /mcp/info body, or the exception that GET raised. Filled by configure()'s
+# probe and cleared with the rest of the cross-config state.
+_peer_probe: Dict[str, Any] = {}
+
+# One overall deadline for the startup probe (#245, #261): the browser's
 # client default timeout, so the worst-case stdio startup delay is one
-# timeout no matter how many admin hosts are configured.
+# timeout no matter how many admin or discovery hosts are configured.
 _ADMIN_PROBE_TIMEOUT_S = 10.0
 
 
@@ -133,16 +142,15 @@ def configure(hosts) -> None:
     any
     previously-built clients so their sockets aren't leaked; the new clients
     are built lazily on first use. Also clears, atomically with the rebuild,
-    every cross-config state: the launch-handle store and the admin-host set
-    (host names are reusable; a stale ``host:id`` handle or admin grant must
-    not survive a re-pointed host) — the per-client capability caches die
-    with the closed clients.
+    every cross-config state: the launch-handle store, the admin-host set and
+    what the last probe read from hubs (host names are reusable; a stale
+    ``host:id`` handle, admin grant or peer report must not survive a
+    re-pointed host) — the per-client capability caches die with the closed
+    clients.
 
-    After the rebuild, the one-shot admin probe (#245) runs: every host
-    carrying an admin token is probed concurrently (one overall deadline);
-    the hosts whose ``/mcp/info`` answers ``admin: true`` land in
-    ``_admin_hosts``, and the admin tools are registered once any host
-    qualifies."""
+    After the rebuild, the one-shot startup probe runs (see
+    :func:`_probe_startup`): one ``/mcp/info`` GET per host carrying an admin
+    token or ``"peers"``, all concurrently (one overall deadline)."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -154,43 +162,55 @@ def configure(hosts) -> None:
         with _handles_lock:
             _handles.clear()
         _admin_hosts.clear()
+        _peer_probe.clear()
         new_configs: Dict[str, HostConfig] = {}
         for h in hosts:
             cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
             new_configs[cfg.name] = cfg
         _host_configs = new_configs
-    _probe_admin_hosts()
+    _probe_startup()
 
 
-def _probe_admin_hosts() -> None:
-    """#245: the one-shot startup admin probe. For every host carrying an
-    admin token, GET ``/mcp/info`` (the client sends the admin header); the
-    host is admin-capable iff the body is a dict with ``admin: true`` — a
-    pre-#245 broker answers without the key, and an unreachable host or a
-    wrong token raises: every failure reads as NOT admin (fail closed). The
-    probes run concurrently under one overall deadline
-    (``_ADMIN_PROBE_TIMEOUT_S``, the client default), so the worst-case
-    startup delay is one timeout, not timeout × hosts. When at least one
-    host qualifies, the admin tools are registered exactly once for the
-    process lifetime."""
+def _probe_startup() -> None:
+    """The one-shot startup probe: ONE GET ``/mcp/info`` for every host that
+    carries an admin token (#245) or ``"peers"`` (#261), whichever it needs
+    (the client sends the admin header when it has one). The probes run
+    concurrently under one overall deadline (``_ADMIN_PROBE_TIMEOUT_S``, the
+    client default), so the worst-case startup delay is one timeout, not
+    timeout × hosts.
+
+    Admin: a host with an admin token is admin-capable iff the body is a
+    dict with ``admin: true`` — a pre-#245 broker answers without the key,
+    and an unreachable host or a wrong token raises: every failure reads as
+    NOT admin (fail closed). When at least one host qualifies, the admin
+    tools are registered exactly once for the process lifetime.
+
+    Peers: for a ``discover_peers`` hub the body (or the exception) is kept
+    in ``_peer_probe``. Only the hub's own entry is asked: its peers'
+    entries are reached through it and are probed only for admin."""
     global _admin_tools_registered
-    names = [name for name, cfg in _host_configs.items()
-             if _as_host_config(name, cfg).admin_token]
+    cfgs = {name: _as_host_config(name, cfg)
+            for name, cfg in _host_configs.items()}
+    names = [name for name, cfg in cfgs.items()
+             if cfg.admin_token or cfg.discover_peers]
     if not names:
         return
 
-    def probe(name: str) -> bool:
+    def probe(name: str) -> Any:
         try:
-            info = _get_client(name)._send(
+            return _get_client(name)._send(
                 "GET", "/mcp/info", timeout=_ADMIN_PROBE_TIMEOUT_S)
-        except Exception:
-            return False
-        return isinstance(info, dict) and info.get("admin") is True
+        except Exception as exc:
+            return exc
 
     with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        qualified = list(pool.map(probe, names))
-    _admin_hosts.update(
-        name for name, ok in zip(names, qualified) if ok)
+        answers = list(pool.map(probe, names))
+    for name, info in zip(names, answers):
+        if (cfgs[name].admin_token and isinstance(info, dict)
+                and info.get("admin") is True):
+            _admin_hosts.add(name)
+        if cfgs[name].discover_peers:
+            _peer_probe[name] = info
     if _admin_hosts and not _admin_tools_registered:
         mcp.tool(name="set_mcp_knobs")(set_mcp_knobs)
         mcp.tool(name="workspaces")(workspaces)
