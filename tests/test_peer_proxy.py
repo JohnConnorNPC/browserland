@@ -1272,7 +1272,7 @@ async def test_every_candidate_meets_every_hub_token_in_compare_digest(
                 candidate[:8], token[:8])
 
 
-# ---- #261 phase B: the hub lists the peers it relays MCP to --------------------
+# ---- #261 phase B: the hub lists the peers it relays MCP to -------------
 
 async def _mcp_info(srv, token):
     client = _client()
@@ -1324,7 +1324,7 @@ async def test_mcp_info_lists_the_mcp_peers_sorted(tmp_path, peer_map, want):
     assert r.json()["mcp_peers"] == want
 
 
-# ---- #261 phase B: one hosts entry for the hub and its peers, end to end ------
+# ---- #261 phase B: one hosts entry for the hub and its peers, live -----
 
 def _mcptool_through(hub, entries):
     """configure() the mcptool server from a real --hosts value pointing at
@@ -1396,7 +1396,8 @@ async def test_an_expanded_peer_keeps_its_pairing(hub2, upstream):
     assert upstream.seen == []
 
 
-async def test_a_hub_token_on_an_expanded_peer_never_reaches_it(hub2, upstream):
+async def test_a_hub_token_on_an_expanded_peer_never_reaches_it(hub2,
+                                                                 upstream):
     """C9 live, past the parser's own refusal: a peer host carrying the
     hub's MCP token is refused by the hub (hub_credential_refused) and the
     fake peer sees nothing."""

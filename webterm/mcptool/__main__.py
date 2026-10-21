@@ -129,16 +129,18 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     only; its fields are checked as an entry's are, and any other key is
     refused. So is a ``<hub>.<id>`` that another entry is named, a peer
     token or admin_token equal to the hub entry's token or admin_token, and
-    ``"peers"`` on an entry already behind ``/peer/<id>``. ``discover_peers`` is True on an entry that carries ``"peers"``
-    (``{}`` included), so the server asks that hub which peers it relays.
+    ``"peers"`` on an entry already behind ``/peer/<id>``.
+    ``discover_peers`` is True on an entry that carries ``"peers"`` (``{}``
+    included), so the server asks that hub which peers it relays.
 
-    Raises :class:`ValueError` with a precise message on anything malformed: not
-    a JSON array, a key repeated in one object, an empty array, a non-object entry, a missing/empty field, a
-    name containing ``':'`` (the namespaced-id separator), a duplicate name, a
-    ``"scope"`` that is not a string or not a valid scope name, or an
-    ``"admin_token"`` that is not a string, a ``"peer_origin"`` that is
-    not a string or not an origin, or a ``"peers"`` that breaks the rules
-    above (the message names the host, and the peer)."""
+    Raises :class:`ValueError` with a precise message on anything malformed:
+    not a JSON array, a key repeated in one object, an empty array, a
+    non-object entry, a missing/empty field, a name containing ``':'`` (the
+    namespaced-id separator), a duplicate name, a ``"scope"`` that is not a
+    string or not a valid scope name, an ``"admin_token"`` that is not a
+    string, a ``"peer_origin"`` that is not a string or not an origin, or a
+    ``"peers"`` that breaks the rules above (the message names the host, and
+    the peer)."""
     try:
         data = json.loads(raw, object_pairs_hook=_no_repeated_keys)
     except json.JSONDecodeError as exc:
@@ -281,13 +283,14 @@ def _peer_hosts(where: str, name: str, url: str, peers,
 
 def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
     """Resolve the host map as ``(name, url, token, scope, admin_token,
-    peer_origin, discover_peers)`` tuples. With ``--hosts``/env set, parse it (multi-host).
-    Otherwise fall back to the single-host ``--broker-url``/``--token``
-    shorthand under the name ``"default"``, carrying ``--admin-token``/env as
-    that host's admin credential (#245), no peer_origin and no peer
-    discovery. Every host inherits the process-wide ``--scope`` unless
-    its own entry names one. Returns ``None`` when single-host mode has no
-    resolvable token (so the caller can print the token help and exit)."""
+    peer_origin, discover_peers)`` tuples. With ``--hosts``/env set, parse
+    it (multi-host). Otherwise fall back to the single-host
+    ``--broker-url``/``--token`` shorthand under the name ``"default"``,
+    carrying ``--admin-token``/env as that host's admin credential (#245), no
+    peer_origin and no peer discovery. Every host inherits the process-wide
+    ``--scope`` unless its own entry names one. Returns ``None`` when
+    single-host mode has no resolvable token (so the caller can print the
+    token help and exit)."""
     scope = _resolve_scope(args)
     if args.hosts:
         return _parse_hosts(args.hosts, scope)

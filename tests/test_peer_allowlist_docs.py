@@ -431,4 +431,5 @@ def test_mcp_peers_upgrading_and_the_changelog_are_documented():
             "under errors in list_terminals") in _flat(added)
     # the in-app guide is built from the wiki pages too
     corpus = _corpus_text()
-    assert "is refused when the MCP server starts (the names collide)" in corpus
+    assert ("is refused when the MCP server starts (the names collide)"
+            in corpus)

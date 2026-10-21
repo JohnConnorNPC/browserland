@@ -1330,8 +1330,9 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None, None, False),
-                                    ("b", "https://y:4445", "t2", None, None, None, False)]
+    assert m._parse_hosts(raw) == [
+        ("a", "http://x:4445", "t1", None, None, None, False),
+        ("b", "https://y:4445", "t2", None, None, None, False)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1367,7 +1368,8 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None, None, False)]
+    assert m._resolve_hosts(args) == [
+        ("a", "http://x:4445", "t", None, None, None, False)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1376,7 +1378,8 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None, None, False)]
+    assert m._resolve_hosts(args) == [
+        ("a", "http://x:4445", "ta", None, None, None, False)]
 
 
 def _hosts_json(*entries):
@@ -1389,8 +1392,9 @@ def _hosts_json(*entries):
 def test_parse_hosts_reads_a_per_host_scope():
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
-    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None, None, False),
-                                    ("b", "http://b:4445", "t", None, None, None, False)]
+    assert m._parse_hosts(raw) == [
+        ("a", "http://a:4445", "t", "teamA", None, None, False),
+        ("b", "http://b:4445", "t", None, None, None, False)]
 
 
 @pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
@@ -1473,8 +1477,9 @@ def test_main_wires_scopes_into_configure(monkeypatch):
     monkeypatch.setattr(server.mcp, "run", lambda: None)
     raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
     assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None, None, False),
-                                 ("b", "http://b:4445", "t", "teamB", None, None, False)]
+    assert captured["hosts"] == [
+        ("a", "http://a:4445", "t", "teamA", None, None, False),
+        ("b", "http://b:4445", "t", "teamB", None, None, False)]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1889,8 +1894,9 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None, None, False),
-                                 ("b", "http://y:4445", "tb", None, None, None, False)]
+    assert captured["hosts"] == [
+        ("a", "http://x:4445", "ta", None, None, None, False),
+        ("b", "http://y:4445", "tb", None, None, None, False)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------
@@ -3515,7 +3521,7 @@ def test_the_hub_credential_text_says_to_give_the_peer_its_own_token():
     assert "give that peer its own MCP token (different from the hub's)" in text
 
 
-# ---- #261 phase B: a hub entry's nested "peers" ---------------------------------
+# ---- #261 phase B: a hub entry's nested "peers" -------------------------
 
 def _hub_json(peers, process_scope=None, **hub):
     """_parse_hosts over one hub entry `hub` (url http://hub:4445, token
@@ -3586,7 +3592,8 @@ def test_a_peer_never_takes_the_hub_entrys_admin_token():
     ({"b c": {"token": "x"}}, "peer id 'b c'"),
     ({"b": "b-t"}, "peer 'b' must be an object"),
     ({"b": {"tokn": "x"}}, "unknown key(s) ['tokn']"),
-    ({"b": {"token": "x", "url": "http://elsewhere"}}, "unknown key(s) ['url']"),
+    ({"b": {"token": "x", "url": "http://elsewhere"}},
+     "unknown key(s) ['url']"),
     ({"b": {}}, "peer 'b' 'token' must be a non-empty string"),
     ({"b": {"token": ""}}, "peer 'b' 'token' must be a non-empty string"),
     ({"b": {"token": 5}}, "peer 'b' 'token' must be a non-empty string"),
@@ -3686,7 +3693,7 @@ def test_a_nested_peer_and_an_explicit_entry_may_share_a_url():
         ("b-scoped", "http://hub:4445/peer/b")]
 
 
-# ---- #261 phase B: one startup probe for admin and for a hub's peers -----------
+# ---- #261 phase B: one startup probe for admin and for a hub's peers ----
 # Placed after test_admin_tools_absent_when_no_host_admin: these register the
 # admin tools, which is process-lifetime.
 
@@ -3771,7 +3778,8 @@ def test_a_peer_only_admin_token_makes_that_peer_admin(monkeypatch):
         handler_for)
     try:
         assert server._admin_hosts == {"hub.b"}
-        assert sorted(seen) == [("hub", "/mcp/info"), ("hub.b", "/peer/b/mcp/info")]
+        assert sorted(seen) == [("hub", "/mcp/info"),
+                                ("hub.b", "/peer/b/mcp/info")]
     finally:
         _reset_server()
 
@@ -3811,7 +3819,7 @@ def test_launch_needs_a_host_once_peers_are_expanded(monkeypatch):
                 if r.url.path.endswith("/mcp/launch")]
 
 
-# ---- #261 phase B: the peer rows in list_terminals' errors ---------------------
+# ---- #261 phase B: the peer rows in list_terminals' errors --------------
 
 def _hub_answers(info, peer_terminals=None, faults=None):
     """handler_for: the hub answers /mcp/info with `info` (a dict, or an
@@ -3895,7 +3903,7 @@ def test_an_older_hub_without_mcp_peers_reports_nothing(monkeypatch):
     assert out["errors"] == {}
 
 
-def test_a_configured_peer_the_hub_does_not_list_gets_its_row_after_the_live_error(
+def test_an_unlisted_configured_peer_gets_its_row_after_the_live_error(
         monkeypatch):
     """C7 + rulings-3 Q1: d is configured, the hub lists only b; d's own
     call answers 404 unknown_peer. Its errors value is the live message,
@@ -4004,7 +4012,7 @@ def test_a_second_configure_with_another_hub_keeps_none_of_the_first():
     assert list(out["errors"]) == ["new.c"]
 
 
-# ---- #261 round 1: which hosts count as a hub's configured peers -----------------
+# ---- #261 round 1: which hosts count as a hub's configured peers --------
 
 def _rows_for(entries, info, peer_terminals):
     from webterm.mcptool import server
@@ -4091,7 +4099,7 @@ def test_a_listed_peer_whose_name_another_host_has_is_reported_on_the_hub():
             [dict(_HUB, peers={"c": {"token": "c-t"}}), entries[1]]))
 
 
-# ---- #261 round 1: the startup probe has ONE deadline, for the whole pass -------
+# ---- #261 round 1: the startup probe has ONE deadline, for the pass -----
 
 def test_a_trickling_hub_cannot_hold_startup_past_the_deadline(monkeypatch):
     """adv S3: a hub that sends its /mcp/info one byte at a time (each byte
