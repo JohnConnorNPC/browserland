@@ -61,6 +61,7 @@ def _reset_server():
     server._handles.clear()
     server._admin_hosts.clear()
     server._peer_probe.clear()
+    server._peer_errors.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -3787,3 +3788,174 @@ def test_launch_needs_a_host_once_peers_are_expanded(monkeypatch):
     assert ei.value.code == "host_required"
     assert not [r for r in broker.requests
                 if r.url.path.endswith("/mcp/launch")]
+
+
+# ---- #261 phase B: the peer rows in list_terminals' errors ---------------------
+
+def _hub_answers(info, peer_terminals=None, faults=None):
+    """handler_for: the hub answers /mcp/info with `info` (a dict, or an
+    httpx exception class to raise) and one window; each peer `<id>` in
+    `peer_terminals` answers its own list at /peer/<id>/mcp/terminals.
+    Every request path lands in the returned list."""
+    paths = []
+
+    def handler_for(name):
+        def handler(req):
+            path = req.url.path
+            paths.append(path)
+            if path == "/mcp/info":
+                if isinstance(info, type):
+                    raise info("injected", request=req)
+                return httpx.Response(200, json=info)
+            if path == "/mcp/terminals":
+                return httpx.Response(200, json=[{"id": 1, "mode": "read"}])
+            for pid, rows in (peer_terminals or {}).items():
+                if path == f"/peer/{pid}/mcp/terminals":
+                    if isinstance(rows, httpx.Response):
+                        return rows
+                    return httpx.Response(200, json=rows)
+            return httpx.Response(404, json={"ok": False,
+                                             "error": "unknown_peer"})
+        return handler
+    return handler_for, paths
+
+
+def test_a_listed_peer_without_a_token_is_one_named_row(monkeypatch):
+    """C6: the hub lists b and c, the config has b: hub and hub.b windows
+    are listed, c is one row naming c and the hub, and nothing is ever sent
+    to /peer/c."""
+    from webterm.mcptool import server
+    handler_for, paths = _hub_answers(
+        {"ok": True, "mcp_peers": ["b", "c"]},
+        {"b": [{"id": 5, "mode": "read"}]})
+    _parsed(monkeypatch, [dict(_HUB, peers={"b": {"token": "b-t"}})],
+            handler_for)
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert sorted(t["id"] for t in out["terminals"]) == ["hub.b:5", "hub:1"]
+    assert list(out["errors"]) == ["hub.c"]
+    row = out["errors"]["hub.c"]
+    assert "Hub 'hub' relays MCP to peer 'c'" in row
+    assert "has no token for that peer" in row and "not the agent" in row
+    assert not [p for p in paths if p.startswith("/peer/c")]
+
+
+def test_a_hand_written_peer_entry_counts_as_configured(monkeypatch):
+    """A phase-A style `hub.b` entry at <hub>/peer/b, beside a hub entry
+    with "peers": {} -- no row for b."""
+    from webterm.mcptool import server
+    handler_for, _ = _hub_answers({"ok": True, "mcp_peers": ["b"]},
+                                  {"b": [{"id": 5, "mode": "read"}]})
+    _parsed(monkeypatch, [
+        dict(_HUB, peers={}),
+        {"name": "hub.b", "url": "http://hub:4445/peer/b", "token": "b-t"}],
+        handler_for)
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["errors"] == {}
+    assert sorted(t["id"] for t in out["terminals"]) == ["hub.b:5", "hub:1"]
+
+
+def test_an_older_hub_without_mcp_peers_reports_nothing(monkeypatch):
+    """C2: no `mcp_peers` key is an older hub: no row, no error."""
+    from webterm.mcptool import server
+    handler_for, _ = _hub_answers({"ok": True},
+                                  {"b": [{"id": 5, "mode": "read"}]})
+    _parsed(monkeypatch, [dict(_HUB, peers={"b": {"token": "b-t"}})],
+            handler_for)
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["errors"] == {}
+
+
+def test_a_configured_peer_the_hub_does_not_list_gets_its_row_after_the_live_error(
+        monkeypatch):
+    """C7 + rulings-3 Q1: d is configured, the hub lists only b; d's own
+    call answers 404 unknown_peer. Its errors value is the live message,
+    then "; ", then the startup row -- in that order."""
+    from webterm.mcptool import server
+    handler_for, _ = _hub_answers(
+        {"ok": True, "mcp_peers": ["b"]},
+        {"b": [{"id": 5, "mode": "read"}]})
+    _parsed(monkeypatch, [dict(_HUB, peers={"b": {"token": "b-t"},
+                                             "d": {"token": "d-t"}})],
+            handler_for)
+    try:
+        row = server._peer_errors["hub.d"]
+        live = None
+        try:
+            server._get_client("hub.d").list_terminals()
+        except BrowserlandError as exc:
+            live = str(exc)
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert live and "no MCP relay to this peer" in live      # unknown_peer
+    assert "Hub 'hub' does not list peer 'd'" in row
+    assert out["errors"] == {"hub.d": f"{live}; {row}"}
+
+
+def test_a_hub_down_at_startup_still_expands_and_says_so(monkeypatch):
+    """C11 + rulings-1 B: the hub's /mcp/info fails at startup: hub.b is
+    still configured and listed, and one row on the hub names it and says
+    the check was at startup."""
+    from webterm.mcptool import server
+    calls = {"n": 0}
+    handler_for, _ = _hub_answers({"ok": True, "mcp_peers": ["b"]},
+                                  {"b": [{"id": 5, "mode": "read"}]})
+
+    def flaky_for(name):
+        inner = handler_for(name)
+
+        def handler(req):
+            if req.url.path == "/mcp/info" and calls["n"] == 0:
+                calls["n"] += 1
+                raise httpx.ConnectError("down", request=req)
+            return inner(req)
+        return handler
+    _parsed(monkeypatch, [dict(_HUB, peers={"b": {"token": "b-t"}})],
+            flaky_for)
+    try:
+        assert list(server._host_configs) == ["hub", "hub.b"]
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert sorted(t["id"] for t in out["terminals"]) == ["hub.b:5", "hub:1"]
+    assert list(out["errors"]) == ["hub"]
+    assert out["errors"]["hub"].startswith(
+        "Could not read the peer list of hub 'hub' at startup")
+
+
+@pytest.mark.parametrize("listed", ["b", ["b:1"], [5], [""], {"b": 1}])
+def test_a_malformed_mcp_peers_is_one_row_on_the_hub(monkeypatch, listed):
+    from webterm.mcptool import server
+    handler_for, paths = _hub_answers({"ok": True, "mcp_peers": listed})
+    _parsed(monkeypatch, [dict(_HUB, peers={})], handler_for)
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert list(out["errors"]) == ["hub"]
+    assert "not a list of peer ids" in out["errors"]["hub"]
+    assert not [p for p in paths if p.startswith("/peer/")]
+
+
+def test_a_second_configure_drops_the_previous_rows(monkeypatch):
+    """D7: the rows belong to one configure(); a plain config after it
+    reports none."""
+    from webterm.mcptool import server
+    handler_for, _ = _hub_answers({"ok": True, "mcp_peers": ["c"]})
+    _parsed(monkeypatch, [dict(_HUB, peers={})], handler_for)
+    try:
+        assert list(server._peer_errors) == ["hub.c"]
+        _parsed(monkeypatch, [_HUB], handler_for)
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["errors"] == {}

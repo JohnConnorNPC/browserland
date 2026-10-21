@@ -26,6 +26,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
+from ..protocol import PEER_ID_RE
 from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
@@ -108,6 +109,9 @@ _admin_tools_registered = False
 # /mcp/info body, or the exception that GET raised. Filled by configure()'s
 # probe and cleared with the rest of the cross-config state.
 _peer_probe: Dict[str, Any] = {}
+# #261: the rows that probe yields for list_terminals' `errors`, keyed as
+# _peer_rows() says; fixed until the next configure().
+_peer_errors: Dict[str, str] = {}
 
 # One overall deadline for the startup probe (#245, #261): the browser's
 # client default timeout, so the worst-case stdio startup delay is one
@@ -163,6 +167,7 @@ def configure(hosts) -> None:
             _handles.clear()
         _admin_hosts.clear()
         _peer_probe.clear()
+        _peer_errors.clear()
         new_configs: Dict[str, HostConfig] = {}
         for h in hosts:
             cfg = h if isinstance(h, HostConfig) else HostConfig(*h)
@@ -211,10 +216,69 @@ def _probe_startup() -> None:
             _admin_hosts.add(name)
         if cfgs[name].discover_peers:
             _peer_probe[name] = info
+    _peer_errors.update(_peer_rows(cfgs))
     if _admin_hosts and not _admin_tools_registered:
         mcp.tool(name="set_mcp_knobs")(set_mcp_knobs)
         mcp.tool(name="workspaces")(workspaces)
         _admin_tools_registered = True
+
+
+def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
+    """#261: compare what each discover_peers hub's ``/mcp/info`` said with
+    the config. A hub's configured peers are the hosts whose base is
+    ``<hub base>/peer/<id>`` (a nested peer or a hand-written entry alike).
+    Rows: a peer the hub lists that no host reaches, keyed ``<hub>.<id>``; a
+    configured peer the hub does not list, keyed by that host; a hub whose
+    probe failed or whose ``mcp_peers`` is not a list of peer ids, keyed by
+    the hub. A body without ``mcp_peers`` (an older hub) yields nothing. The
+    listed ids only pick rows: nothing is ever sent to one."""
+    rows: Dict[str, str] = {}
+    for hub, info in _peer_probe.items():
+        prefix = cfgs[hub].base.rstrip("/") + "/peer/"
+        configured: Dict[str, List[str]] = {}
+        for name, cfg in cfgs.items():
+            base = cfg.base.rstrip("/")
+            pid = base[len(prefix):]
+            if base.startswith(prefix) and PEER_ID_RE.fullmatch(pid):
+                configured.setdefault(pid, []).append(name)
+        if isinstance(info, Exception):
+            rows[hub] = (
+                f"Could not read the peer list of hub {hub!r} at startup "
+                f"({info}): its peers were not checked, so a peer it relays "
+                "that this config has no token for is not reported. Restart "
+                "this MCP server to check again.")
+            continue
+        if not isinstance(info, dict) or "mcp_peers" not in info:
+            continue
+        listed = info["mcp_peers"]
+        if not isinstance(listed, list) or not all(
+                isinstance(pid, str) and PEER_ID_RE.fullmatch(pid)
+                for pid in listed):
+            rows[hub] = (
+                f"Hub {hub!r} answered an 'mcp_peers' that is not a list of "
+                "peer ids, so its peers were not checked (nothing was sent "
+                "to any of them).")
+            continue
+        for pid in listed:
+            if pid not in configured:
+                rows[f"{hub}.{pid}"] = (
+                    f"Hub {hub!r} relays MCP to peer {pid!r} (its /mcp/info "
+                    "lists it), but this MCP config has no token for that "
+                    "peer, so its windows are not listed. This is for the "
+                    "person who set up this MCP config, not the agent: add "
+                    f'"{pid}": {{"token": "<that peer\'s own MCP token>"}} to '
+                    f'the "peers" of the {hub!r} entry and restart this '
+                    "server.")
+        for pid, names in configured.items():
+            if pid not in listed:
+                for name in names:
+                    rows[name] = (
+                        f"Hub {hub!r} does not list peer {pid!r} among the "
+                        "peers it relays MCP to (checked at startup): it has "
+                        "no such peer, or the peer is not set to \"mcp\": "
+                        "true there. This is for the hub's operator, not the "
+                        "agent.")
+    return rows
 
 
 def _get_client(name: str) -> BrowserlandClient:
@@ -471,7 +535,8 @@ def mcp_info(host: Optional[str] = None) -> Dict[str, Any]:
     terminals), plus `scope`: the scope this server declared to that host, as
     the broker saw it (null when unscoped). `terminals: false` means that
     broker hosts no terminals and refuses every launch, whatever allow_launch
-    says; a broker predating it omits the key.
+    says; a broker predating it omits the key. `mcp_peers` lists the ids of
+    the peers that broker relays MCP to (a hub); absent on an older broker.
 
     With `host` set, returns that one host's flags. Omit `host` (or pass "") to
     get a dict keyed by host name — each value is that host's flags, or
@@ -499,7 +564,14 @@ def list_terminals() -> Dict[str, Any]:
     own "scope"), it sees ONLY the windows tagged with that scope there:
     windows started by hand stay invisible until someone tags them. A scoped
     host that does not confirm the scope lists nothing and reports
-    `scope_unsupported` in `errors` instead."""
+    `scope_unsupported` in `errors` instead.
+
+    For a host entry that carries "peers", `errors` also holds what that
+    hub's /mcp/info said when this server started: a peer the hub relays but
+    this config has no token for (key `<hub>.<id>`; its windows are not
+    listed), a configured peer the hub does not relay (that host's key), or
+    a hub whose peer list could not be read (the hub's key). These are
+    checked once, at startup."""
     terminals: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
     for name in _host_configs:
@@ -527,6 +599,10 @@ def list_terminals() -> Dict[str, Any]:
             terminals.extend(host_terms)
         except Exception as exc:
             errors[name] = str(exc)
+    # #261: the startup probe's peer rows, after the live ones: on a key
+    # that already has a live error the row is appended to it.
+    for key, row in _peer_errors.items():
+        errors[key] = f"{errors[key]}; {row}" if key in errors else row
     return {"terminals": terminals, "errors": errors}
 
 
