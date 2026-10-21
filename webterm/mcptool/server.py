@@ -34,11 +34,14 @@ class HostConfig(NamedTuple):
     URL, the MCP token, the optional declared scope and the optional per-host
     admin token. This NamedTuple replaces the positional tuples configure()
     used to store, so a growing host map stays self-describing. Plain tuples
-    ``(name, base, token[, scope[, admin_token[, peer_origin]]])`` are still
-    accepted at the configure() seam and normalized (missing fields default to None), which
+    ``(name, base, token[, scope[, admin_token[, peer_origin[,
+    discover_peers]]]])`` are still accepted at the configure() seam and
+    normalized (missing fields default to None, discover_peers to False), which
     keeps every existing caller and test injection working. ``peer_origin``
     (#252) is the origin a hub is expected to dial for a host reached
-    through its ``/peer/<id>`` prefix, or None."""
+    through its ``/peer/<id>`` prefix, or None. ``discover_peers`` (#261) is
+    True for a hosts entry that carries ``"peers"``: the startup probe asks
+    that hub which peers it relays MCP to."""
 
     name: str
     base: str
@@ -46,6 +49,7 @@ class HostConfig(NamedTuple):
     scope: Optional[str] = None
     admin_token: Optional[str] = None
     peer_origin: Optional[str] = None
+    discover_peers: bool = False
 
 
 def _as_host_config(name: str, raw: Any) -> HostConfig:
@@ -124,8 +128,9 @@ def _handle_for(nid: str) -> Optional[str]:
 def configure(hosts) -> None:
     """Install the host map from an ordered iterable of descriptors —
     :class:`HostConfig` or a positional ``(name, base, token[, scope[,
-    admin_token[, peer_origin]]])`` tuple (scope/admin_token/peer_origin None
-    = unset). Closes any
+    admin_token[, peer_origin[, discover_peers]]]])`` tuple
+    (scope/admin_token/peer_origin None = unset, discover_peers False). Closes
+    any
     previously-built clients so their sockets aren't leaked; the new clients
     are built lazily on first use. Also clears, atomically with the rebuild,
     every cross-config state: the launch-handle store and the admin-host set

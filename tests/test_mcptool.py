@@ -1328,8 +1328,8 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None, None),
-                                    ("b", "https://y:4445", "t2", None, None, None)]
+    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None, None, None, False),
+                                    ("b", "https://y:4445", "t2", None, None, None, False)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1357,7 +1357,7 @@ def test_resolve_hosts_single_default(monkeypatch):
     monkeypatch.delenv(m.HOSTS_ENV, raising=False)
     args = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None,
-                                       None, None)]
+                                       None, None, False)]
 
 
 def test_resolve_hosts_multi_from_env(monkeypatch):
@@ -1365,7 +1365,7 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None, None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None, None, None, False)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1374,7 +1374,7 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None, None)]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None, None, None, False)]
 
 
 def _hosts_json(*entries):
@@ -1387,8 +1387,8 @@ def _hosts_json(*entries):
 def test_parse_hosts_reads_a_per_host_scope():
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
-    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None, None),
-                                    ("b", "http://b:4445", "t", None, None, None)]
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA", None, None, False),
+                                    ("b", "http://b:4445", "t", None, None, None, False)]
 
 
 @pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
@@ -1397,8 +1397,8 @@ def test_an_absent_or_empty_host_scope_inherits(entry):
     from webterm.mcptool import __main__ as m
     raw = _hosts_json({"name": "a", "scope": "teamA"}, entry)
     assert m._parse_hosts(raw, "proc") == [
-        ("a", "http://a:4445", "t", "teamA", None, None),
-        ("b", "http://b:4445", "t", "proc", None, None)]
+        ("a", "http://a:4445", "t", "teamA", None, None, False),
+        ("b", "http://b:4445", "t", "proc", None, None, False)]
 
 
 @pytest.mark.parametrize("bad", ["a b", "a:b", "x" * 65, "-lead", 5, None,
@@ -1425,7 +1425,7 @@ def test_the_scope_env_applies_to_every_host(monkeypatch):
                                                        "envscope"]
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         "envscope", None, None)]
+                                         "envscope", None, None, False)]
 
 
 def test_a_host_scope_beats_the_env(monkeypatch):
@@ -1442,7 +1442,7 @@ def test_the_scope_flag_beats_the_env(monkeypatch):
     args = m._parse_args(["--scope", "flagscope", "--token", "t",
                           "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(args) == [("default", "http://h:4445", "t",
-                                       "flagscope", None, None)]
+                                       "flagscope", None, None, False)]
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])
@@ -1471,8 +1471,8 @@ def test_main_wires_scopes_into_configure(monkeypatch):
     monkeypatch.setattr(server.mcp, "run", lambda: None)
     raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
     assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None, None),
-                                 ("b", "http://b:4445", "t", "teamB", None, None)]
+    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA", None, None, False),
+                                 ("b", "http://b:4445", "t", "teamB", None, None, False)]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1887,8 +1887,8 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None, None),
-                                 ("b", "http://y:4445", "tb", None, None, None)]
+    assert captured["hosts"] == [("a", "http://x:4445", "ta", None, None, None, False),
+                                 ("b", "http://y:4445", "tb", None, None, None, False)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------
@@ -2270,9 +2270,9 @@ def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
     raw = _hosts_json({"name": "a", "admin_token": "per-host"},
                       {"name": "b"})
     assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", None,
-                                    "per-host", None),
+                                    "per-host", None, False),
                                    ("b", "http://b:4445", "t", None, None,
-                                    None)]
+                                    None, False)]
     with pytest.raises(ValueError) as ei:
         m._parse_hosts(_hosts_json({"name": "a", "admin_token": 5}))
     assert "admin_token" in str(ei.value) and "'a'" in str(ei.value)
@@ -2281,7 +2281,7 @@ def test_admin_token_env_and_hosts_entry_plumb_through(monkeypatch):
     monkeypatch.setenv(m.ADMIN_TOKEN_ENV, "env-admin")
     single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
     assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
-                                         None, "env-admin", None)]
+                                         None, "env-admin", None, False)]
 
 
 def test_get_client_carries_the_hosts_admin_token():
@@ -3511,3 +3511,93 @@ def test_the_hub_credential_text_says_to_give_the_peer_its_own_token():
     text = " ".join(_ERROR_MESSAGES["hub_credential_refused"].split())
     assert "not even to a peer that was given the same token" in text
     assert "give that peer its own MCP token (different from the hub's)" in text
+
+
+# ---- #261 phase B: a hub entry's nested "peers" ---------------------------------
+
+def _hub_json(peers, process_scope=None, **hub):
+    """_parse_hosts over one hub entry `hub` (url http://hub:4445, token
+    hub-t) carrying `peers`."""
+    from webterm.mcptool import __main__ as m
+    entry = dict({"name": "hub", "url": "http://hub:4445", "token": "hub-t",
+                  "peers": peers}, **hub)
+    return m._parse_hosts(json.dumps([entry]), process_scope)
+
+
+def test_nested_peers_expand_after_their_hub():
+    """Each peer becomes `<hub>.<id>` at `<hub url>/peer/<id>` with its own
+    token, right after its hub and in config order; its peer_origin is
+    canonicalised like a top-level one. Only the hub has discover_peers."""
+    hosts = _hub_json({"b": {"token": "b-t",
+                             "peer_origin": "HTTP://Box-B:80"},
+                       "a": {"token": "a-t"}})
+    assert hosts == [
+        ("hub", "http://hub:4445", "hub-t", None, None, None, True),
+        ("hub.b", "http://hub:4445/peer/b", "b-t", None, None, "http://box-b",
+         False),
+        ("hub.a", "http://hub:4445/peer/a", "a-t", None, None, None, False)]
+
+
+def test_nested_peers_strip_the_hub_urls_trailing_slash():
+    hosts = _hub_json({"b": {"token": "b-t"}}, url="http://hub:4445/")
+    assert hosts[1][1] == "http://hub:4445/peer/b"
+
+
+def test_an_empty_peers_object_still_asks_the_hub():
+    assert _hub_json({}) == [
+        ("hub", "http://hub:4445", "hub-t", None, None, None, True)]
+
+
+def test_a_hub_entry_without_peers_does_not_ask():
+    from webterm.mcptool import __main__ as m
+    assert [h[6] for h in m._parse_hosts(_hosts_json({"name": "a"}))] == [
+        False]
+
+
+@pytest.mark.parametrize("process, peer_scope, want", [
+    ("proc", None, "proc"),        # the process-wide scope reaches the peer
+    (None, None, None),            # ... and only it: never the hub entry's
+    ("proc", "own", "own"),        # the peer's own scope wins
+    (None, "own", "own")])
+def test_a_peer_never_takes_the_hub_entrys_scope(process, peer_scope, want):
+    peer = {"token": "b-t"}
+    if peer_scope:
+        peer["scope"] = peer_scope
+    hosts = _hub_json({"b": peer}, process, scope="hubscope")
+    assert hosts[0][3] == "hubscope"
+    assert hosts[1][3] == want
+
+
+def test_a_peer_never_takes_the_hub_entrys_admin_token():
+    hosts = _hub_json({"b": {"token": "b-t"},
+                       "c": {"token": "c-t", "admin_token": "c-adm"}},
+                      admin_token="hub-adm")
+    assert [h[4] for h in hosts] == ["hub-adm", None, "c-adm"]
+
+
+@pytest.mark.parametrize("peers, needle", [
+    ([], "'peers' must be an object"),
+    (None, "'peers' must be an object"),
+    ({"b:c": {"token": "x"}}, "peer id 'b:c'"),
+    ({"": {"token": "x"}}, "peer id ''"),
+    ({"x" * 65: {"token": "x"}}, "peer id 'xxxx"),
+    ({"b c": {"token": "x"}}, "peer id 'b c'"),
+    ({"b": "b-t"}, "peer 'b' must be an object"),
+    ({"b": {"tokn": "x"}}, "unknown key(s) ['tokn']"),
+    ({"b": {"token": "x", "url": "http://elsewhere"}}, "unknown key(s) ['url']"),
+    ({"b": {}}, "peer 'b' 'token' must be a non-empty string"),
+    ({"b": {"token": ""}}, "peer 'b' 'token' must be a non-empty string"),
+    ({"b": {"token": 5}}, "peer 'b' 'token' must be a non-empty string"),
+    ({"b": {"token": "x", "scope": 5}}, "peer 'b' 'scope' must be a string"),
+    ({"b": {"token": "x", "scope": "a:b"}}, "peer 'b' scope 'a:b'"),
+    ({"b": {"token": "x", "admin_token": 5}},
+     "peer 'b' 'admin_token' must be a string"),
+    ({"b": {"token": "x", "peer_origin": 5}},
+     "peer 'b' 'peer_origin' must be a string"),
+    ({"b": {"token": "x", "peer_origin": "http://b/path"}},
+     "peer 'b' peer_origin 'http://b/path'")])
+def test_a_bad_nested_peer_is_refused_naming_the_hub(peers, needle):
+    with pytest.raises(ValueError) as ei:
+        _hub_json(peers)
+    assert "--hosts[0] ('hub')" in str(ei.value)
+    assert needle in str(ei.value)
