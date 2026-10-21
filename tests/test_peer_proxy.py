@@ -1313,3 +1313,99 @@ async def test_mcp_info_lists_no_peers_as_an_empty_list(tmp_path):
         srv.stop()
         mp.undo()
     assert r.json()["mcp_peers"] == []
+
+
+# ---- #261 phase B: one hosts entry for the hub and its peers, end to end ------
+
+def _mcptool_through(hub, entries):
+    """configure() the mcptool server from a real --hosts value pointing at
+    the live hub, run list_terminals, and give back (result, the per-host
+    configs). Always leaves the server unconfigured."""
+    from webterm.mcptool import __main__ as m
+    from webterm.mcptool import server
+    server.configure(m._parse_hosts(json.dumps(entries), None))
+    try:
+        return server.list_terminals(), dict(server._host_configs)
+    finally:
+        server.configure([])
+
+
+async def test_one_hub_entry_reaches_the_hub_and_its_mcp_peer(hub2, upstream):
+    """C3/C6/C7 live: one `hub` entry with peers m (mcp: true on the hub)
+    and n (not relayed). hub.m's window comes from the fake peer, which sees
+    B's MCP token and no hub credential; n is one row carrying the hub's
+    live unknown_peer answer, then the startup row. With "peers": {} the
+    relayed m is reported instead of silently absent."""
+    import asyncio
+    pytest.importorskip("mcp")
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer(
+        [{"id": 9, "mode": "read", "title": "on b"}])
+    hub = {"name": "hub", "url": hub2.url, "token": HUB_MCP}
+    loop = asyncio.get_running_loop()
+    out, cfgs = await loop.run_in_executor(None, _mcptool_through, hub2, [
+        dict(hub, peers={"m": {"token": B_MCP,
+                               "peer_origin": upstream.origin},
+                         "n": {"token": "n-mcp-token"}})])
+    assert list(cfgs) == ["hub", "hub.m", "hub.n"]
+    assert [t["id"] for t in out["terminals"]] == ["hub.m:9"]
+    assert list(out["errors"]) == ["hub.n"]
+    value = out["errors"]["hub.n"]
+    at = value.index("; Hub 'hub' does not list peer 'n'")
+    assert "no MCP relay to this peer" in value[:at]      # the live 404
+    assert upstream.hits("/mcp/terminals") == 1
+    for s in upstream.seen:
+        assert s.one("Authorization") == "Bearer " + B_MCP
+        flat = s.target + " " + " ".join(v for _, v in s.headers)
+        for canary in HUB_CANARIES:
+            assert canary not in flat, canary
+    upstream.seen.clear()
+    out, _ = await loop.run_in_executor(None, _mcptool_through, hub2,
+                                        [dict(hub, peers={})])
+    assert list(out["errors"]) == ["hub.m"]
+    assert "relays MCP to peer 'm'" in out["errors"]["hub.m"]
+    assert upstream.seen == []
+    # nothing of B's is kept on the hub
+    for p in hub2.tmp.rglob("*"):
+        if p.is_file():
+            assert B_MCP not in p.read_text(encoding="utf-8",
+                                            errors="replace"), p
+
+
+async def test_an_expanded_peer_keeps_its_pairing(hub2, upstream):
+    """C3 live: the peer_origin of a nested peer rides its calls: a stale
+    one is refused by the hub (peer_origin_changed) and B is never dialed."""
+    import asyncio
+    pytest.importorskip("mcp")
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+    out, _ = await asyncio.get_running_loop().run_in_executor(
+        None, _mcptool_through, hub2, [
+            {"name": "hub", "url": hub2.url, "token": HUB_MCP,
+             "peers": {"m": {"token": B_MCP,
+                             "peer_origin": "http://elsewhere:4445"}}}])
+    assert list(out["errors"]) == ["hub.m"]
+    assert "(HTTP 409)" in out["errors"]["hub.m"]
+    assert upstream.seen == []
+
+
+async def test_a_hub_token_on_an_expanded_peer_never_reaches_it(hub2, upstream):
+    """C9 live, past the parser's own refusal: a peer host carrying the
+    hub's MCP token is refused by the hub (hub_credential_refused) and the
+    fake peer sees nothing."""
+    import asyncio
+    pytest.importorskip("mcp")
+    from webterm.mcptool import BrowserlandError
+    from webterm.mcptool import server
+    upstream.routes["/mcp/terminals"] = lambda s: json_answer([])
+
+    def run():
+        server.configure([server.HostConfig(
+            "hub.m", hub2.url + "/peer/m", HUB_MCP)])
+        try:
+            server._get_client("hub.m").list_terminals()
+        except BrowserlandError as exc:
+            return exc.code
+        finally:
+            server.configure([])
+    code = await asyncio.get_running_loop().run_in_executor(None, run)
+    assert code == "hub_credential_refused"
+    assert upstream.seen == []
