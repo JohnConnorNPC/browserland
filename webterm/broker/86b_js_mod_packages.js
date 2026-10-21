@@ -608,6 +608,7 @@
             const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
             let rows = [];
             let listEl = null;
+            let adminNoteEl = null;
             function _reflectManager() {
                 const byId = Object.create(null);
                 for (const s of _modStatusRows()) byId[s.id] = s;
@@ -768,6 +769,12 @@
                         + 'once, and a mod this broker pins (see “Mods on this '
                         + 'broker”) is locked here.';
                     wrap.appendChild(hint);
+                    // #260 H1: says so when no admin token guards this broker.
+                    adminNoteEl = document.createElement('div');
+                    adminNoteEl.className = 'set-hint mod-install-warn';
+                    adminNoteEl.hidden = true;
+                    wrap.appendChild(adminNoteEl);
+                    _paintModsAdminNote(adminNoteEl);
                     // #163 (S5): the operator entry point. It targets the LOCAL
                     // broker — the one that served this page — so there is no
                     // build skew to feature-detect: if this code is running,
@@ -793,7 +800,10 @@
                     wrap.appendChild(listEl);
                     return wrap;
                 },
-                reflect: function () { _reflectManager(); },
+                reflect: function () {
+                    _reflectManager();
+                    _paintModsAdminNote(adminNoteEl);
+                },
             });
             window.__mods._reflectManager = _reflectManager;
             window.__mods._rebuildManagerRows = _rebuildRows;
@@ -1385,6 +1395,29 @@
             const j = await localInfo();
             return (j && j.admin && typeof j.admin === 'object')
                 ? j.admin : null;
+        }
+        // #260 H1: the Mods pane's note when THIS broker has no admin token.
+        // The page came from this broker, so an /info with no `admin` key is
+        // this build unconfigured, not an old one. `ok` is localInfo._ok: an
+        // /info that never answered proves nothing, so it says nothing.
+        function _modsAdminUnsetNote(info, ok) {
+            if (ok !== true || !info || typeof info !== 'object') return null;
+            if (_adminRequiredFor(info.admin, '/mods/install')) return null;
+            return 'No admin token is set on this broker, so anything holding '
+                + 'its password (this page, or any mod running in it) can '
+                + 'install, uninstall and rescan mods and change the mod and '
+                + 'update policy. Set admin_token in broker_config.json (16 or '
+                + 'more characters, then restart the broker) to require a '
+                + 'second credential.';
+        }
+        // Paints the note from localInfo()'s memo; never a request of its own.
+        function _paintModsAdminNote(el) {
+            if (!el) return;
+            localInfo().then(function (j) {
+                const text = _modsAdminUnsetNote(j, localInfo._ok);
+                el.textContent = text || '';
+                el.hidden = !text;
+            }).catch(function () {});
         }
         // The ONE styled admin-token prompt — built on openDialog, so it
         // matches every other dialog here. Resolves the typed token, or null on

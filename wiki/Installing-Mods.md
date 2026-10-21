@@ -10,6 +10,8 @@ Click **Install a mod…** and pick a mod's folder (or a single `.js` file) from
 
 If the broker's operator has configured an **admin token**, installing and uninstalling ask for it in a dialog titled *Admin token required*. The page password is not enough. Type the token and press **Continue**; it is held in memory until you reload the page and is never saved or synced, so a reload asks again. If the token was wrong, the broker refuses with `admin_required` and the dialog reappears.
 
+If no admin token is set, the Mods pane says so at the top: then any page or mod holding the broker's password can install and uninstall mods there.
+
 ## Uninstalling a mod
 
 Every installed mod's row carries an **Uninstall** button. **Shipped mods have no Uninstall button at all** — they are part of the broker's own program and can't be removed this way; only a mod installed at runtime can be. Uninstalling gives you the option to also delete the mod's data stored on that broker (its `/mod-store` value and its pin); without it, only the mod's code is removed, and that data stays on the broker, where a later install of a mod with the same id picks it up. Data a mod keeps in other browsers is never touched.

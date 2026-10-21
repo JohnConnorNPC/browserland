@@ -8194,6 +8194,40 @@ def test_admin_machinery_present_and_served():
     assert "X-Webterm-Admin" in INDEX_HTML
 
 
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_mods_pane_says_when_no_admin_token_is_set(tmp_path):
+    """#260 H1: an answered /info with no admin gate -> the note; a gated
+    broker, or an /info that never answered, -> none."""
+    src = _packages_src()
+    fns = (_frag_fn(src, "function _adminRequiredFor(") + "\n        }\n"
+           + _frag_fn(src, "function _modsAdminUnsetNote(") + "\n        }\n")
+    r = _node237(tmp_path, fns + """
+process.stdout.write(JSON.stringify({
+    unset: _modsAdminUnsetNote({mods: []}, true),
+    gated: _modsAdminUnsetNote({admin: {required: true,
+                                        routes: ['/mods/install']}}, true),
+    unread: _modsAdminUnsetNote({}, false),
+    never: _modsAdminUnsetNote({}, undefined),
+}) + '\\n');
+""")
+    assert r["unset"].startswith("No admin token is set on this broker")
+    assert "admin_token" in r["unset"]
+    assert r["gated"] is None and r["unread"] is None and r["never"] is None
+
+
+def test_the_mods_pane_paints_the_admin_note_from_render_and_reflect():
+    src = _packages_src()
+    pane = _frag_fn(src, "function _mountModsManagerPane(")
+    render = pane[pane.index("render: function ()"):pane.index("reflect:")]
+    reflect = pane[pane.index("reflect:"):]
+    assert "_paintModsAdminNote(adminNoteEl);" in render
+    assert "_paintModsAdminNote(adminNoteEl);" in reflect
+    paint = _frag_fn(src, "function _paintModsAdminNote(")
+    assert "el.textContent =" in paint and "localInfo._ok" in paint
+    assert "hostFetch" not in paint and "innerHTML" not in paint
+    assert "function _modsAdminUnsetNote(" in INDEX_HTML
+
+
 def test_admin_detection_is_info_based_and_old_brokers_keep_todays_wire():
     # Feature-detect off the /info `admin` key the page already holds -- an
     # absent key or required !== true is "page-token wire", full stop.

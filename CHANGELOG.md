@@ -646,6 +646,11 @@ again, unless they change a dependency file too.
   uses one stops loading; see
   [`wiki/Upgrading.md`](wiki/Upgrading.md#an-installed-stylesheet-may-not-use-a-css-escape-260).
 
+- **The Mods pane says when no admin token is set** (#260). Without
+  `admin_token` in `broker_config.json`, the page password alone can install,
+  uninstall and rescan mods and write the mod and update policy; the pane now
+  says so, where before only a line in the broker's log did.
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the
