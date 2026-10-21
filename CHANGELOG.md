@@ -674,6 +674,11 @@ again, unless they change a dependency file too.
   in the broker's environment; they are now removed, as `WEB_TERMINAL_TOKEN`
   already was.
 
+- **A chosen token needs 16 or more characters** (#260). A broker whose
+  `auth_token` is shorter now refuses to start, as a short `admin_token`
+  already did; see
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#a-chosen-token-needs-16-or-more-characters-260).
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the

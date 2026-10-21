@@ -209,14 +209,14 @@ def test_status_with_token_returns_all(tmp_path, monkeypatch):
 
 def test_status_requires_token_when_configured(tmp_path, monkeypatch):
     _patch_fetch(monkeypatch)
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     # RAW client on purpose: authed() would append the very token this
     # test needs to be missing.
     _, r = app.test_client.get("/status/fetch")
     assert r.status == 401
     _, r = app.test_client.get("/status/fetch?token=nope")
     assert r.status == 401
-    _, r = authed(app).get("/status/fetch?token=sekrit")
+    _, r = authed(app).get("/status/fetch?token=sekrit-0123456789")
     assert r.status == 200
     assert r.json["ok"] is True
 
@@ -273,7 +273,7 @@ def test_status_caches_within_ttl(tmp_path, monkeypatch):
 def test_status_options_preflight_cors(tmp_path, monkeypatch):
     # Even with a token configured the preflight is answered ACAO:* (the browser
     # cross-origin fetch depends on it), exactly like /info and /state.
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     _, r = authed(app).options("/status/fetch")
     assert r.status == 204
     assert r.headers.get("Access-Control-Allow-Origin") == "*"

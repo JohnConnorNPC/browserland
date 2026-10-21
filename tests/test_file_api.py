@@ -180,7 +180,7 @@ def test_every_file_route_has_options_and_enforces_auth(tmp_path, monkeypatch):
     # missing one silently 405s every cross-origin (remote-pane) call — and (b)
     # enforce the token gate (401 when a token is configured and absent).
     # Enumerated from the LIVE router so a future endpoint can't skip the guard.
-    app = _make_file_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_file_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     posts, options = set(), set()
     for route in app.router.routes:
         path = "/" + route.path.lstrip("/")

@@ -224,7 +224,8 @@ no loopback exemption, no opt-out. Resolution (never returns nothing):
 `$WEB_TERMINAL_TOKEN` → config `auth_token` → the `webterm_token.json` sidecar
 beside the state store → **mint** `secrets.token_urlsafe(32)` into it. Compared
 with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
-without minting or starting a server.
+without minting or starting a server. A resolved token shorter than 16
+characters refuses to start (#260).
 
 A terminal's shell inherits the broker's environment without
 `WEB_TERMINAL_TOKEN`, the MCP tokens (`WEB_TERMINAL_MCP_TOKEN`,

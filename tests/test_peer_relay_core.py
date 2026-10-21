@@ -24,8 +24,8 @@ from webterm.protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 from .peer_upstream import Answer, FakeUpstream, json_answer
 
 ADMIN = broker_app.ADMIN_HEADER
-A_TOKEN = "a-token-AAAA"
-B_TOKEN = "b-token-BBBB"
+A_TOKEN = "a-token-AAAA-0123456"
+B_TOKEN = "b-token-BBBB-0123456"
 
 # ---- the tables ---------------------------------------------------------------
 # Research #252 S7, typed out again on purpose: the code's tables must equal

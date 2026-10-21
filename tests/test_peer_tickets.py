@@ -15,7 +15,7 @@ from webterm.broker import peer_sockets as ps
 from webterm.broker import peers
 from webterm.broker.app import create_app
 
-A_TOKEN = "a-token-AAAA"
+A_TOKEN = "a-token-AAAA-0123456"
 B_TOKEN = "b-token-BBBB-secret"
 TID = ps.token_id(A_TOKEN)
 ORIGIN_B = "http://127.0.0.1:4448"

@@ -143,8 +143,8 @@ def _run(tmp_path, prefs, body, extra_src="", hosts_src=None):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-A_TOKEN = "A-TOKEN"
-B_TOKEN = "B-TOKEN"
+A_TOKEN = "A-TOKEN-0123456789"
+B_TOKEN = "B-TOKEN-0123456789"
 INFO = {"ok": True, "peers": {"b": "http://b:4448"}, "peer_proxy": True}
 
 

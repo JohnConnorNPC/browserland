@@ -62,6 +62,22 @@ again, unless they change a dependency file too.
 
 ---
 
+## A chosen token needs 16 or more characters (#260)
+
+**What changed.** A broker whose token is shorter than 16 characters refuses
+to start, with a message naming where the token came from. That holds for every
+place a token can be set: `$WEB_TERMINAL_TOKEN`, `auth_token` in
+`broker_config.json`, and a hand-written `webterm_token.json` beside the state
+store. A token the broker mints itself is always long enough.
+
+**Who is affected.** Only an operator who set a short token themselves.
+
+**What to do.** Set a longer value everywhere it is used (each browser's login,
+each host entry, `BROWSERLAND_MCP_HOSTS` peers), or remove it and let the broker
+mint one; `python -m webterm.broker` with `--print-token` prints it.
+
+---
+
 ## The peer proxy needs websockets 15 (#252)
 
 A broker that relays to peers now needs `websockets` 15 or later as well as

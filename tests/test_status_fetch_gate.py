@@ -292,7 +292,7 @@ def test_a_mid_request_revoke_answers_503_not_partial_results(tmp_path,
 
 def test_the_ladder_is_token_then_gate_then_shape(tmp_path, monkeypatch):
     calls = _patch_fetch(monkeypatch)
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     # Auth answers first, gate off or not. RAW client on purpose: authed()
     # would append the very token these need to be missing/wrong.
     _, r = app.test_client.get("/status/fetch")
@@ -318,7 +318,7 @@ def test_the_ladder_is_token_then_gate_then_shape(tmp_path, monkeypatch):
 def test_preflight_is_not_gated(tmp_path, monkeypatch):
     # A CORS preflight is not egress, and it must keep answering with the
     # gate off or the browser could never even LEARN the 503.
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     assert app.ctx.status_fetch_enabled is False
     _, r = authed(app).options("/status/fetch")
     assert r.status == 204

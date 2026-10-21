@@ -25,7 +25,7 @@ from sanic_testing.reusable import ReusableClient
 #: app must configure one EXPLICITLY: a factory that left auth_token unset would
 #: make the broker mint a sidecar, and the suite runs with cwd=<repo>, so that
 #: would drop a real secret beside the source tree.
-TEST_TOKEN = "test-token"
+TEST_TOKEN = "test-token-0123456789"
 
 #: Client methods whose first positional argument is a URL.
 _URL_METHODS = frozenset({

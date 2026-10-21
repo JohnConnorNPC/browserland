@@ -218,14 +218,14 @@ def test_post_rename_via_replace(tmp_path, monkeypatch):
 
 
 def test_post_auth_gate_with_token(tmp_path, monkeypatch):
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     # RAW client on purpose: this asserts the UNauthenticated 401.
     _, r = app.test_client.get("/profiles/config")
     assert r.status == 401
-    _, r = authed(app).get("/profiles/config?token=sekrit")
+    _, r = authed(app).get("/profiles/config?token=sekrit-0123456789")
     assert r.status == 200 and r.json["ok"] is True
     # A rejected POST changes nothing.
-    r = _post(app, {"profiles": {"a/b": {"command": ["x"]}}}, token="sekrit")
+    r = _post(app, {"profiles": {"a/b": {"command": ["x"]}}}, token="sekrit-0123456789")
     assert r.status == 400 and r.json["error"] == "bad_name"
 
 

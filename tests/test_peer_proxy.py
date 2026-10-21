@@ -22,7 +22,7 @@ from webterm.broker import peers
 from webterm.broker.app import ADMIN_HEADER, create_app
 from webterm.protocol import MCP_ADMIN_HEADER, SCOPE_HEADER
 
-B_TOKEN = "b-browser-token"
+B_TOKEN = "b-browser-token-0123"
 B_MCP = "b-mcp-token"
 _seq = 0
 

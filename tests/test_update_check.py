@@ -565,7 +565,7 @@ def _patch_run_check(monkeypatch, result=None, explode=False):
 
 def test_the_route_requires_a_token(tmp_path, monkeypatch):
     _patch_run_check(monkeypatch)
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     # RAW client on purpose: authed() would append the token this test needs
     # to be missing.
     _, r = app.test_client.get("/update/check")

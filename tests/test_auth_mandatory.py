@@ -413,3 +413,51 @@ def test_a_valid_token_gets_through(tmp_path):
     _, r = app.test_client.get("/info", headers={
         "Authorization": f"Bearer {TOKEN}"})      # header form works too
     assert r.status == 200
+
+
+# ---- #260: a chosen token needs 16 or more characters --------------------
+
+def _boot(tmp_path, cfg, n):
+    return create_app(dict(cfg, state_path=str(tmp_path / "webterm_state.json")),
+                      name=f"webterm-floor-{n}")
+
+
+def test_a_short_chosen_token_refuses_to_start(tmp_path, monkeypatch):
+    short = "x" * 15
+    with pytest.raises(SystemExit) as exc:
+        _boot(tmp_path / "c", {"auth_token": short}, 1)
+    msg = str(exc.value)
+    assert "auth_token" in msg and "15 chars" in msg and "minimum 16" in msg
+    monkeypatch.setenv(auth.TOKEN_ENV, short)
+    with pytest.raises(SystemExit) as exc:
+        _boot(tmp_path / "e", {}, 2)
+    assert f"${auth.TOKEN_ENV}" in str(exc.value)
+    monkeypatch.delenv(auth.TOKEN_ENV)
+    side = tmp_path / "f"
+    side.mkdir()
+    (side / auth.AUTH_STATE_FILENAME).write_text(
+        json.dumps({"auth_token": short}), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        _boot(side, {}, 3)
+    assert "webterm_token.json" in str(exc.value)
+    # The other direction: exactly 16 boots, and an absent token mints one.
+    assert _boot(tmp_path / "ok", {"auth_token": "y" * 16}, 4).ctx.auth_token \
+        == "y" * 16
+    (tmp_path / "m").mkdir()
+    minted = _boot(tmp_path / "m", {}, 5)
+    assert minted.ctx.auth_token_source == "minted"
+    assert len(minted.ctx.auth_token) == 43
+
+
+def test_upgrading_says_a_short_token_refuses_to_start():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "wiki" / "Upgrading.md"
+            ).read_text(encoding="utf-8")
+    head = "## A chosen token needs 16 or more characters (#260)"
+    assert text.count(head) == 1
+    a = text.index(head)
+    section = " ".join(text[a:text.index("\n---", a)].split())
+    for phrase in ("refuses to start", "16 characters", "`--print-token`",
+                   "`$WEB_TERMINAL_TOKEN`", "`auth_token`",
+                   "`webterm_token.json`"):
+        assert phrase in section, phrase

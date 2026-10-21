@@ -4190,6 +4190,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          / "webterm_identity.json").exists())
     app.ctx.auth_token, app.ctx.auth_token_source = auth.resolve_or_mint_token(
         config, app.ctx.auth_state_path)
+    # #260: a token an operator chose gets the admin_token floor, from every
+    # source ($WEB_TERMINAL_TOKEN, config auth_token, a hand-written sidecar);
+    # a minted one (token_urlsafe(32), 43 chars) always passes. Refused before
+    # the port is bound, like a short admin_token.
+    if len(app.ctx.auth_token) < ADMIN_TOKEN_MIN_CHARS:
+        _where = {"env": f"${auth.TOKEN_ENV}",
+                  "config": "broker_config auth_token"}.get(
+                      app.ctx.auth_token_source, str(app.ctx.auth_state_path))
+        raise SystemExit(
+            f"error: the auth token from {_where} is too short "
+            f"({len(app.ctx.auth_token)} chars, minimum "
+            f"{ADMIN_TOKEN_MIN_CHARS}) -- set a longer value, or remove it "
+            "and the broker mints one ('python -m webterm.broker "
+            "--print-token' prints it)")
     # ---- admin credential class (#191) -----------------------------------
     # Config-only on purpose: no env fallback, no sidecar, no mint. The whole
     # point of the class is that this value never rides anything the page

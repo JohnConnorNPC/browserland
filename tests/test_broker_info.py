@@ -180,7 +180,7 @@ def _create_app_in_subprocess(serve_ui: bool, tmp_path) -> str:
         "from webterm.broker.app import create_app\n"
         # Explicit auth_token so the child never mints a token sidecar.
         f"create_app({{'serve_ui': {serve_ui!r}, "
-        f"'auth_token': 'subproc-token'}}, name='h')\n"
+        f"'auth_token': 'subproc-token-0123456789'}}, name='h')\n"
         "print('ui' if 'webterm.broker.ui' in sys.modules else '-',\n"
         "      'help' if 'webterm.broker.help_corpus' in sys.modules else '-')\n"
     )
@@ -206,7 +206,7 @@ def test_ui_mode_imports_ui_and_help(tmp_path):
 
 
 def test_info_requires_token_when_configured(tmp_path, monkeypatch):
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     # No / wrong token -> 401. RAW client on purpose: authed() would
     # append the very token this test needs to be missing.
     _, response = app.test_client.get("/info")
@@ -214,7 +214,7 @@ def test_info_requires_token_when_configured(tmp_path, monkeypatch):
     _, response = app.test_client.get("/info?token=nope")
     assert response.status == 401
     # Correct token (the path appendHostToken uses) -> 200 with the id.
-    _, response = authed(app).get("/info?token=sekrit")
+    _, response = authed(app).get("/info?token=sekrit-0123456789")
     assert response.status == 200
     assert response.json["broker_id"] == app.ctx.broker_id
 
@@ -222,7 +222,7 @@ def test_info_requires_token_when_configured(tmp_path, monkeypatch):
 def test_info_options_preflight_cors(tmp_path, monkeypatch):
     # Even with a token configured, the preflight is answered with ACAO:* (the
     # cross-origin add-time probe depends on it).
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     _, response = authed(app).options("/info")
     assert response.status == 204
     assert response.headers.get("Access-Control-Allow-Origin") == "*"
@@ -236,7 +236,7 @@ def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
     # admin_token has nothing to advertise and its preflight carries no trace
     # of the admin header (the absent-config invariant), so the two shapes
     # are pinned separately here. The scope header (#230) is listed on both.
-    app = _make_app(tmp_path, monkeypatch, token="sekrit",
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789",
                     admin_token="preflight-admin-token-0123")
     assert app.ctx.admin_token is not None
     _, response = authed(app).options("/info")
@@ -245,7 +245,7 @@ def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
             response.headers.get("Access-Control-Allow-Headers", "").split(",")]
     assert ADMIN_HEADER in allow
     assert SCOPE_HEADER in allow
-    plain = _make_app(tmp_path, monkeypatch, token="sekrit")
+    plain = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     assert plain.ctx.admin_token is None
     _, r2 = authed(plain).options("/info")
     assert r2.status == 204
@@ -300,7 +300,7 @@ def test_info_advertises_mcp_scopes_unconditionally(tmp_path, monkeypatch,
 def test_info_mcp_scopes_stays_behind_the_browser_token(tmp_path, monkeypatch):
     # The capability rides /info's own gate: no token, no flag. RAW client on
     # purpose (authed() would add the token).
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     _, response = app.test_client.get("/info")
     assert response.status == 401
     assert "mcp_scopes" not in response.json
@@ -322,7 +322,7 @@ def test_info_advertises_terminal_control_version_1(tmp_path, monkeypatch,
 
 def test_info_terminal_control_stays_behind_the_browser_token(tmp_path,
                                                               monkeypatch):
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    app = _make_app(tmp_path, monkeypatch, token="sekrit-0123456789")
     _, response = app.test_client.get("/info")
     assert response.status == 401
     assert "terminal_control" not in response.json
