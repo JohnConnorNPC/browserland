@@ -2804,8 +2804,10 @@ Differences from a shipped manifest, all enforced:
 - Every file must be valid UTF-8, **BOM-free**, **newline-terminated**, and
   within `ui._MAX_LINES` lines — the *same* rule set the spliced fragments obey,
   imported from `ui` rather than retyped.
-- A `.css` file may not reference an external origin: `@import` and absolute
-  `url(http…)` / `url(//…)` are rejected (`css_external_reference`). The app's
+- A `.css` file may not reference an external origin: `@import`, absolute
+  `url(http…)` / `url(//…)`, and a backslash anywhere outside a comment (a CSS
+  escape such as `@\69mport` would hide the others from the check; write the
+  character itself) are rejected (`css_external_reference`). The app's
   CSP sets only `script-src` and `frame-ancestors`, so a stylesheet would
   otherwise be a silent egress channel. **Defence in depth, not a boundary** —
   the mod's own JS can `fetch()` anything.

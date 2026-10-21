@@ -638,6 +638,14 @@ again, unless they change a dependency file too.
   The Control Panel's admin token field is now read-only; it never sent a
   typed value.
 
+- **An installed mod's stylesheet may not use a CSS escape** (#260). A
+  backslash outside a comment is refused with `css_external_reference`, at
+  install and at boot, because an escape such as `@\69mport` or
+  `url(h\74tp://…)` hid an external reference from the check. Write the
+  character itself; the file is UTF-8. A mod installed before the upgrade that
+  uses one stops loading; see
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#an-installed-stylesheet-may-not-use-a-css-escape-260).
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the

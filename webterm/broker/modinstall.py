@@ -380,13 +380,26 @@ def _reject_css_external_references(name: str, text: str) -> None:
     is enforceable, statable in a sentence, and has an obvious workaround
     (``data:`` or a relative path).
 
+    A backslash outside a comment is refused outright (#260): a CSS escape
+    (``@\\69mport``, ``url(h\\74tp://…)``) would hide every other check's
+    target, and the file is UTF-8, so the character itself can always be
+    written instead.
+
     DEFENCE IN DEPTH, NOT A BOUNDARY: the mod's own JS can ``fetch()`` anything,
     and #163 settled that ``ctx`` is not a boundary, so a determined author
-    evades this with a CSS escape (``@\\69mport``) or a runtime-built
-    stylesheet. What it buys is that the silent channel is not the ACCIDENTAL
-    one -- it preserves the "no third-party origin loads in this page" property
-    #143/#146 bought, and an author who trips it learns the rule."""
+    still evades this with a runtime-built stylesheet. The structural fix is
+    #190's enforced ``default-src``/``style-src`` (Report-Only at 1.0). What it
+    buys is that the silent channel is not the ACCIDENTAL one -- it preserves
+    the "no third-party origin loads in this page" property #143/#146 bought,
+    and an author who trips it learns the rule."""
     stripped, strings = _strip_css_comments(text)
+    found = stripped.find("\\")
+    if found >= 0:
+        raise ValidationError(
+            "css_external_reference",
+            f"{name}: {stripped[found:found + 64]} is a CSS escape, which could "
+            f"hide an external reference from this check (write the character "
+            f"itself -- the file is UTF-8)")
     if _CSS_IMPORT_RE.search(stripped):
         raise ValidationError("css_external_reference",
                               f"{name}: @import may not be used")

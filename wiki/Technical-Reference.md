@@ -1787,8 +1787,9 @@ un-prefixed namespace is reserved for shipped mods). `manifest.scripts` is a
 required non-empty list of `.js` names; `entry` and every other unknown key are
 **rejected**, not ignored. Files are text only (`.js`/`.css`/`.md`), UTF-8,
 BOM-free, newline-terminated, ≤ `ui._MAX_LINES` lines; a `.css` may not use
-`@import`, contain `http://` or `https://` anywhere outside a comment, or start
-a `url()` argument or string with `//`. A manifest `permissions` list (from
+`@import`, contain `http://` or `https://` anywhere outside a comment, contain
+a backslash (a CSS escape) outside a comment, or start a `url()` argument or
+string with `//`. A manifest `permissions` list (from
 `clipboard`, `egress`, `file`, `remote-admin`, `session`, #193) must declare
 what the source uses. Caps: 32 mods, 32 files/mod,
 256 KiB/file, 512 KiB/mod. Returns

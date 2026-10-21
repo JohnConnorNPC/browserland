@@ -313,6 +313,13 @@ def test_installed_css_may_not_reference_an_external_origin():
         # on the next line is never seen. The browser reads it as a string.
         '.a::before { content: "/*"; }\n'
         ".b { background: url(https://evil.example/p.png); }\n",
+        # #260: a CSS escape hid each of the above from the check, so a
+        # backslash outside a comment is refused -- even an innocent one (the
+        # rule is the backslash, not a decode).
+        '@\\69mport url(x.css);\n',
+        'a{background:url(h\\74tp://evil.example/x.png)}\n',
+        'a{background:url("\\/\\/evil.example/x.png")}\n',
+        '.a::before { content: "\\2014"; }\n',
     ]
     for css in refused:
         with pytest.raises(modinstall.ValidationError) as exc:
@@ -326,11 +333,63 @@ def test_installed_css_may_not_reference_an_external_origin():
         ".a { background: url(data:image/gif;base64,R0lGOD); }\n",
         "/* @import url(https://evil.example/x.css); */\n.a { color: red; }\n",
         ".a { color: red; }\n",
+        # #260: a backslash inside a comment, and the character itself.
+        '/* a \\ b */\n.a { color: red; }\n',
+        '.a::before { content: "—"; }\n',
     ]
     for css in allowed:
         modinstall.validate_package(
             manifest(styles=["x-notes.css"]),
             {"x-notes.js": "//\n", "x-notes.css": css})
+
+
+def test_scan_skips_and_logs_an_escaped_stylesheet(tmp_path, caplog):
+    # #260: an installed mod whose stylesheet uses an escape stops loading at
+    # boot, and the log line says which mod and why; a backslash inside a
+    # comment does not.
+    plant_raw(tmp_path / "mods", "x-esc",
+              {"id": "x-esc", "scripts": ["a.js"], "styles": ["a.css"]},
+              {"a.js": b"//\n", "a.css": b"@\\69mport url(x.css);\n"})
+    plant_raw(tmp_path / "mods", "x-ok",
+              {"id": "x-ok", "scripts": ["a.js"], "styles": ["a.css"]},
+              {"a.js": b"//\n", "a.css": b"/* \\ */\n.a { color: red; }\n"})
+    with caplog.at_level("WARNING"):
+        index = modinstall.scan(tmp_path / "mods")
+    assert index["skipped"] == {"x-esc": "css_external_reference"}
+    assert "x-ok" in index["mods"]
+    hits = [r for r in caplog.records if r.levelname == "WARNING"
+            and "mods_dir: skipping 'x-esc' -- css_external_reference"
+            in r.getMessage()]
+    assert len(hits) == 1
+    assert not any("x-ok" in r.getMessage() for r in caplog.records)
+
+
+def _wiki_flat(name):
+    return " ".join((Path(__file__).resolve().parents[1] / "wiki" / name)
+                    .read_text(encoding="utf-8").split())
+
+
+def test_upgrading_says_an_escaped_stylesheet_stops_loading():
+    text = (Path(__file__).resolve().parents[1] / "wiki" / "Upgrading.md"
+            ).read_text(encoding="utf-8")
+    head = "## An installed stylesheet may not use a CSS escape (#260)"
+    assert text.count(head) == 1
+    a = text.index(head)
+    section = " ".join(text[a:text.index("\n---", a)].split())
+    for phrase in ("may not contain a backslash outside a comment",
+                   "are not exempt", "stops loading", "mods_dir: skipping",
+                   "css_external_reference",
+                   "`GET /mods/installed` lists the mod under `skipped`",
+                   "Replace each escape with the character itself"):
+        assert phrase in section, phrase
+
+
+def test_the_docs_say_installed_css_may_not_use_an_escape():
+    assert ("contain a backslash (a CSS escape) outside a comment"
+            in _wiki_flat("Technical-Reference.md"))
+    wam = _wiki_flat("Writing-a-Mod.md")
+    assert "a backslash anywhere outside a comment" in wam
+    assert "write the character itself" in wam
 
 
 def test_css_validation_is_linear_on_hostile_input():
@@ -1612,6 +1671,9 @@ def test_installed_detail_is_the_operator_view(tmp_path, monkeypatch):
     _, ins = authed(app).post("/mods/install", json=payload())
     plant_raw(tmp_path / "mods", "x-broken",
               {"id": "x-broken", "scripts": ["a.js"]}, {"a.js": b"no newline"})
+    plant_raw(tmp_path / "mods", "x-esc",
+              {"id": "x-esc", "scripts": ["a.js"], "styles": ["a.css"]},
+              {"a.js": b"//\n", "a.css": b"@\\69mport url(x.css);\n"})
     authed(app).post("/mods/rescan", json={})
     _, r = authed(app).get("/mods/installed")
     assert r.status == 200
@@ -1625,7 +1687,8 @@ def test_installed_detail_is_the_operator_view(tmp_path, monkeypatch):
     assert all(len(f["sha256"]) == 64 and f["bytes"] > 0 for f in row["files"])
     assert row["total_bytes"] == sum(f["bytes"] for f in row["files"])
     # A mod that silently vanishes is worse than one that says why.
-    assert r.json["skipped"] == {"x-broken": "bad_encoding"}
+    assert r.json["skipped"] == {"x-broken": "bad_encoding",
+                                 "x-esc": "css_external_reference"}
     assert r.json["limits"]["max_lines"] == ui._MAX_LINES
     assert r.json["limits"]["max_mods"] == modinstall.MAX_MODS
 

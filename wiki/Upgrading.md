@@ -199,6 +199,30 @@ the refusal names the file, the line and the permission it needs. See
 
 ---
 
+## An installed stylesheet may not use a CSS escape (#260)
+
+**What changed.** A `.css` file in an installed mod may not contain a
+backslash outside a comment: a CSS escape such as `@\69mport` or
+`url(h\74tp://…)` hid an external reference from the install check. Install
+refuses such a package with 400 `css_external_reference`, and the boot scan
+applies the same rule. Unlike the #193 permissions check, mods installed before
+the upgrade are not exempt: one that uses an escape stops loading at the next
+boot, and its row is gone from the Mods pane.
+
+**Who is affected.** Only a broker with an installed mod (an `x-` id) whose
+stylesheet uses a backslash outside a comment, for example
+`content: "\2014"`. Shipped mods are not affected.
+
+**How to see it.** The broker logs `mods_dir: skipping '<id>' --
+css_external_reference: …` at start, naming the file, and
+`GET /mods/installed` lists the mod under `skipped` with that code.
+
+**What to do.** Replace each escape with the character itself (the file is
+UTF-8), or with a relative path or `data:` URI where it spelled a URL, and
+install the fixed package again. See [[Writing a Mod|Writing-a-Mod]].
+
+---
+
 ## The Agent docs button is gone (#177)
 
 **What changed.** The Agent-docs mod, the 📋 button on every terminal's title
