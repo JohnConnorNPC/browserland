@@ -3601,3 +3601,63 @@ def test_a_bad_nested_peer_is_refused_naming_the_hub(peers, needle):
         _hub_json(peers)
     assert "--hosts[0] ('hub')" in str(ei.value)
     assert needle in str(ei.value)
+
+
+@pytest.mark.parametrize("hub_first", [True, False])
+def test_a_peer_name_another_entry_uses_is_refused_as_a_collision(hub_first):
+    """`hub.b` from the hub's peers and an explicit entry named `hub.b` are
+    refused with both named, whichever comes first in the array."""
+    from webterm.mcptool import __main__ as m
+    hub = {"name": "hub", "url": "http://hub:4445", "token": "hub-t",
+           "peers": {"b": {"token": "b-t"}}}
+    other = {"name": "hub.b", "url": "http://elsewhere:4445", "token": "o-t"}
+    entries = [hub, other] if hub_first else [other, hub]
+    with pytest.raises(ValueError) as ei:
+        m._parse_hosts(json.dumps(entries))
+    msg = str(ei.value)
+    explicit_at = 1 if hub_first else 0
+    assert msg.startswith(f"--hosts[{explicit_at}] name 'hub.b' collides "
+                          "with peer 'b' of host 'hub'"), msg
+
+
+@pytest.mark.parametrize("peer_field", ["token", "admin_token"])
+@pytest.mark.parametrize("hub_field", ["token", "admin_token"])
+def test_a_peer_credential_equal_to_the_hubs_is_refused(peer_field,
+                                                         hub_field):
+    """All four pairings: a peer's token or admin_token equal to the hub
+    entry's token or admin_token. The message names both fields, never the
+    value."""
+    secret = "shared-secret-value"
+    hub = {"token": "hub-t", "admin_token": "hub-adm"}
+    hub[hub_field] = secret
+    peer = {"token": "b-t"}
+    peer[peer_field] = secret
+    with pytest.raises(ValueError) as ei:
+        _hub_json({"b": peer}, token=hub["token"],
+                  admin_token=hub["admin_token"])
+    msg = str(ei.value)
+    assert (f"peer 'b' '{peer_field}' equals the hub entry's '{hub_field}'"
+            in msg), msg
+    assert "hub_credential_refused" in msg and secret not in msg
+
+
+@pytest.mark.parametrize("url", ["http://hub:4445/peer/b",
+                                 "http://hub:4445/peer/b/"])
+def test_peers_on_an_entry_behind_a_hub_are_refused(url):
+    with pytest.raises(ValueError) as ei:
+        _hub_json({"c": {"token": "c-t"}}, url=url)
+    assert "already behind a hub's /peer/ prefix" in str(ei.value)
+
+
+def test_a_nested_peer_and_an_explicit_entry_may_share_a_url():
+    """Two entries for one peer (say, two scopes) stay legal: only the NAME
+    must be unique."""
+    from webterm.mcptool import __main__ as m
+    hosts = m._parse_hosts(json.dumps([
+        {"name": "hub", "url": "http://hub:4445", "token": "hub-t",
+         "peers": {"b": {"token": "b-t"}}},
+        {"name": "b-scoped", "url": "http://hub:4445/peer/b", "token": "b-t",
+         "scope": "s1"}]))
+    assert [(h[0], h[1]) for h in hosts] == [
+        ("hub", "http://hub:4445"), ("hub.b", "http://hub:4445/peer/b"),
+        ("b-scoped", "http://hub:4445/peer/b")]

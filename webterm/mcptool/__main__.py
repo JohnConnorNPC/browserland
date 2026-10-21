@@ -127,7 +127,9 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     with that peer's own token. Its scope is its own, else the process-wide
     ``scope`` -- never the hub entry's -- and its admin_token is its own
     only; its fields are checked as an entry's are, and any other key is
-    refused. ``discover_peers`` is True on an entry that carries ``"peers"``
+    refused. So is a ``<hub>.<id>`` that another entry is named, a peer
+    token or admin_token equal to the hub entry's token or admin_token, and
+    ``"peers"`` on an entry already behind ``/peer/<id>``. ``discover_peers`` is True on an entry that carries ``"peers"``
     (``{}`` included), so the server asks that hub which peers it relays.
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
@@ -148,6 +150,12 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
             '{"name","url","token"} objects')
     hosts = []
     seen = set()
+    # #261: every explicit name, so a peer's `<hub>.<id>` is refused as a
+    # collision whichever of the two comes first in the array.
+    explicit = {}
+    for i, item in enumerate(data):
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            explicit.setdefault(item["name"], i)
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             raise ValueError(f"--hosts[{i}] is not a JSON object")
@@ -165,7 +173,15 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
         expanded = [(name, url, token, host_scope or scope, admin or None,
                      peer_origin or None, "peers" in item)]
         if "peers" in item:
-            expanded += _peer_hosts(where, name, url, item["peers"], scope)
+            expanded += _peer_hosts(where, name, url, item["peers"], scope,
+                                    (("token", token), ("admin_token", admin)))
+            for host in expanded[1:]:
+                if host[0] in explicit:
+                    raise ValueError(
+                        f"--hosts[{explicit[host[0]]}] name {host[0]!r} "
+                        f"collides with peer {host[0][len(name) + 1:]!r} of "
+                        f"host {name!r} (--hosts[{i}]): rename that entry, or "
+                        "drop it or the peer")
         for host in expanded:
             if host[0] in seen:
                 raise ValueError(
@@ -200,15 +216,25 @@ def _host_options(where: str, item: dict) -> tuple:
 
 
 def _peer_hosts(where: str, name: str, url: str, peers,
-                scope: Optional[str]) -> list:
+                scope: Optional[str], hub_credentials) -> list:
     """#261: a hub entry's ``"peers"`` as host descriptors, in config order:
     ``<name>.<id>`` at ``<url>/peer/<id>`` with the peer's own token. The
     peer's scope falls back to the process-wide ``scope``, never to the hub
-    entry's; its admin_token never falls back."""
+    entry's; its admin_token never falls back. A peer token or admin_token
+    equal to one of ``hub_credentials`` (the hub entry's ``(field, value)``
+    pairs) is refused: the hub answers 403 hub_credential_refused to it
+    anyway, so it would only spend a dial. So is ``"peers"`` on an entry that
+    is already behind a hub's ``/peer/<id>``: the hub relays one hop only."""
     if not isinstance(peers, dict):
         raise ValueError(f"{where} 'peers' must be an object of "
                          "{id: {token, peer_origin, scope, admin_token}}")
     base = url.rstrip("/")
+    parts = base.rsplit("/", 2)
+    if len(parts) == 3 and parts[1] == "peer" and PEER_ID_RE.fullmatch(
+            parts[2]):
+        raise ValueError(f"{where} is already behind a hub's /peer/ prefix, "
+                         "so it cannot carry 'peers' (the hub relays one hop "
+                         "only: peer_hop_refused)")
     out = []
     for pid, entry in peers.items():
         if PEER_ID_RE.fullmatch(pid) is None:
@@ -226,6 +252,14 @@ def _peer_hosts(where: str, name: str, url: str, peers,
         if not isinstance(token, str) or not token:
             raise ValueError(f"{pwhere} 'token' must be a non-empty string")
         p_scope, p_admin, p_origin = _host_options(pwhere, entry)
+        for field, value in (("token", token), ("admin_token", p_admin)):
+            for hub_field, hub_value in hub_credentials:
+                if value and value == hub_value:
+                    raise ValueError(
+                        f"{pwhere} '{field}' equals the hub entry's "
+                        f"'{hub_field}': the hub never hands its own "
+                        "credentials to a peer (hub_credential_refused); "
+                        "give the peer its own MCP token")
         out.append((f"{name}.{pid}", f"{base}/peer/{pid}", token,
                     p_scope or scope, p_admin or None, p_origin or None,
                     False))
