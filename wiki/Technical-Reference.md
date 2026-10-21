@@ -225,7 +225,10 @@ no loopback exemption, no opt-out. Resolution (never returns nothing):
 beside the state store → **mint** `secrets.token_urlsafe(32)` into it. Compared
 with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
 without minting or starting a server. A resolved token shorter than 16
-characters refuses to start (#260).
+characters refuses to start (#260). A wrong token's 401 is answered after one
+second while fewer than 32 are waiting, and at once beyond that; a correct token
+is never delayed, and a missing one is a plain 401. A browser still holding a
+rotated token waits a second on each poll until you log in again (#260).
 
 A terminal's shell inherits the broker's environment without
 `WEB_TERMINAL_TOKEN`, the MCP tokens (`WEB_TERMINAL_MCP_TOKEN`,

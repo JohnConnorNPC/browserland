@@ -55,12 +55,17 @@ query string.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
 import os
 import secrets
+import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+LOGGER = logging.getLogger(__name__)
 
 TOKEN_ENV = "WEB_TERMINAL_TOKEN"
 MCP_TOKEN_ENV = "WEB_TERMINAL_MCP_TOKEN"
@@ -239,3 +244,61 @@ def request_token_ok(request, expected: Optional[str]) -> bool:
 # request proxied by `tailscale serve` (the topology wiki/Setup-and-Onboarding.md recommends)
 # arrives from loopback no matter which machine sent it, and any web page the
 # user opens can reach loopback as well. Every gate now takes the token.
+
+
+# ---- the wrong-token delay (#260) -------------------------------------------
+# A present-and-wrong token is answered AUTH_FAIL_DELAY_S late, so guessing a
+# token one request after another costs a second a guess. No lockout and no
+# per-address state: behind `tailscale serve` every client shares one address,
+# and shutting that address out would let anyone who can reach the broker lock
+# the owner out. At most AUTH_FAIL_CONCURRENT delays are in flight; past that a
+# wrong token is answered at once, so the delay can never park an unbounded
+# number of requests (a memory/fd lever). A correct token never waits, and a
+# missing one is a plain 401: only a guess pays.
+
+#: Seconds a wrong token's 401 waits.
+AUTH_FAIL_DELAY_S = 1.0
+#: The most wrong-token answers delayed at once; beyond it, no delay.
+AUTH_FAIL_CONCURRENT = 32
+#: Seconds between two "wrong token" log lines for one label.
+AUTH_FAIL_LOG_EVERY_S = 1.0
+
+
+class FailDelay:
+    """The broker's one wrong-token delay. ``sleep`` and ``clock`` are
+    injected by tests, so no test sleeps for real."""
+
+    def __init__(self, delay_s: float, concurrent: int, sleep=None,
+                 clock=None) -> None:
+        self.delay_s = delay_s
+        self.concurrent = concurrent
+        self.inflight = 0
+        self._sleep = sleep or asyncio.sleep
+        self._clock = clock or time.monotonic
+        self._logged: Dict[str, Tuple[float, int]] = {}
+
+    async def wait(self) -> None:
+        """Wait ``delay_s``, unless ``concurrent`` waits are already in
+        flight: then return at once. Never queues."""
+        if self.inflight >= self.concurrent:
+            return
+        self.inflight += 1
+        try:
+            await self._sleep(self.delay_s)
+        finally:
+            self.inflight -= 1
+
+    def note(self, label: str, ip: Any) -> None:
+        """Log one WARNING per ``label`` per AUTH_FAIL_LOG_EVERY_S; the next
+        line says how many were folded into it. Never logs the token."""
+        now = self._clock()
+        last, folded = self._logged.get(label, (None, 0))
+        if last is not None and now - last < AUTH_FAIL_LOG_EVERY_S:
+            self._logged[label] = (last, folded + 1)
+            return
+        self._logged[label] = (now, 0)
+        if folded:
+            LOGGER.warning("wrong token on %s from %s (+%d more)", label, ip,
+                           folded)
+        else:
+            LOGGER.warning("wrong token on %s from %s", label, ip)

@@ -4204,6 +4204,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             f"{ADMIN_TOKEN_MIN_CHARS}) -- set a longer value, or remove it "
             "and the broker mints one ('python -m webterm.broker "
             "--print-token' prints it)")
+    # #260: the wrong-token delay (auth.FailDelay). The constants are read
+    # here, at call time, so the suite's conftest can zero the delay.
+    app.ctx.auth_fail_delay = auth.FailDelay(auth.AUTH_FAIL_DELAY_S,
+                                             auth.AUTH_FAIL_CONCURRENT)
     # ---- admin credential class (#191) -----------------------------------
     # Config-only on purpose: no env fallback, no sidecar, no mint. The whole
     # point of the class is that this value never rides anything the page
@@ -4751,6 +4755,35 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 _mc["default_mode"], _mc["allow_launch"])
     _log_auth_banner(app, port, config, minted_into_used_dir=_dir_was_used)
 
+    _UNREAD = object()
+
+    def _token_ok(request: Request, expected, label: str,
+                  provided=_UNREAD) -> bool:
+        """#260: the token compare every 401 gate runs through. A present
+        but wrong token marks the request (``request.ctx.auth_failed``) so
+        its 401 is answered late (_auth_fail_delay below, or the socket
+        handler), and is logged without its value. A correct token and a
+        missing one are never marked. Excluded on purpose: the producer
+        /browserland dial (its own reject counter), the help corpus (a 200
+        either way), the admin gates (403/400, not 401), _mcp_is_admin (a
+        predicate), the window-owner compare and _is_hub_credential (not
+        credential gates)."""
+        if provided is _UNREAD:
+            provided = auth.provided_token(request)
+        if auth.token_matches(provided, expected):
+            return True
+        if provided:
+            request.ctx.auth_failed = label
+            app.ctx.auth_fail_delay.note(label, request.ip)
+        return False
+
+    async def _auth_fail_delay(request: Request, response):
+        # #260: a wrong token's 401 waits here, in one place, so the gates
+        # stay sync. Only the token-mismatch 401: never a 200, 400 or 403.
+        if (getattr(request.ctx, "auth_failed", None)
+                and response is not None and response.status == 401):
+            await app.ctx.auth_fail_delay.wait()
+
     async def _cors_headers(request: Request, response):
         # Unconditional ACAO:* (see module docstring) — token-gating it left a
         # tokenless network-reachable broker unable to answer the UI's
@@ -4869,6 +4902,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 response.headers["Access-Control-Allow-Private-Network"] = \
                     "true"
 
+    # Registered BEFORE _cors_headers: Sanic runs response middleware in
+    # reverse registration order, so CORS headers are set first and the
+    # delayed 401 still carries them (the login overlay reads it).
+    app.register_middleware(_auth_fail_delay, "response")
     app.register_middleware(_cors_headers, "response")
 
     async def _preflight(request: Request, **_params):
@@ -4879,8 +4916,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _browser_ws(request: Request, ws: Websocket):
         # In-handler post-upgrade auth: see module docstring (4401 vs 1006).
-        if not auth.request_token_ok(request, app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, "/ws"):
             LOGGER.warning("rejected unauthenticated /ws from %s", request.ip)
+            if getattr(request.ctx, "auth_failed", None):
+                await app.ctx.auth_fail_delay.wait()      # #260
             await ws.close(code=4401, reason="auth required")
             return
         await relay.handle_browser_ws(request, ws, app.ctx.registry, app.ctx)
@@ -4973,9 +5012,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # Same post-upgrade auth gate as /ws (4401, never a 1006-opaque upgrade
         # refusal). An unauthenticated /control could otherwise steal the
         # single-active-browser lease out from under the real client.
-        if not auth.request_token_ok(request, app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, "/control"):
             LOGGER.warning("rejected unauthenticated /control from %s",
                            request.ip)
+            if getattr(request.ctx, "auth_failed", None):
+                await app.ctx.auth_fail_delay.wait()      # #260
             await ws.close(code=4401, reason="auth required")
             return
         client_id = (request.args.get("clientId") or "").strip()
@@ -5194,7 +5235,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _sessions(request: Request):
         # 401 (never 403): the login overlay and the taskbar host chips pop on
         # 401 only, and /sessions is the probe both of them use.
-        if not auth.request_token_ok(request, app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, "/sessions"):
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
         # Stamp each summary's effective MCP mode so the UI's window menu can
@@ -5205,7 +5246,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _profiles(request: Request):
         # Same gate as /sessions. Names only — command/cwd never leave the
         # broker.
-        if not auth.request_token_ok(request, app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, "/profiles"):
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
         profs = app.ctx.launcher.profiles
@@ -5354,7 +5395,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # response via _cors_headers, including this one, or a cross-origin login
     # probe surfaces as a fetch TypeError instead of "wrong password".
     def _gated_auth_error(request: Request, label: str):
-        if not auth.request_token_ok(request, app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, label):
             LOGGER.warning("rejected unauthenticated %s from %s",
                            label, request.ip)
             return sanic_json({"ok": False, "error": "auth_required"},
@@ -7053,7 +7094,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         cfg = app.ctx.mcp_cfg
         if not cfg.get("enabled") or not cfg.get("token"):
             return sanic_json({"error": "mcp_disabled"}, status=403)
-        if not auth.request_token_ok(request, cfg["token"]):
+        if not _token_ok(request, cfg["token"], "/mcp"):
             LOGGER.warning("rejected unauthenticated /mcp from %s", request.ip)
             return sanic_json({"error": "auth_required"}, status=401)
         try:
@@ -8991,7 +9032,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         ticket mint. Order: 401, then 503, then 404 -- a caller without this
         broker's token learns nothing, not even whether the proxy extra is
         installed. None when all three pass."""
-        if not auth.token_matches(_peer_bearer(request), app.ctx.auth_token):
+        if not _token_ok(request, app.ctx.auth_token, "/peer",
+                         provided=_peer_bearer(request)):
             LOGGER.warning("rejected unauthenticated /peer from %s",
                            request.ip)
             return _peer_refusal(False, 401, "auth_required")

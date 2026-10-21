@@ -71,6 +71,8 @@ place a token can be set: `$WEB_TERMINAL_TOKEN`, `auth_token` in
 store. A token the broker mints itself is always long enough.
 
 **Who is affected.** Only an operator who set a short token themselves.
+Separately, a wrong token's 401 now arrives a second late, so a browser still
+holding a rotated token waits a second on each poll until you log in again.
 
 **What to do.** Set a longer value everywhere it is used (each browser's login,
 each host entry, `BROWSERLAND_MCP_HOSTS` peers), or remove it and let the broker

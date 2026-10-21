@@ -461,3 +461,209 @@ def test_upgrading_says_a_short_token_refuses_to_start():
                    "`$WEB_TERMINAL_TOKEN`", "`auth_token`",
                    "`webterm_token.json`"):
         assert phrase in section, phrase
+
+
+# ---- #260: a wrong token's 401 is answered late --------------------------
+# Every test here sets the real constants back BEFORE create_app (the
+# conftest zeroes the delay for the rest of the suite) and injects a
+# recorder for the sleep, so nothing sleeps for real. Every await that could
+# hang under a mutation is bounded by asyncio.wait_for.
+
+WRONG = "wrong-token-0123456789"
+MCP_TOK = "mcp-token-0123456789"
+
+
+class _Rec:
+    def __init__(self, block=None):
+        self.calls = []
+        self.block = block
+
+    async def __call__(self, seconds):
+        self.calls.append(seconds)
+        if self.block is not None:
+            await self.block.wait()
+
+
+def _delay_app(tmp_path, monkeypatch, n):
+    # The source's own values, not literals: the tests assert 1.0 and 32
+    # below, so a changed default reds them.
+    from tests.conftest import REAL_AUTH_FAIL_DELAY_S
+    monkeypatch.setattr(auth, "AUTH_FAIL_DELAY_S", REAL_AUTH_FAIL_DELAY_S)
+    app = create_app(
+        {"auth_token": TOKEN, "mcp_enabled": True, "mcp_token": MCP_TOK,
+         "state_path": str(tmp_path / "webterm_state.json")},
+        name=f"webterm-delay-{n}")
+    rec = _Rec()
+    app.ctx.auth_fail_delay._sleep = rec
+    # A clock that steps past the log's 1 s window on every read, so each
+    # wrong token here logs its own line (the folding is pinned below).
+    tick = iter(range(0, 10 ** 6, 10))
+    app.ctx.auth_fail_delay._clock = lambda: next(tick)
+    return app, rec
+
+
+def _bearer(tok):
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def test_a_wrong_token_is_answered_late(tmp_path, monkeypatch, caplog):
+    app, rec = _delay_app(tmp_path, monkeypatch, 1)
+    d = app.ctx.auth_fail_delay
+    assert (d.delay_s, d.concurrent) == (1.0, 32)
+    with caplog.at_level("WARNING", logger="webterm.broker.auth"):
+        _, r = app.test_client.get("/sessions", headers=_bearer(WRONG))
+    assert r.status == 401 and rec.calls == [1.0]
+    hits = [x.getMessage() for x in caplog.records
+            if x.name == "webterm.broker.auth"]
+    assert hits == [f"wrong token on /sessions from {hits[0].split()[-1]}"]
+    assert not any(WRONG in x.getMessage() for x in caplog.records)
+    caplog.clear()
+    _, r = app.test_client.get("/sessions", headers=_bearer(TOKEN))
+    assert r.status == 200 and rec.calls == [1.0]
+    _, r = app.test_client.get("/sessions")
+    assert r.status == 401 and rec.calls == [1.0]
+    assert not [x for x in caplog.records if x.name == "webterm.broker.auth"]
+    # The same on /mcp (its own token), a _gated_auth_error route, and the
+    # peer gate (the peer WS routes refuse through it before the upgrade).
+    for method, path, tok in (("get", "/mcp/terminals", WRONG),
+                              ("post", "/launch", WRONG),
+                              ("get", "/peer/probe/x", WRONG)):
+        before = len(rec.calls)
+        _, r = getattr(app.test_client, method)(path, headers=_bearer(tok))
+        assert r.status == 401, (path, r.status)
+        assert rec.calls[before:] == [1.0], path
+    before = len(rec.calls)
+    _, r = app.test_client.get("/mcp/terminals", headers=_bearer(MCP_TOK))
+    assert r.status == 200 and len(rec.calls) == before
+    # The late 401 keeps its CORS header (the login overlay reads it).
+    _, r = app.test_client.get("/sessions", headers=_bearer(WRONG))
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    # Never on a 200: the help corpus answers a wrong token with the public
+    # corpus, undelayed.
+    before = len(rec.calls)
+    _, r = app.test_client.get("/help-corpus.json", headers=_bearer(WRONG))
+    assert r.status == 200 and len(rec.calls) == before
+
+
+def test_the_delay_middleware_waits_on_a_marked_401_only(tmp_path,
+                                                          monkeypatch):
+    # Sanic keeps response middleware in run order: CORS first, then the
+    # delay, so a late 401 has its headers already. The delay waits for a
+    # marked 401 and for nothing else (a marked 200 or 403 is never late).
+    import asyncio
+    import types
+    app, rec = _delay_app(tmp_path, monkeypatch, 4)
+    names = [m.func.__name__ for m in app.response_middleware]
+    assert names.index("_cors_headers") < names.index("_auth_fail_delay")
+    mw = [m.func for m in app.response_middleware
+          if m.func.__name__ == "_auth_fail_delay"][0]
+
+    def run(status, marked):
+        req = types.SimpleNamespace(ctx=types.SimpleNamespace())
+        if marked:
+            req.ctx.auth_failed = "/x"
+        before = len(rec.calls)
+        asyncio.run(asyncio.wait_for(
+            mw(req, types.SimpleNamespace(status=status)), 2))
+        return len(rec.calls) - before
+    assert run(401, True) == 1
+    assert (run(401, False), run(200, True), run(403, True)) == (0, 0, 0)
+
+
+def test_a_wrong_token_on_the_socket_is_closed_late(tmp_path, monkeypatch):
+    import asyncio
+    import types
+    app, rec = _delay_app(tmp_path, monkeypatch, 2)
+    handlers = {r.path: r.handler.args[0] for r in app.router.routes
+                if r.path in ("ws", "control")}
+
+    class _Req:
+        def __init__(self, tok):
+            self.args = {"token": tok, "session": "1"}
+            self.headers = {}
+            self.ctx = types.SimpleNamespace()
+            self.ip = "127.0.0.1"
+
+    class _WS:
+        def __init__(self):
+            self.closed = []
+
+        async def close(self, code=None, reason=""):
+            self.closed.append(code)
+
+    async def go(path, tok):
+        ws = _WS()
+        await asyncio.wait_for(handlers[path](_Req(tok), ws), 2)
+        return ws.closed
+    for path in ("ws", "control"):
+        before = len(rec.calls)
+        assert asyncio.run(go(path, WRONG)) == [4401]
+        assert rec.calls[before:] == [1.0], path
+        assert asyncio.run(go(path, "")) == [4401]
+        assert len(rec.calls) == before + 1, path
+
+
+def test_fail_delay_never_queues():
+    import asyncio
+
+    async def go(concurrent):
+        gate = asyncio.Event()
+        rec = _Rec(block=gate)
+        d = auth.FailDelay(1.0, concurrent, sleep=rec)
+        held = [asyncio.ensure_future(d.wait()) for _ in range(32)]
+        await asyncio.sleep(0)
+        assert d.inflight == 32 and len(rec.calls) == 32
+        extra = asyncio.ensure_future(d.wait())
+        await asyncio.sleep(0)
+        out = (extra.done(), len(rec.calls))
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(extra, *held), 2)
+        assert d.inflight == 0
+        return out
+    assert asyncio.run(go(32)) == (True, 32)      # past the cap: at once
+    assert asyncio.run(go(33)) == (False, 33)     # under it: delayed
+
+
+def test_a_correct_token_is_not_delayed_under_a_full_cap(tmp_path,
+                                                         monkeypatch):
+    # The cap filled by 32 REAL wrong-token requests on the app's own loop
+    # (asgi_client), each blocked in the injected sleeper on an Event.
+    import asyncio
+    app, rec = _delay_app(tmp_path, monkeypatch, 3)
+    d = app.ctx.auth_fail_delay
+
+    async def go():
+        gate = asyncio.Event()
+        rec.block = gate
+        held = [asyncio.ensure_future(app.asgi_client.get(
+            "/sessions", headers=_bearer(WRONG))) for _ in range(32)]
+        for _ in range(200):
+            if d.inflight == 32:
+                break
+            await asyncio.sleep(0.01)
+        assert d.inflight == 32
+        _, ok = await asyncio.wait_for(app.asgi_client.get(
+            "/sessions", headers=_bearer(TOKEN)), 2)
+        _, late = await asyncio.wait_for(app.asgi_client.get(
+            "/sessions", headers=_bearer(WRONG)), 2)
+        calls = len(rec.calls)
+        gate.set()
+        done = await asyncio.wait_for(asyncio.gather(*held), 2)
+        return ok.status, late.status, calls, [r.status for _, r in done]
+    ok, late, calls, held = asyncio.run(go())
+    assert (ok, late, calls) == (200, 401, 32)
+    assert held == [401] * 32
+
+
+def test_the_wrong_token_log_is_rate_limited(caplog):
+    now = [100.0]
+    d = auth.FailDelay(1.0, 32, clock=lambda: now[0])
+    with caplog.at_level("WARNING", logger="webterm.broker.auth"):
+        d.note("/sessions", "10.0.0.1")
+        d.note("/sessions", "10.0.0.1")       # within 1 s: folded
+        now[0] += 1.0
+        d.note("/sessions", "10.0.0.1")
+    msgs = [r.getMessage() for r in caplog.records
+            if r.name == "webterm.broker.auth"]
+    assert msgs == ["wrong token on /sessions from 10.0.0.1",
+                    "wrong token on /sessions from 10.0.0.1 (+1 more)"]
