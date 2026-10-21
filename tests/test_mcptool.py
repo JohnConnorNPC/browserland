@@ -4156,3 +4156,18 @@ def test_a_hub_listing_too_many_peers_yields_a_bounded_answer():
         f"Hub 'hub' lists {MAX_MCP_PEERS + 6} peers it relays MCP to; only "
         f"the first {MAX_MCP_PEERS} were checked against this config.")
     assert f"hub.{last}" not in rows
+
+
+@pytest.mark.parametrize("raw", [
+    '[{"name": "hub", "url": "http://hub:4445", "token": "hub-t", '
+    '"peers": {"b": {"token": "first"}, "b": {"token": "second"}}}]',
+    '[{"name": "a", "url": "http://a:4445", "token": "t1", "token": "t2"}]'],
+    ids=["peer-id", "entry-key"])
+def test_a_key_repeated_in_one_object_is_refused(raw):
+    """adv N3: JSON keeps the last of two equal keys; the hosts parser
+    refuses instead, naming the key."""
+    from webterm.mcptool import __main__ as m
+    with pytest.raises(ValueError) as ei:
+        m._parse_hosts(raw)
+    assert "repeats the key" in str(ei.value)
+    assert ("'b'" if "peers" in raw else "'token'") in str(ei.value)

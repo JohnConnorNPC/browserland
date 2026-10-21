@@ -133,14 +133,14 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     (``{}`` included), so the server asks that hub which peers it relays.
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
-    a JSON array, an empty array, a non-object entry, a missing/empty field, a
+    a JSON array, a key repeated in one object, an empty array, a non-object entry, a missing/empty field, a
     name containing ``':'`` (the namespaced-id separator), a duplicate name, a
     ``"scope"`` that is not a string or not a valid scope name, or an
     ``"admin_token"`` that is not a string, a ``"peer_origin"`` that is
     not a string or not an origin, or a ``"peers"`` that breaks the rules
     above (the message names the host, and the peer)."""
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_no_repeated_keys)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"--hosts/${HOSTS_ENV} is not valid JSON: {exc}") from exc
@@ -189,6 +189,21 @@ def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
             seen.add(host[0])
         hosts.extend(expanded)
     return hosts
+
+
+def _no_repeated_keys(pairs: list) -> dict:
+    """``json.loads`` hook (#261 round 1): a key repeated in one object --
+    a peer id given twice, two ``"token"`` keys -- is refused, where JSON
+    would silently keep the last one."""
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(
+                f"--hosts/${HOSTS_ENV} repeats the key {key!r} in one "
+                "object (JSON would keep only the last one): remove the "
+                "extra one")
+        out[key] = value
+    return out
 
 
 def _host_options(where: str, item: dict) -> tuple:
