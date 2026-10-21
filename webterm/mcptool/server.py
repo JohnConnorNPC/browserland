@@ -27,7 +27,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
-from ..protocol import ORIGIN_DEFAULT_PORTS, PEER_ID_RE
+from ..protocol import MAX_MCP_PEERS, ORIGIN_DEFAULT_PORTS, PEER_ID_RE
 from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
@@ -275,8 +275,10 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
     (or the hub's own key when another host already has that name); a
     configured peer the hub does not list, keyed by that host; a hub whose
     probe failed or whose ``mcp_peers`` is not a list of peer ids, keyed by
-    the hub. A body without ``mcp_peers`` (an older hub) yields nothing. The
-    listed ids only pick rows: nothing is ever sent to one."""
+    the hub. Only the first ``MAX_MCP_PEERS`` listed ids are checked, and one
+    more row on the hub counts the rest. A body without ``mcp_peers`` (an
+    older hub) yields nothing. The listed ids only pick rows: nothing is
+    ever sent to one."""
     rows: Dict[str, str] = {}
     for hub, info in _peer_probe.items():
         hub_key = _url_key(cfgs[hub].base)
@@ -307,7 +309,7 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
                 "peer ids, so its peers were not checked (nothing was sent "
                 "to any of them).")
             continue
-        for pid in listed:
+        for pid in listed[:MAX_MCP_PEERS]:
             if pid in configured:
                 continue
             missing = (f"Hub {hub!r} relays MCP to peer {pid!r} (its "
@@ -331,8 +333,14 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
                     f'add "{pid}": {{"token": "<that peer\'s own MCP '
                     f'token>"}} to the "peers" of the {hub!r} entry and '
                     "restart this server.")
+        if len(listed) > MAX_MCP_PEERS:
+            _add_row(rows, hub, (
+                f"Hub {hub!r} lists {len(listed)} peers it relays MCP to; "
+                f"only the first {MAX_MCP_PEERS} were checked against this "
+                "config."))
+        listed_ids = set(listed)
         for pid, names in configured.items():
-            if pid not in listed:
+            if pid not in listed_ids:
                 for name in names:
                     rows[name] = (
                         f"Hub {hub!r} does not list peer {pid!r} among the "

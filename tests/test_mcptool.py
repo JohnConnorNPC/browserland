@@ -4115,3 +4115,23 @@ def test_a_trickling_hub_cannot_hold_startup_past_the_deadline(monkeypatch):
         "Could not read the peer list of hub 'hub' at startup (no answer "
         "within 0.3 s)")
     assert [t["id"] for t in out["terminals"]] == ["hub:1"]
+
+
+def test_a_hub_listing_too_many_peers_yields_a_bounded_answer():
+    """adv S5: a hub listing MAX_MCP_PEERS + 6 ids, none configured: rows
+    for the first MAX_MCP_PEERS only, plus one row on the hub counting the
+    total. A configured peer listed past the cap is still read as listed."""
+    from webterm.protocol import MAX_MCP_PEERS
+    listed = [f"p{i}" for i in range(MAX_MCP_PEERS + 6)]
+    last = listed[-1]
+    out, paths = _rows_for(
+        [dict(_HUB, peers={last: {"token": "l-t"}})],
+        {"ok": True, "mcp_peers": listed}, {last: []})
+    rows = out["errors"]
+    assert len(rows) == MAX_MCP_PEERS + 1
+    assert sorted(k for k in rows if k != "hub") == sorted(
+        f"hub.{p}" for p in listed[:MAX_MCP_PEERS])
+    assert rows["hub"] == (
+        f"Hub 'hub' lists {MAX_MCP_PEERS + 6} peers it relays MCP to; only "
+        f"the first {MAX_MCP_PEERS} were checked against this config.")
+    assert f"hub.{last}" not in rows

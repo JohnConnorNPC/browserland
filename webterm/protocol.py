@@ -96,6 +96,12 @@ MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
 #: entry's ``peers`` and the ones a hub lists on ``/mcp/info``.
 PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
+#: The most ids of one hub's ``mcp_peers`` the mcptool checks against its
+#: config (#261 round 1): each unconfigured one is an ``errors`` row on every
+#: ``list_terminals``, so a hub listing thousands cannot make that answer
+#: grow without bound. Past it, one row on the hub says how many were left.
+MAX_MCP_PEERS = 64
+
 #: The pairing header: the origin the client paired the peer's token with.
 #: The browser gate requires it; the MCP gate checks it when it is sent. A
 #: mismatch is 409 ``peer_origin_changed``, before any dial.
