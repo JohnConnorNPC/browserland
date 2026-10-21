@@ -574,6 +574,11 @@ again, unless they change a dependency file too.
   fixed too: it answered 400 and left a `*.webterm-bak-*` copy of the link
   behind.
 
+- **Terminal titles, hosts, folders, kinds and sizes are bounded** (#260). What
+  a terminal reports is cut to 256 / 255 / 4096 / 64 characters, and every
+  size, from the terminal or a browser resize, is held to 1–1000 columns and
+  rows, as `/launch` already was.
+
 ### Removed
 
 - **The Agent-docs mod is retired** (#177). Each terminal title bar carried a

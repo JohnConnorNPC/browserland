@@ -85,6 +85,39 @@ def test_build_version_is_cached(monkeypatch):
     assert webterm.build_version() == first and calls == []
 
 
+def test_clamp_dims_and_cap_text():
+    # #260: the same 1-1000 and 256 /launch uses (asserted as literals).
+    assert protocol.clamp_dims(0, 5000) == (1, 1000)
+    assert protocol.clamp_dims(80, 24) == (80, 24)
+    assert protocol.clamp_dims("120", "32") == (120, 32)
+    assert protocol.cap_text("x" * 300, protocol.TITLE_MAX) == "x" * 256
+    assert protocol.cap_text("short", protocol.TITLE_MAX) == "short"
+    assert (protocol.TITLE_MAX, protocol.HOST_MAX, protocol.CWD_MAX,
+            protocol.KIND_MAX) == (256, 255, 4096, 64)
+
+
+def test_bad_dims_still_raise():
+    # A non-number raises as int() always did at the call sites, so a bad
+    # producer still ends only its own session.
+    with pytest.raises(ValueError):
+        protocol.clamp_dims("x", 24)
+    with pytest.raises(TypeError):
+        protocol.clamp_dims(None, 24)
+
+
+def test_agent_cli_holds_dims_to_the_same_range():
+    # #260: the agent's --cols/--rows take 1-1000, the range everything else
+    # clamps to; out of range is refused with the existing message shape.
+    from webterm.agent import cli
+    cfg = cli.parse_args(["--cols", "1000", "--rows", "1", "--", "sh"])
+    assert (cfg.cols, cfg.rows) == (1000, 1)
+    for bad, text in ((["--cols", "1001"], "must be <= 1000"),
+                      (["--rows", "0"], "must be >= 1")):
+        with pytest.raises(SystemExit) as exc:
+            cli.parse_args(bad + ["--", "sh"])
+        assert text in str(exc.value)
+
+
 def test_title_frame():
     assert json.loads(protocol.title_frame("vim")) == {
         "type": "title", "data": "vim"}

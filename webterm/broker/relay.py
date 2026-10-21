@@ -197,8 +197,10 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
                     await refused()
                     continue
                 try:
-                    cols = int(data.get("cols", 80))
-                    rows = int(data.get("rows", 24))
+                    # #260: held to 1-1000 like /launch before the producer
+                    # sees it.
+                    cols, rows = protocol.clamp_dims(data.get("cols", 80),
+                                                     data.get("rows", 24))
                 except (TypeError, ValueError):
                     continue
                 if not await entry.send_to_producer_if(

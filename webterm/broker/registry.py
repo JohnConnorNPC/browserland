@@ -511,13 +511,19 @@ class BrokerRegistry:
         """
         window_id = int(hello.get("window_id"))
         pid = int(hello.get("pid", 0))
-        title = str(hello.get("title", ""))
-        cols = int(hello.get("cols", 80))
-        rows = int(hello.get("rows", 24))
-        host = str(hello.get("host", "") or "").strip() or socket.gethostname()
-        kind = str(hello.get("kind", "") or "").strip() or "terminal"
+        # #260: what a producer reports about itself is bounded like /launch
+        # (protocol.clamp_dims / cap_text): cut and clamped, never refused.
+        title = protocol.cap_text(hello.get("title", ""), protocol.TITLE_MAX)
+        cols, rows = protocol.clamp_dims(hello.get("cols", 80),
+                                         hello.get("rows", 24))
+        host = protocol.cap_text(
+            str(hello.get("host", "") or "").strip() or socket.gethostname(),
+            protocol.HOST_MAX)
+        kind = protocol.cap_text(
+            str(hello.get("kind", "") or "").strip() or "terminal",
+            protocol.KIND_MAX)
         agent = _whitelist_agent(hello.get("agent"))
-        cwd = str(hello.get("cwd", "") or "")
+        cwd = protocol.cap_text(hello.get("cwd", "") or "", protocol.CWD_MAX)
         # #115: the launch-profile name (self-reported, untrusted — a hint, not
         # an attestation). Cap length like version; the UI only uses it as a key
         # into that host's /profiles color map, so a junk value just misses.
@@ -888,7 +894,8 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 continue
             mtype = data.get("type")
             if mtype == "title":
-                entry.title = str(data.get("data", entry.title))
+                entry.title = protocol.cap_text(
+                    data.get("data", entry.title), protocol.TITLE_MAX)
                 # Live push so attached browsers update title bars without
                 # waiting for the next /sessions poll.
                 await entry.broadcast_text(protocol.title_frame(entry.title))
@@ -901,7 +908,8 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 # Live working-dir change: update the entry (so the next
                 # /sessions poll is accurate) and push to attached browsers so
                 # the AGENTS.md button tracks a `cd` immediately.
-                entry.cwd = str(data.get("data", entry.cwd) or "")
+                entry.cwd = protocol.cap_text(
+                    data.get("data", entry.cwd) or "", protocol.CWD_MAX)
                 await entry.broadcast_text(protocol.cwd_frame(entry.cwd))
             elif mtype == "mode":
                 # DECCKM cache (#23): consumed only by send_keys via /mcp/
@@ -909,8 +917,8 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 # stream, so there's nothing to broadcast.
                 entry.app_cursor = bool(data.get("app_cursor", entry.app_cursor))
             elif mtype == "resized":
-                entry.cols = int(data.get("cols", entry.cols))
-                entry.rows = int(data.get("rows", entry.rows))
+                entry.cols, entry.rows = protocol.clamp_dims(
+                    data.get("cols", entry.cols), data.get("rows", entry.rows))
                 # Tell every attached browser to reflow xterm.js. The
                 # producer is authoritative; last-writer wins across
                 # multi-browser since the next producer-driven `resized`

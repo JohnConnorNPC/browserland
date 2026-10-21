@@ -598,8 +598,9 @@ class Agent:
             LOGGER.debug("pty write failed: %s", exc)
 
     def _on_resize(self, cols: int, rows: int) -> None:
-        cols = max(1, cols)
-        rows = max(1, rows)
+        # #260: 1-1000 like /launch, so the agent is safe even behind an
+        # older broker that relays a browser's resize unclamped.
+        cols, rows = protocol.clamp_dims(cols, rows)
         try:
             self.backend.resize(cols, rows)
         except Exception as exc:

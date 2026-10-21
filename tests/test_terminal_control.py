@@ -617,6 +617,30 @@ def test_relay_frame_admitted_before_a_claim_does_not_land_after_it(frame):
     asyncio.run(scenario())
 
 
+def test_browser_resize_is_clamped():
+    # #260: a browser's resize reaches the producer held to 1-1000, like
+    # /launch; an in-range one passes unchanged.
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        holder = FakeBrowser()
+        task = _attach(reg, ctx, entry, holder, "lease")
+        await _settle()
+        holder.push({"type": "resize", "cols": 10 ** 6, "rows": 10 ** 6})
+        holder.push({"type": "resize", "cols": 0, "rows": 40})
+        holder.push({"type": "resize", "cols": 120, "rows": 32})
+        await _settle()
+        assert _producer_frames(entry, ("resize",)) == [
+            json.loads(protocol.resize_frame(1000, 1000)),
+            json.loads(protocol.resize_frame(1, 40)),
+            json.loads(protocol.resize_frame(120, 32))]
+        holder.hang_up()
+        await task
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
 def test_relay_attach_reads_resized_before_any_control_change():
     async def scenario():
         reg = BrokerRegistry()

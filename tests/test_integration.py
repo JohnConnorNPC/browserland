@@ -192,6 +192,16 @@ async def test_resize_applies_and_echoes_resized(running_agent, broker):
     assert backend.size == (120, 32)
 
 
+async def test_the_agent_clamps_a_resize(running_agent, broker):
+    # #260: the agent holds a resize to 1-1000 itself, so it is safe even
+    # behind an older broker that relays a browser's resize unclamped.
+    _, backend, _ = running_agent
+    await broker.send_resize(10 ** 6, 0)
+    frame = await broker.wait_text(lambda f: f.get("type") == "resized")
+    assert frame == {"type": "resized", "cols": 1000, "rows": 1}
+    assert backend.size == (1000, 1)
+
+
 async def test_failed_resize_echoes_current_dims(running_agent, broker):
     _, backend, _ = running_agent
     backend.fail_resize = True

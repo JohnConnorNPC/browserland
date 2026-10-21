@@ -132,6 +132,59 @@ def test_agent_frame_updates_entry_summary_and_broadcasts():
     asyncio.run(scenario())
 
 
+def test_register_caps_hello_metadata():
+    # #260: a hello's title/host/cwd/kind are cut (256/255/4096/64) and its
+    # size clamped to 1-1000, never refused; a normal hello is stored as sent.
+    async def scenario():
+        reg = BrokerRegistry()
+        big = await reg.register(CaptureWS(), {
+            "type": "hello", "window_id": 1, "pid": 5, "title": "t" * 10000,
+            "host": "h" * 1000, "cwd": "/" * 10000, "kind": "k" * 1000,
+            "cols": 10 ** 6, "rows": 0})
+        assert (len(big.title), len(big.host), len(big.cwd),
+                len(big.kind)) == (256, 255, 4096, 64)
+        assert (big.cols, big.rows) == (1000, 1)
+        ok = await reg.register(CaptureWS(), {
+            "type": "hello", "window_id": 2, "pid": 6, "title": "shell",
+            "host": "box", "cwd": "/home/u", "kind": "agent",
+            "cols": 120, "rows": 32})
+        assert (ok.title, ok.host, ok.cwd, ok.kind, ok.cols, ok.rows) == (
+            "shell", "box", "/home/u", "agent", 120, 32)
+    asyncio.run(scenario())
+
+
+def test_producer_frames_are_capped():
+    # #260: live title/cwd/resized frames are bounded like the hello, both in
+    # the entry and in what attached browsers are sent; in-range frames pass.
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps(_hello(1)))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+        sub = CaptureWS()
+        entry.add_subscriber(sub)
+        ws.feed(json.dumps({"type": "title", "data": "t" * 1000}))
+        ws.feed(json.dumps({"type": "cwd", "data": "/" * 5000}))
+        ws.feed(json.dumps({"type": "resized", "cols": 5000, "rows": 0}))
+        assert await _wait(lambda: entry.cols == 1000)
+        assert (len(entry.title), len(entry.cwd), entry.rows) == (256, 4096, 1)
+        frames = [json.loads(s) for s in sub.sent]
+        assert {"type": "resized", "cols": 1000, "rows": 1} in frames
+        assert any(f.get("type") == "title" and len(f["data"]) == 256
+                   for f in frames)
+        assert any(f.get("type") == "cwd" and len(f["data"]) == 4096
+                   for f in frames)
+        ws.feed(json.dumps({"type": "title", "data": "plain"}))
+        ws.feed(json.dumps({"type": "resized", "cols": 100, "rows": 30}))
+        assert await _wait(lambda: (entry.cols, entry.rows) == (100, 30))
+        assert entry.title == "plain"
+        ws.feed(None)
+        await asyncio.wait_for(task, 5)
+    asyncio.run(scenario())
+
+
 def test_mode_frame_caches_app_cursor_without_broadcast():
     """A 'mode' frame caches DECCKM on the entry (for send_keys, via
     /mcp/terminals) without broadcasting — browsers track their own DECCKM (#23)."""

@@ -30,6 +30,7 @@ import sys
 from typing import (Any, Awaitable, Callable, Dict, List, NamedTuple, Optional,
                     Tuple)
 
+from .. import protocol
 from ..agent.config import BROKER_URL_ENV
 from ..agent.env_util import spawn_env
 from .auth import TOKEN_ENV
@@ -190,8 +191,7 @@ class Launcher:
             raise LaunchError(429, "too_many_pending_launches")
 
         window_id = self._allocate_window_id()
-        cols = max(1, min(int(cols), 1000))
-        rows = max(1, min(int(rows), 1000))
+        cols, rows = protocol.clamp_dims(cols, rows)
         effective_title = title or profile.get("title") or name
 
         argv: List[str] = [

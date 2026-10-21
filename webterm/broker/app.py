@@ -909,7 +909,8 @@ def _valid_profile_entry(value: Any) -> Optional[Dict[str, Any]]:
             return None
     entry: Dict[str, Any] = {"command": [str(p) for p in command]}
     title = value.get("title")
-    entry["title"] = title[:256] if isinstance(title, str) and title else None
+    entry["title"] = (title[:protocol.TITLE_MAX]
+                      if isinstance(title, str) and title else None)
     cwd = value.get("cwd")
     entry["cwd"] = cwd if isinstance(cwd, str) and cwd else None
     # #115: optional per-profile default color. Self-heal like cwd — keep it only
@@ -5264,7 +5265,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                     status=400)
         title = body.get("title")
         if title is not None:
-            title = str(title)[:256]
+            title = protocol.cap_text(title, protocol.TITLE_MAX)
         cwd = body.get("cwd")
         if cwd is not None:
             if not isinstance(cwd, str):

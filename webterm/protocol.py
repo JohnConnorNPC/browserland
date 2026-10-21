@@ -182,6 +182,40 @@ def normalize_origin(raw: Any) -> Tuple[Optional[str], Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
+# What a terminal may report about itself (#260): clamp and cut, never refuse
+# ---------------------------------------------------------------------------
+# A producer's hello and live frames are self-reported, and so is a browser's
+# resize. Bound them the way /launch already does (dims 1-1000, title cut to
+# 256): refusing a hello would drop a live terminal over a long title, which is
+# worse than a cut. Other title caps are different things and stay as they
+# are: the page-meta cut (300) and a mod's MAX_TITLE_LEN (80).
+
+#: Terminal columns and rows, as /launch clamps them.
+DIM_MIN, DIM_MAX = 1, 1000
+#: A terminal title, as /launch cuts it.
+TITLE_MAX = 256
+#: A host name (the DNS name limit; /launch takes no host).
+HOST_MAX = 255
+#: A working directory (Linux PATH_MAX; /launch's cwd must exist, uncut).
+CWD_MAX = 4096
+#: A producer kind, like the hello's profile and version.
+KIND_MAX = 64
+
+
+def clamp_dims(cols: Any, rows: Any) -> Tuple[int, int]:
+    """``(cols, rows)`` as ints held to DIM_MIN..DIM_MAX. ``int()`` runs first,
+    so a non-number still raises ValueError/TypeError, as the call sites
+    always did."""
+    return (max(DIM_MIN, min(int(cols), DIM_MAX)),
+            max(DIM_MIN, min(int(rows), DIM_MAX)))
+
+
+def cap_text(value: Any, limit: int) -> str:
+    """``str(value)`` cut to ``limit`` characters."""
+    return str(value)[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Producer -> broker
 # ---------------------------------------------------------------------------
 

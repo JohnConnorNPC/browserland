@@ -6,6 +6,7 @@ import argparse
 import os
 from typing import List, Optional, Sequence
 
+from ..protocol import DIM_MAX, DIM_MIN
 from .config import (
     AgentConfig,
     BROKER_URL_ENV,
@@ -94,8 +95,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> AgentConfig:
     )
     auth_token = ns.auth_token or os.environ.get(TOKEN_ENV) or None
 
-    if ns.cols < 1 or ns.rows < 1:
+    if ns.cols < DIM_MIN or ns.rows < DIM_MIN:
         raise SystemExit("error: --cols/--rows must be >= 1")
+    if ns.cols > DIM_MAX or ns.rows > DIM_MAX:
+        raise SystemExit(f"error: --cols/--rows must be <= {DIM_MAX}")
 
     return AgentConfig(
         command=tuple(command),
