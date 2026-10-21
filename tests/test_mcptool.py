@@ -4146,6 +4146,51 @@ def test_a_trickling_hub_cannot_hold_startup_past_the_deadline(monkeypatch):
     assert [t["id"] for t in out["terminals"]] == ["hub:1"]
 
 
+def test_several_trickling_hubs_share_the_one_deadline(monkeypatch):
+    """Round 2: four hubs that all trickle their /mcp/info: configure()
+    still returns within ONE deadline plus slack, not one per hub, and
+    every hub gets its "no answer" row. Numbers: deadline 0.6 s, each
+    trickle would take ~5 s, bound 1.6 s (one wait per hub in turn would
+    take 2.4 s)."""
+    import threading
+    import time
+    from webterm.mcptool import server
+    monkeypatch.setattr(server, "_ADMIN_PROBE_TIMEOUT_S", 0.6)
+    stop = threading.Event()
+    body = json.dumps({"ok": True, "mcp_peers": []}).encode()
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            for i in range(len(body)):
+                if stop.wait(5.0 / len(body)):
+                    return
+                yield body[i:i + 1]
+
+    def handler_for(name):
+        def handler(req):
+            if req.url.path == "/mcp/info":
+                return httpx.Response(200, stream=Trickle())
+            return httpx.Response(200, json=[{"id": 1, "mode": "read"}])
+        return handler
+    hubs = [f"h{i}" for i in range(4)]
+    entries = [{"name": h, "url": f"http://{h}:4445", "token": f"{h}-t",
+                "peers": {}} for h in hubs]
+    started = time.monotonic()
+    try:
+        _parsed(monkeypatch, entries, handler_for)
+        elapsed = time.monotonic() - started
+        out = server.list_terminals()
+    finally:
+        stop.set()
+        _reset_server()
+    assert elapsed < 1.6, f"configure() waited {elapsed:.2f}s"
+    assert sorted(out["errors"]) == hubs
+    for h in hubs:
+        assert out["errors"][h].startswith(
+            f"Could not read the peer list of hub {h!r} at startup (no "
+            "answer within 0.6 s)")
+
+
 def test_a_hub_listing_too_many_peers_yields_a_bounded_answer():
     """adv S5: a hub listing MAX_MCP_PEERS + 6 ids, none configured: rows
     for the first MAX_MCP_PEERS only, plus one row on the hub counting the
