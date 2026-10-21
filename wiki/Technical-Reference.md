@@ -1765,6 +1765,26 @@ into `mods_dir` directly. A check that refuses `/file/*` writes inside
 `mods_dir` is not part of 1.0; keep `mods_dir` as protected as the broker's own
 configuration.
 
+**The admin token is typed into the page the mods run in.** The *Admin token
+required* dialog is page code, the page holds the token in memory, and page
+code adds the `X-Webterm-Admin` header. Every installed mod runs in that same
+page with the page's full authority, and its script is fetched and run even
+while it is unchecked in the Mods pane. So a hostile installed mod can read the
+admin token the next time you type it, or send its own admin request once you
+have. The admin token ends the *standing* ability of the page token, and of
+every mod holding it, to install the next mod; it does not protect an admin act
+made from a page where a hostile mod is loaded. `?nomods=1` loads no mod, but
+it mounts no Mods pane either, so install and uninstall are not on that page.
+When you do not trust every installed mod, make the admin request from outside
+the page, with `B`, `AUTH` and `ADMIN` set to the broker's URL, page token and
+admin token, for example:
+
+```bash
+curl -s -X POST "$B/mods/uninstall" \
+  -H "Authorization: Bearer $AUTH" -H "X-Webterm-Admin: $ADMIN" \
+  -H 'content-type: application/json' -d '{"id":"x-notes"}'
+```
+
 **A mod is not sandboxed.** It runs same-origin with the page's full authority
 and can reach `/file/*`, `/session/*`, `/state` and `/mcp/*` directly; `ctx`
 grants it nothing it lacks. So the trust event is the **token-gated install**,

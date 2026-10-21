@@ -631,6 +631,13 @@ again, unless they change a dependency file too.
   `script-src` plus `frame-ancestors`. See
   [`wiki/Upgrading.md`](wiki/Upgrading.md#the-admin-token-guards-routes-not-files-191).
 
+- **The admin token's limit in the page is written down** (#260, documentation
+  only). The admin token is typed into, held by and sent from the page every
+  installed mod runs in, so it stops a mod from installing the next one on its
+  own but does not protect an admin act made while a hostile mod is loaded. See
+  the *Mods* section of
+  [`wiki/Technical-Reference.md`](wiki/Technical-Reference.md).
+
 - **`POST /mcp/config` refuses a client-chosen `admin_token`** (#260). A
   non-empty string answers 400 `bad_token` and changes nothing; `null` or `""`
   still clears it and `admin_generate: true` still mints one. Before, any

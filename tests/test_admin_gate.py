@@ -447,3 +447,29 @@ def test_the_docs_say_the_admin_token_does_not_cover_file_writes():
     assert "[[Technical-Reference#mods-" not in section
     assert "section of [[Technical-Reference]]" in section
     assert "next boot" in section and "not part of 1.0" in section
+
+
+def test_the_docs_say_the_admin_token_is_typed_into_the_mods_page():
+    # #260 H2: the admin token's limit in the page, in TR's Mods section and
+    # where you type it (Installing-Mods), plus the ?nomods=1 fact it states.
+    lead = "**The admin token is typed into the page the mods run in.**"
+    tr = _wiki("Technical-Reference.md")
+    assert "\n\n" + lead in tr
+    para = _paragraph_after(tr, lead)
+    assert "fetched and run even while it is unchecked" in para
+    assert ("it does not protect an admin act made from a page where a "
+            "hostile mod is loaded") in para
+    assert "it mounts no Mods pane either" in para
+    a = tr.index(lead)
+    block = tr[tr.index("```bash", a):tr.index("```\n", tr.index("```bash", a) + 7)]
+    assert "X-Webterm-Admin: $ADMIN" in block
+    assert ("Type it only when you trust every mod installed on that broker"
+            in _flat(_wiki("Installing-Mods.md")))
+    from pathlib import Path
+    loader = (Path(__file__).resolve().parents[1] / "webterm" / "broker"
+              / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    body = loader[loader.index("async function loadMods()"):]
+    nomods = body.index("if (_nomodsRequested())")
+    mount = body.index("_mountModsManagerPane();")
+    assert nomods < mount
+    assert "return;" in body[nomods:body.index("}", nomods)]
