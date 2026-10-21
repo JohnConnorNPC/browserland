@@ -1270,3 +1270,46 @@ async def test_every_candidate_meets_every_hub_token_in_compare_digest(
         for token in _HUB_TOKENS.values():
             assert (candidate.encode(), token.encode()) in calls, (
                 candidate[:8], token[:8])
+
+
+# ---- #261 phase B: the hub lists the peers it relays MCP to --------------------
+
+async def _mcp_info(srv, token):
+    client = _client()
+    try:
+        r = await client.get(srv.url + "/mcp/info",
+                             headers={"Authorization": "Bearer " + token})
+    finally:
+        await client.aclose()
+    assert r.status_code == 200, r.text
+    return r
+
+
+async def test_mcp_info_lists_the_mcp_peers_by_id_only(hub2, upstream):
+    """#261: `mcp_peers` names exactly the peers with "mcp": true (`m`, not
+    `n`), as a sorted list of ids: no origin and no token rides it."""
+    r = await _mcp_info(hub2, HUB_MCP)
+    assert r.json()["mcp_peers"] == ["m"]
+    assert all(isinstance(pid, str) for pid in r.json()["mcp_peers"])
+    assert upstream.origin not in r.text
+    for secret in (B_MCP, B_MCP_ADMIN) + HUB_CANARIES:
+        assert secret not in r.text
+
+
+async def test_mcp_info_lists_no_peers_as_an_empty_list(tmp_path):
+    """#261: a broker with MCP on and no peers answers `mcp_peers: []` (the
+    key present, so a client can tell it from an older broker)."""
+    mp = pytest.MonkeyPatch()
+    for var in ("WEB_TERMINAL_TOKEN", "WEB_TERMINAL_MCP_TOKEN",
+                "WEB_TERMINAL_MCP_ADMIN_TOKEN"):
+        mp.delenv(var, raising=False)
+    srv = LiveApp(_make_app(
+        tmp_path, {}, auth_token=HUB_BROWSER, mcp_enabled=True,
+        mcp_token=HUB_MCP,
+        mcp_state_path=str(tmp_path / "webterm_mcp.json"))).start()
+    try:
+        r = await _mcp_info(srv, HUB_MCP)
+    finally:
+        srv.stop()
+        mp.undo()
+    assert r.json()["mcp_peers"] == []

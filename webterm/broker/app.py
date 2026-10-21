@@ -7165,7 +7165,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            # #244: the desktop relay master switch. A broker
                            # without the flag does not relay; a client fails
                            # closed on absence.
-                           "allow_desktop": bool(cfg["allow_desktop"])})
+                           "allow_desktop": bool(cfg["allow_desktop"]),
+                           # #261: the peers this broker relays /mcp/* to
+                           # (`"mcp": true`), sorted ids only: never an
+                           # origin, never a credential. Listed whether or
+                           # not the proxy extra is installed (a call then
+                           # answers proxy_unavailable). The mcptool only
+                           # reports from it; its own config decides which
+                           # hosts, URLs and tokens exist. A broker without
+                           # the key advertises nothing.
+                           "mcp_peers": sorted(
+                               pid for pid, p in app.ctx.peers.items()
+                               if p["mcp"])})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
