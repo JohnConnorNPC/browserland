@@ -568,6 +568,12 @@ again, unless they change a dependency file too.
   not start. The extra now asks for `mcp>=1.2,<2`; reinstall the extra to get a
   working SDK.
 
+- **Deleting a symlink to a folder works on Linux and macOS** (#260). The file
+  manager answered 400 and left the link in place; it now removes the link and
+  never touches the folder it points to. Overwriting such a link with a move is
+  fixed too: it answered 400 and left a `*.webterm-bak-*` copy of the link
+  behind.
+
 ### Removed
 
 - **The Agent-docs mod is retired** (#177). Each terminal title bar carried a

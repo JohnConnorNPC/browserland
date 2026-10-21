@@ -662,6 +662,48 @@ def test_delete_symlink_to_dir_unlinks_link_keeps_target(tmp_path, monkeypatch):
     assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
 
 
+def test_remove_link_uses_rmdir_only_where_windows_needs_it(tmp_path,
+                                                            monkeypatch):
+    # #260: (a) this platform's branch removes a symlink-to-dir entry and
+    # keeps the target; (b) on POSIX the Windows branch (rmdir) really is
+    # refused by the OS, so the constant is what keeps POSIX on unlink.
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    if os.name != "nt":
+        monkeypatch.setattr(app_mod, "_DIR_LINK_NEEDS_RMDIR", True)
+        with pytest.raises(NotADirectoryError):
+            app_mod._remove_link(str(link))
+        assert os.path.islink(str(link))
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+        monkeypatch.setattr(app_mod, "_DIR_LINK_NEEDS_RMDIR", False)
+    app_mod._remove_link(str(link))
+    assert not os.path.lexists(str(link))
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_move_overwrite_onto_a_symlink_to_dir_keeps_its_target(tmp_path,
+                                                               monkeypatch):
+    # #260: overwriting a symlink-to-dir with a move replaces the link only,
+    # never the folder it points to, and leaves no backup copy behind.
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    (tmp_path / "a.txt").write_text("moved", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/file/move", json={
+        "src": "a.txt", "dst": "link", "overwrite": True})
+    assert r.status == 200 and r.json["ok"] is True, r.json
+    assert not os.path.islink(str(link))
+    assert link.read_text(encoding="utf-8") == "moved"
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+    assert sorted(p.name for p in tmp_path.glob("*.webterm-bak-*")) == []
+
+
 def test_delete_symlink_to_file_unlinks_link_keeps_target(tmp_path, monkeypatch):
     target = tmp_path / "real.txt"
     target.write_text("precious", encoding="utf-8")

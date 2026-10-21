@@ -2915,13 +2915,20 @@ def _set_windows_attributes(path_str: str, toggles: Dict[str, bool]) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+#: A directory-type link (dir symlink, junction) needs os.rmdir on Windows --
+#: os.unlink refuses it there -- but os.unlink on POSIX, where rmdir refuses a
+#: symlink (ENOTDIR). Either way only the link entry goes, never its target.
+_DIR_LINK_NEEDS_RMDIR = os.name == "nt"
+
+
 def _remove_link(path_str: str) -> None:
-    """Remove a symlink / junction ENTRY without touching its target. A
-    directory-type link (dir symlink or junction) needs ``os.rmdir`` on Windows
-    — ``os.unlink`` raises on it — while a file symlink (and a broken link) need
-    ``os.unlink``. ``os.path.isdir`` follows the link to choose; a broken link
-    (isdir False) takes the unlink path."""
-    if os.path.isdir(path_str):
+    """Remove a symlink / junction ENTRY without touching its target. On
+    Windows a directory-type link (dir symlink or junction) needs ``os.rmdir``
+    — ``os.unlink`` raises on it — and ``os.path.isdir`` follows the link to
+    choose; a file symlink and a broken link (isdir False) take ``os.unlink``.
+    On POSIX every link takes ``os.unlink`` (#260: ``rmdir`` refuses a
+    symlink there with ENOTDIR)."""
+    if _DIR_LINK_NEEDS_RMDIR and os.path.isdir(path_str):
         os.rmdir(path_str)
     else:
         os.unlink(path_str)
