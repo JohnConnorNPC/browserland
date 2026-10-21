@@ -35,7 +35,6 @@ browser's BRACKET_GAP_AGENTS, so no paste/input behaviour rides the label.
 
 from __future__ import annotations
 
-import os
 from typing import List, Optional, Sequence
 
 # DRIFT: duplicated as ``_AGENTS`` in ``webterm/broker/registry.py`` (the broker
@@ -68,8 +67,10 @@ def _safe_exe(proc) -> Optional[str]:
 
 
 def _norm(token: str) -> str:
-    """Basename, lowercased, with a single known launcher extension stripped."""
-    b = os.path.basename(str(token)).lower()
+    """Basename (split on either separator, like ``_vendor_from_path``, so a
+    Windows path classifies on POSIX too), lowercased, with a single known
+    launcher extension stripped."""
+    b = str(token).replace("\\", "/").rsplit("/", 1)[-1].lower()
     for ext in _STRIP:
         if b.endswith(ext):
             b = b[:-len(ext)]
