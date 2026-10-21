@@ -156,15 +156,16 @@ def test_the_relay_code_set_is_texted_and_documented():
 
 _HUB_ALONE = {
     "wiki/MCP-and-AI-Agents.md":
-        "An MCP config with only the hub's entry shows only the hub's own "
-        "windows",
+        "An MCP config with only the hub's entry, and no peers in it, shows "
+        "only the hub's own windows",
     "webterm/mcptool/README.md":
-        "An MCP config with only the hub's entry shows only the hub's own "
-        "windows",
+        "An MCP config with only the hub's entry, and no peers in it, shows "
+        "only the hub's own windows",
     "wiki/Hosts-and-Multi-Browser.md":
-        "An MCP config with only this broker's entry shows only this "
-        "broker's own windows",
-    "README.md": "shows only that broker's own windows",
+        "An MCP config with only this broker's entry, and no peers in it, "
+        "shows only this broker's own windows",
+    "README.md": "An entry for a hub, without peers, shows only that "
+                 "broker's own windows",
 }
 
 
@@ -183,8 +184,11 @@ def _corpus_text():
         if isinstance(x, str):
             yield x
         elif isinstance(x, dict):
-            for v in x.values():
-                yield from strings(v)
+            # #261: "t" is a run's type tag ("text", "code", ...), not prose;
+            # skipped so a sentence with inline code reads as one phrase.
+            for k, v in x.items():
+                if k != "t":
+                    yield from strings(v)
         elif isinstance(x, list):
             for v in x:
                 yield from strings(v)
@@ -350,3 +354,50 @@ def test_the_docs_pin_the_mcp_ladder_order_and_what_is_never_relayed():
         para.append(line)
     never = " ".join(" ".join(para).split())
     assert "`GET`/`POST /mcp/config`" in never, never
+
+
+# #261 phase B: one hosts entry for a hub and its peers. Each sentence is
+# pinned by its own phrase (flattened: no backticks, no bold), in the MCP
+# wiki page and the mcptool README alike.
+_NESTED_PEERS = {
+    "one entry": "One entry for the hub and its peers. The hub entry may "
+                 "carry \"peers\":",
+    "named": "the MCP server then adds one host per peer, named <hub>.<id>, "
+             "at <hub url>/peer/<id>, with that peer's token",
+    "own scope": "A peer may also carry its own scope and admin_token; it "
+                 "never takes the hub entry's, while the process-wide "
+                 "--scope still reaches it",
+    "refused": "a name another entry already uses, or a peer token or admin "
+               "token equal to one of the hub entry's is refused when the "
+               "MCP server starts",
+    "mcp_peers": "The hub's GET /mcp/info lists the ids of the peers it "
+                 "relays MCP to as mcp_peers (ids only, never an origin or a "
+                 "token)",
+    "no token row": "a peer the hub lists but the config has no token for "
+                    "is one row under errors in list_terminals, named "
+                    "<hub>.<id>",
+    "unlisted row": "a configured peer the hub does not list is a row on "
+                    "that peer's entry",
+    "startup": "its peers are not checked again until the MCP server "
+               "restarts",
+    "never contacted": "A listed peer without an entry is never contacted",
+    "absent": "a peer with no entry is absent, and is reported only when "
+              "the hub entry carries peers",
+}
+
+
+def test_the_nested_peers_entry_is_documented():
+    for rel in ("wiki/MCP-and-AI-Agents.md", "webterm/mcptool/README.md"):
+        text = _doc(rel)
+        for key, phrase in _NESTED_PEERS.items():
+            assert phrase in text, (rel, key)
+        # the old wording said nothing reports a missing peer
+        assert "simply absent" not in text, rel
+    assert '"peers": {"b": {"token"' in (
+        REPO / "webterm" / "mcptool" / "README.md").read_text(encoding="utf-8")
+    # the in-app guide is generated from the wiki: it says it too
+    corpus = _corpus_text()
+    # (phrases whose inline code sits between spaces: the flattener joins
+    # runs with one, so "list_terminals, named" would read "list_terminals ,")
+    for key in ("mcp_peers", "startup", "never contacted", "absent"):
+        assert _NESTED_PEERS[key] in corpus, key

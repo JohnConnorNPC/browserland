@@ -167,9 +167,11 @@ writes the host's `admin_token` for you.)
 ### A broker behind another one (#252)
 
 A broker whose operator sets `"mcp": true` on a peer in its `peers` config
-relays that peer's `/mcp/*` surface. An MCP config with only the hub's entry
-shows only the hub's own windows: the hub does not list its peers' windows
-itself, so add each peer as another `--hosts` entry at
+relays that peer's `/mcp/*` surface. An MCP config with only the hub's
+entry, and no `peers` in it, shows only the hub's own windows: the hub does
+not list its peers' windows itself, so each peer needs its own MCP token in
+the config, in the hub entry's `peers` or in an entry of its own. As an
+entry of its own, add the peer as another `--hosts` entry at
 `http://<this broker>/peer/<id>` with the **other** broker's MCP token (the
 peer needs MCP enabled with a token of its own):
 
@@ -180,6 +182,33 @@ browserland-mcp --hosts '[
    "peer_origin": "http://100.64.0.2:4445"}
 ]'
 ```
+
+Or in the hub entry's `peers` (this makes two hosts, `hub` and `hub.b`):
+
+```bash
+browserland-mcp --hosts '[
+  {"name": "hub", "url": "http://127.0.0.1:4445", "token": "abc…",
+   "peers": {"b": {"token": "xyz…", "peer_origin": "http://100.64.0.2:4445"}}}
+]'
+```
+
+- **One entry for the hub and its peers.** The hub entry may carry
+  `"peers": {"<id>": {"token": "<that peer's MCP token>", "peer_origin":
+  "…"}}`: the MCP server then adds one host per peer, named `<hub>.<id>`, at
+  `<hub url>/peer/<id>`, with that peer's token. A peer may also carry its
+  own `scope` and `admin_token`; it never takes the hub entry's, while the
+  process-wide `--scope` still reaches it. Any other key, a name another
+  entry already uses, or a peer token or admin token equal to one of the hub
+  entry's is refused when the MCP server starts.
+- **Which peers the hub relays.** The hub's `GET /mcp/info` lists the ids of
+  the peers it relays MCP to as `mcp_peers` (ids only, never an origin or a
+  token). A hub entry that carries `peers` (`{}` too) is asked once, when the
+  MCP server starts: a peer the hub lists but the config has no token for is
+  one row under `errors` in `list_terminals`, named `<hub>.<id>`; a
+  configured peer the hub does not list is a row on that peer's entry; a hub
+  that cannot be reached then is one row on the hub's entry, and its peers
+  are not checked again until the MCP server restarts. A listed peer without
+  an entry is never contacted.
 
 - `"peer_origin"` (optional) is the origin the hub's `peers` names for that
   peer. The server sends it as `X-Browserland-Peer-Origin` on every call, so
@@ -216,7 +245,8 @@ browserland-mcp --hosts '[
   token as the hub: give that peer its own MCP token (different from the
   hub's) and put it in the entry. A relay that shared one token between hub
   and peer worked before and is refused now (see `wiki/Upgrading.md`).
-- When something is missing: a peer with no entry is simply absent.
+- When something is missing: a peer with no entry is absent, and is
+  reported only when the hub entry carries `peers`.
   `unknown_peer` (404) means no peer by that id **or** the peer is not set to
   `"mcp": true` (one answer for both, whatever the bearer is);
   `proxy_unavailable` (503) means the hub lacks the `proxy` extra; the peer's
