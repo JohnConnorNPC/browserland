@@ -658,6 +658,12 @@ again, unless they change a dependency file too.
   uninstall and rescan mods and write the mod and update policy; the pane now
   says so, where before only a line in the broker's log did.
 
+- **Terminals no longer inherit the MCP tokens** (#260). A shell started by the
+  broker got `WEB_TERMINAL_MCP_TOKEN`, `WEB_TERMINAL_MCP_ADMIN_TOKEN`, the
+  `BROWSERLAND_MCP_*` tokens and `BROWSERLAND_MCP_HOSTS` whenever they were set
+  in the broker's environment; they are now removed, as `WEB_TERMINAL_TOKEN`
+  already was.
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the

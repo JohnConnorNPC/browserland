@@ -46,6 +46,7 @@ class FakeBackend(PtyBackend):
     def spawn(self, argv, cols, rows, cwd=None, env=None):
         self.argv = list(argv)
         self.size = (cols, rows)
+        self.env = env
 
     def start(self, loop, on_data, on_exit):
         self._loop = loop
@@ -117,6 +118,26 @@ async def test_hello_first_with_identity(running_agent, broker):
     assert hello["cols"] == 80 and hello["rows"] == 24
     assert hello["kind"] == "agent"
     assert hello["host"]  # gethostname is always non-empty
+
+
+async def test_the_shell_inherits_no_credential(broker, monkeypatch):
+    # #260 (and #142's pop, pinned here for the first time): the shell the
+    # agent spawns gets neither the broker token nor any MCP credential; an
+    # unrelated variable is kept.
+    names = ("WEB_TERMINAL_TOKEN", "WEB_TERMINAL_MCP_TOKEN",
+             "WEB_TERMINAL_MCP_ADMIN_TOKEN", "BROWSERLAND_MCP_TOKEN",
+             "BROWSERLAND_MCP_ADMIN_TOKEN", "BROWSERLAND_MCP_HOSTS")
+    for name in names:
+        monkeypatch.setenv(name, "secret-" + name)
+    monkeypatch.setenv("FOO_260", "kept")
+    backend = FakeBackend()
+    agent = Agent(make_config(broker, window_id=777260), backend=backend)
+    task = asyncio.create_task(agent.run())
+    await broker.wait_connected()
+    backend.exit_child(0)
+    await asyncio.wait_for(task, 5)
+    assert not any(name in backend.env for name in names)
+    assert backend.env["FOO_260"] == "kept"
 
 
 async def test_hello_carries_pyte_flag(running_agent, broker):

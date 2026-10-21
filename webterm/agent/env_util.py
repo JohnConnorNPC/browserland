@@ -46,6 +46,19 @@ _SUPERVISOR_ENV_VARS = frozenset({
     "BROWSERLAND_RUN_DIR",
 })
 
+# The MCP credentials and the MCP host list (#260). The broker and the MCP
+# server read these from their OWN environment, so a unit file that pins one
+# would otherwise sit in every shell the broker starts, readable with `env`;
+# the agent needs none of them. Same rule as WEB_TERMINAL_TOKEN (#142), which
+# agent.run drops itself because the launcher hands it to the agent on purpose.
+_MCP_CREDENTIAL_ENV_VARS = frozenset({
+    "WEB_TERMINAL_MCP_TOKEN",
+    "WEB_TERMINAL_MCP_ADMIN_TOKEN",
+    "BROWSERLAND_MCP_TOKEN",
+    "BROWSERLAND_MCP_ADMIN_TOKEN",
+    "BROWSERLAND_MCP_HOSTS",
+})
+
 
 def _expand(value: str) -> str:
     """Expand %VAR% references in a REG_EXPAND_SZ value against the current
@@ -131,11 +144,14 @@ def spawn_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     from the registry (Windows) or an unchanged copy of ``base``/os.environ
     (elsewhere). Never raises: any failure yields the base environment."""
     env = dict(base if base is not None else os.environ)
-    # Never let the supervisor-authorization variables reach a spawned agent
-    # (and therefore its shell) — see _SUPERVISOR_ENV_VARS above. Windows env
+    # Never let the supervisor-authorization variables or the MCP credentials
+    # reach a spawned agent (and therefore its shell) — see
+    # _SUPERVISOR_ENV_VARS and _MCP_CREDENTIAL_ENV_VARS above. Windows env
     # names are case-insensitive but a dict is not, so match by upper-case
     # the same way the PATH dedup below does.
     for k in [k for k in list(env) if k.upper() in _SUPERVISOR_ENV_VARS]:
+        del env[k]
+    for k in [k for k in list(env) if k.upper() in _MCP_CREDENTIAL_ENV_VARS]:
         del env[k]
     try:
         fresh = registry_path(env.get("PATH"))

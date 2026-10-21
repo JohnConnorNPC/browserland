@@ -226,6 +226,12 @@ beside the state store → **mint** `secrets.token_urlsafe(32)` into it. Compare
 with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
 without minting or starting a server.
 
+A terminal's shell inherits the broker's environment without
+`WEB_TERMINAL_TOKEN`, the MCP tokens (`WEB_TERMINAL_MCP_TOKEN`,
+`WEB_TERMINAL_MCP_ADMIN_TOKEN`, `BROWSERLAND_MCP_TOKEN`,
+`BROWSERLAND_MCP_ADMIN_TOKEN`) and `BROWSERLAND_MCP_HOSTS`; read them with
+`--print-token` or from the sidecars (#260).
+
 Loopback was never a sound exemption: `tailscale serve` in front of a
 `127.0.0.1` bind (the topology [[Setup-and-Onboarding]] recommends) makes every
 tailnet request arrive *from* loopback, and any page in the user's browser

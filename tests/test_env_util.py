@@ -73,6 +73,77 @@ def test_spawn_env_preserves_unrelated_vars():
     assert "BROWSERLAND_SUPERVISOR_PID" not in env
 
 
+_MCP_NAMES = ("WEB_TERMINAL_MCP_TOKEN", "WEB_TERMINAL_MCP_ADMIN_TOKEN",
+              "BROWSERLAND_MCP_TOKEN", "BROWSERLAND_MCP_ADMIN_TOKEN",
+              "BROWSERLAND_MCP_HOSTS")
+
+
+def test_spawn_env_strips_mcp_credentials():
+    """#260: the MCP tokens and the MCP host list never reach a spawned agent
+    (or its shell), in any case; unrelated variables are kept."""
+    base = {name: "secret-" + name for name in _MCP_NAMES}
+    base["browserland_mcp_hosts"] = base.pop("BROWSERLAND_MCP_HOSTS")
+    base.update({"FOO": "bar", "PATH": os.environ.get("PATH", "")})
+    env = env_util.spawn_env(base)
+    assert not any(k.upper() in _MCP_NAMES for k in env)
+    assert env["FOO"] == "bar" and "PATH" in env
+
+
+def test_the_stripped_names_are_the_ones_the_code_reads():
+    # Both ways: a rename on either side (the broker's auth module, the MCP
+    # server's CLI) or a dropped name here reds this.
+    from webterm.broker import auth
+    from webterm.mcptool import __main__ as mcp_cli
+    read = {auth.MCP_TOKEN_ENV, auth.MCP_ADMIN_TOKEN_ENV, mcp_cli.TOKEN_ENV,
+            mcp_cli.TOKEN_ENV_ALT, mcp_cli.ADMIN_TOKEN_ENV,
+            mcp_cli.ADMIN_TOKEN_ENV_ALT, mcp_cli.HOSTS_ENV}
+    assert env_util._MCP_CREDENTIAL_ENV_VARS == read == set(_MCP_NAMES)
+
+
+def test_the_docs_say_what_a_shell_inherits():
+    from pathlib import Path
+    tr = " ".join((Path(__file__).resolve().parents[1] / "wiki"
+                   / "Technical-Reference.md").read_text(
+                       encoding="utf-8").split())
+    a = tr.index("A terminal's shell inherits the broker's environment without")
+    sentence = tr[a:tr.index("(#260).", a)]
+    for name in ("WEB_TERMINAL_TOKEN",) + _MCP_NAMES:
+        assert f"`{name}`" in sentence, name
+
+
+def test_the_launcher_hands_the_agent_no_mcp_credential(monkeypatch):
+    """#260, the broker's spawn path (P1): the agent's env carries the broker
+    token (the agent needs it) and none of the MCP credentials."""
+    import asyncio
+    from webterm.broker import launcher as launcher_mod
+    from webterm.broker.registry import BrokerRegistry
+    for name in _MCP_NAMES:
+        monkeypatch.setenv(name, "secret-" + name)
+    envs = []
+
+    class _Proc:
+        pid = 40001
+
+        def poll(self):
+            return None
+
+    def fake_spawn(argv, cwd, env):
+        envs.append(dict(env))
+        return launcher_mod.SpawnResult(_Proc(),
+                                        launcher_mod.CONTINUITY_GUARANTEED)
+    monkeypatch.setattr(launcher_mod, "_spawn_detached", fake_spawn)
+    monkeypatch.setattr(launcher_mod, "REGISTER_TIMEOUT", 0.05)
+    launcher = launcher_mod.Launcher(
+        BrokerRegistry(), {"profiles": {"p": {"command": ["noop"],
+                                              "title": "t"}},
+                           "default_profile": "p"}, 4444,
+        "broker-token-0123456789")
+    asyncio.run(launcher.launch("p"))
+    assert len(envs) == 1
+    assert envs[0]["WEB_TERMINAL_TOKEN"] == "broker-token-0123456789"
+    assert not any(k.upper() in _MCP_NAMES for k in envs[0])
+
+
 def test_spawn_env_odd_environment_does_not_raise():
     # Empty base, and a base with only a supervisor var and no PATH at all —
     # spawn_env() must never raise regardless of platform.
