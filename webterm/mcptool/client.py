@@ -17,7 +17,6 @@ until ``/mcp/info`` has echoed that scope back (see
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -25,15 +24,8 @@ import httpx
 # The header names come from the dependency-free protocol module, never from
 # webterm.broker: this package is the optional `mcp` extra and must not pull
 # in the broker (and sanic with it).
-from ..protocol import (MCP_ADMIN_HEADER, PEER_ID_RE, PEER_ORIGIN_HEADER,
-                        SCOPE_HEADER, normalize_origin)
-
-#: #261: a hosts url that goes through a hub's relay: exactly
-#: scheme://authority/peer/<id>, the id being the hub's PEER_ID_RE. A path
-#: before /peer/ (a broker behind some other reverse proxy) or after the id
-#: does not match.
-_PEER_BASE_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/peer/(" + PEER_ID_RE.pattern + r")$")
+from ..protocol import (MCP_ADMIN_HEADER, PEER_ORIGIN_HEADER, SCOPE_HEADER,
+                        normalize_origin, relayed_peer_id)
 
 #: #261: through a hub, mcp_disabled and auth_required are the PEER's answers
 #: (the relay forwards the call with the host's own token), so the generic
@@ -257,8 +249,7 @@ class BrowserlandClient:
         #: reached through a hub's relay), else None. Only the two codes the
         #: peer itself answers (mcp_disabled, auth_required) read differently
         #: for it: see _PEER_ANSWERED_NOTE.
-        via = _PEER_BASE_RE.match(self.base)
-        self._via_peer = via.group(1) if via else None
+        self._via_peer = relayed_peer_id(self.base)
         #: The scope this client declares (#232), or None. An empty string is
         #: unscoped, exactly as the broker reads an empty header.
         self.scope = scope or None

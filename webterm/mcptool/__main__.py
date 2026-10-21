@@ -14,7 +14,7 @@ from typing import Optional
 
 # The broker's scope grammar, from the dependency-free protocol module (this
 # package must not import webterm.broker).
-from ..protocol import PEER_ID_RE, SCOPE_RE, normalize_origin
+from ..protocol import PEER_ID_RE, SCOPE_RE, normalize_origin, relayed_peer_id
 
 DEFAULT_URL = "http://127.0.0.1:4445"
 
@@ -229,9 +229,7 @@ def _peer_hosts(where: str, name: str, url: str, peers,
         raise ValueError(f"{where} 'peers' must be an object of "
                          "{id: {token, peer_origin, scope, admin_token}}")
     base = url.rstrip("/")
-    parts = base.rsplit("/", 2)
-    if len(parts) == 3 and parts[1] == "peer" and PEER_ID_RE.fullmatch(
-            parts[2]):
+    if relayed_peer_id(base) is not None:
         raise ValueError(f"{where} is already behind a hub's /peer/ prefix, "
                          "so it cannot carry 'peers' (the hub relays one hop "
                          "only: peer_hop_refused)")

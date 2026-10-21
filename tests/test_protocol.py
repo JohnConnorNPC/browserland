@@ -4,6 +4,8 @@ a separate codebase at https://github.com/JohnConnorNPC/xterm-py)."""
 
 import json
 
+import pytest
+
 from webterm import protocol
 
 
@@ -355,11 +357,21 @@ def test_one_peer_id_grammar_for_the_hub_and_the_mcptool():
     # hub's /mcp/info `mcp_peers`, a /peer/<id> url) are one regex, not two
     # spellings that can drift apart. (`is` holds for an equal pattern too,
     # re.compile caches it: what this catches is a peers.py copy that drifted.)
-    import pytest
-    pytest.importorskip("httpx")
+    # No httpx needed: this runs with the dev extra alone.
     from webterm.broker import peers
-    from webterm.mcptool import client
     assert peers.PEER_ID_RE is protocol.PEER_ID_RE
-    assert protocol.PEER_ID_RE.pattern in client._PEER_BASE_RE.pattern
-    assert client._PEER_BASE_RE.match("http://h:1/peer/" + "x" * 64)
-    assert not client._PEER_BASE_RE.match("http://h:1/peer/" + "x" * 65)
+    assert protocol.PEER_ID_RE.pattern in protocol.PEER_BASE_RE.pattern
+
+
+@pytest.mark.parametrize("base, want", [
+    ("http://h:1/peer/b", "b"),
+    ("http://h:1/peer/b/", "b"),
+    ("http://h:1/peer/" + "x" * 64, "x" * 64),
+    ("http://h:1/peer/" + "x" * 65, None),
+    ("http://h:1/peer/b/c", None),
+    ("http://h:1/sub/peer/b", None),     # a path before /peer/
+    ("http://peer/b", None),             # a host named peer is not a hop
+    ("http://h:1/peer/b:c", None),
+    ("http://h:1", None)])
+def test_relayed_peer_id_is_the_one_behind_a_hub_test(base, want):
+    assert protocol.relayed_peer_id(base) == want

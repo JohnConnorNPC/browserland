@@ -96,6 +96,22 @@ MCP_ADMIN_HEADER = "X-Browserland-Mcp-Admin"
 #: entry's ``peers`` and the ones a hub lists on ``/mcp/info``.
 PEER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
+#: A hosts url that goes through a hub's relay: exactly
+#: ``scheme://authority/peer/<id>`` (#261). A path before ``/peer/`` (a
+#: broker behind some other reverse proxy) or after the id does not match.
+PEER_BASE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/peer/(" + PEER_ID_RE.pattern + r")$")
+
+
+def relayed_peer_id(base: str) -> Optional[str]:
+    """The peer id when ``base`` (a trailing ``/`` ignored) is a hub's
+    ``/peer/<id>`` url, else None. The one test of "behind a hub" (#261
+    round 1): the mcptool client reads it to say whose answer an error is,
+    and the hosts parser to refuse ``peers`` one hop down."""
+    match = PEER_BASE_RE.match(base.rstrip("/"))
+    return match.group(1) if match else None
+
+
 #: The most ids of one hub's ``mcp_peers`` the mcptool checks against its
 #: config (#261 round 1): each unconfigured one is an ``errors`` row on every
 #: ``list_terminals``, so a hub listing thousands cannot make that answer

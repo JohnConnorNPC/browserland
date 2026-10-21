@@ -3651,6 +3651,27 @@ def test_peers_on_an_entry_behind_a_hub_are_refused(url):
     assert "already behind a hub's /peer/ prefix" in str(ei.value)
 
 
+@pytest.mark.parametrize("url", [
+    "http://hub:4445/peer/b", "http://hub:4445/peer/b/", "http://peer/b",
+    "http://hub:4445/sub/peer/b", "http://hub:4445/peer/b/c",
+    "http://hub:4445"])
+def test_the_parser_and_the_client_agree_on_behind_a_hub(url):
+    """adv N2: refusing "peers" one hop down and the client's "this is a
+    peer's answer" read the same test: `http://peer/b` (a host named peer)
+    is neither; `/peer/b` is both."""
+    try:
+        _hub_json({"c": {"token": "c-t"}}, url=url)
+        refused = False
+    except ValueError as exc:
+        assert "already behind a hub's /peer/ prefix" in str(exc)
+        refused = True
+    c = BrowserlandClient(base=url, token="t")
+    try:
+        assert refused == (c._via_peer is not None), url
+    finally:
+        c.close()
+
+
 def test_a_nested_peer_and_an_explicit_entry_may_share_a_url():
     """Two entries for one peer (say, two scopes) stay legal: only the NAME
     must be unique."""
