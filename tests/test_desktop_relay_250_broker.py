@@ -125,13 +125,29 @@ def test_e2e_rpc_gen_matches_the_holders_last_status(broker):  # noqa: F811
 
 # ---- A2: the send task re-checks the generation ------------------------------
 
+_ORIG_WAIT_FOR = asyncio.wait_for
+
+
+async def _hop_wait_for(aw, timeout):
+    """asyncio.wait_for, except that the relay's ``_send_rpc`` starts in a
+    task of its own, one loop step later -- what wait_for did on Python
+    <=3.11. Since 3.12 wait_for awaits its coroutine inline, so the send's
+    generation check ran before a become_active already queued; this forces
+    the bump-first order on every Python. Every other wait_for passes
+    through unchanged."""
+    if getattr(aw, "__qualname__", "").endswith("._send_rpc"):
+        aw = asyncio.ensure_future(aw)
+    return await _ORIG_WAIT_FOR(aw, timeout)
+
+
 def _takeover_at_registration(app, monkeypatch):
     """Run one GET /mcp/desktop while holder A is taken over by B at the
     exact point the issue names: B's become_active is queued from inside
     desktop_rpc_frame, which the relay calls synchronously just before it
-    registers the call, so B's handler wakes BEFORE the send task that
-    wait_for schedules. Returns what happened, plus every asyncio exception
-    the loop reported."""
+    registers the call, and the send is started one loop step later
+    (``_hop_wait_for``), so B's handler runs BEFORE the send's generation
+    check. Returns what happened, plus every asyncio exception the loop
+    reported."""
     app.ctx.desktop_rpc_timeout_s = 1.0
     orig = protocol.desktop_rpc_frame
     out = {"loop_errors": []}
@@ -149,10 +165,12 @@ def _takeover_at_registration(app, monkeypatch):
             b.push({"type": "become_active"})       # the takeover, NOW
             return orig(*args, **kw)
         monkeypatch.setattr(protocol, "desktop_rpc_frame", hooked)
+        monkeypatch.setattr(asyncio, "wait_for", _hop_wait_for)
         try:
             _, resp = await _get_desktop(app)
         finally:
             monkeypatch.setattr(protocol, "desktop_rpc_frame", orig)
+            monkeypatch.setattr(asyncio, "wait_for", _ORIG_WAIT_FOR)
         await _settle()
         import gc
         gc.collect()
@@ -214,6 +232,52 @@ def test_a_takeover_before_the_send_says_not_dispatched(tmp_path,
                                     monkeypatch)
     assert out["http"] == (409, {"error": "lost_lease",
                                  "dispatched": False})
+
+
+class _TakenOverAtTheWriteWS(HolderWS):
+    """A holder that never answers; at the instant its desktop_rpc is written
+    it records (holder, live generation, the frame's gen) and then queues
+    B's become_active -- a takeover right after the send started."""
+
+    def __init__(self, ctx):
+        super().__init__(ctx, answer=False)
+        self.b = None
+        self.witness = []
+
+    async def send(self, data):
+        frame = json.loads(data)
+        if frame.get("type") == "desktop_rpc":
+            self.witness.append((self.ctx.active_client_id,
+                                 self.ctx.lease_generation, frame["gen"]))
+            self.b.push({"type": "become_active"})
+        await super().send(data)
+
+
+def test_a_takeover_after_the_send_started_says_dispatched(tmp_path,
+                                                           monkeypatch):
+    """The send-first order (what 3.12+ wait_for gives with no hop): the
+    write happened while A held the live generation, then B took over, so
+    the caller's lost_lease says dispatched:true."""
+    app = _desktop_app(tmp_path, monkeypatch)
+    app.ctx.desktop_rpc_timeout_s = 2.0
+    out = {}
+
+    async def go():
+        c = Ctl(app)
+        a = await c.attach("A", _TakenOverAtTheWriteWS(app.ctx))
+        a.b = await c.connect("B")
+        out["gen0"] = app.ctx.lease_generation
+        _, resp = await _get_desktop(app)
+        await _settle()
+        out["http"] = (resp.status, resp.json)
+        out["holder"] = app.ctx.active_client_id
+        out["witness"] = list(a.witness)
+        await c.close_all()
+    asyncio.run(go())
+    g = out["gen0"]
+    assert out["witness"] == [("A", g, g)]
+    assert out["http"] == (409, {"error": "lost_lease", "dispatched": True})
+    assert out["holder"] == "B"
 
 
 class _StalledRpcWS(HolderWS):
@@ -370,3 +434,15 @@ def test_the_rid_start_is_drawn_from_secrets(tmp_path, monkeypatch):
     app = _desktop_app(tmp_path, monkeypatch)
     assert 2 ** 40 in asked
     assert next(app.ctx.desktop_rid) == 42
+
+
+def test_the_docs_say_a_started_send_is_dispatched():
+    """TR states what the relay guarantees: it never STARTS a send once the
+    lease has moved on, and a send already started reports dispatched:true."""
+    from pathlib import Path
+    tr = " ".join((Path(__file__).resolve().parents[1] / "wiki"
+                   / "Technical-Reference.md").read_text(
+                       encoding="utf-8").split())
+    assert "never starts sending an op once the lease has moved on" in tr
+    assert "the agent is then told `dispatched: true`" in tr
+    assert "never sends an op once the lease" not in tr

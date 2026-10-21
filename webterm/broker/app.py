@@ -8091,11 +8091,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         async def _send_rpc(sock):
             nonlocal dispatched
             # #250: a takeover can land between the registration above and
-            # this task's first step (wait_for schedules it; a become_active
-            # already queued runs first), so the holder may be deposed by
-            # now. Write only while the call's generation is still the live
-            # one -- read in the send task itself, with no lock: every bump
-            # changes lease_generation before its status send starts.
+            # this step (on <=3.11 wait_for ran this in a new task, so a
+            # queued become_active ran first; on 3.12+ it runs inline), so
+            # the holder may be deposed by now. Either way the check and the
+            # start of the send are one step: a send is only STARTED while
+            # the call's generation is live, and can still finish after a
+            # bump if the write waits, hence dispatched:true. Read with no
+            # lock: every bump changes lease_generation before its status
+            # send starts.
             if ctxd.lease_generation != generation:
                 raise _DesktopLeaseLost()
             dispatched = True

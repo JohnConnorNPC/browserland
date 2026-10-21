@@ -392,7 +392,7 @@ again, unless they change a dependency file too.
   (#250). `desktop_rpc` frames carry the lease `gen` and the broker `bootId`,
   rids start at a random offset per broker run, the page keys its answered
   rids on host, run and rid, and a deposed lease holder never applies an op
-  its caller was told failed. A `lost_lease` answer now says whether the op
+  after it learns it was deposed. A `lost_lease` answer now says whether the op
   was `dispatched`.
 - **Two tabs of one browser keep the shared layout in sync** (#246, #247). A
   tab with an unsaved change but nothing queued now adopts newer `/state`

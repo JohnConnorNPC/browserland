@@ -1126,9 +1126,11 @@ browser keys the answers it has given on host, run and rid (#250).
   not at all, but `dispatched: true` means a send of the op was started, so a
   browser may have it and may have applied it before it learned it was
   deposed: check with `get` before retrying. Only `dispatched: false` (no browser was ever sent the op)
-  promises nothing was applied. The broker never sends an op once the lease
-  has moved on, and the browser refuses an op from a host whose lease it lost,
-  from an older lease generation, or from another broker run (#250).
+  promises nothing was applied. The broker never starts sending an op once
+  the lease has moved on; a send it started while the lease was live can still
+  reach the deposed browser, and the agent is then told `dispatched: true`.
+  The browser refuses an op from a host whose lease it lost, from an older
+  lease generation, or from another broker run (#250).
 * **Visibility.** Every frame relayed for a NON-admin caller carries
   `args.visible` — the int ids of the caller's visible windows on this broker
   (effective mode ≠ `off`, in scope), computed at relay time; an admin's frame
