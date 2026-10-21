@@ -810,6 +810,9 @@ def test_an_agent_can_still_break_out_of_the_supervisors_job(tmp_path):
             proc.kill()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the kill-on-close job object is "
+                    "Windows-only; on Linux systemd's default "
+                    "KillMode=control-group stops the worker (supervise.py)")
 def test_killing_the_supervisor_takes_the_worker_with_it(tmp_path):
     """Before #183, killing ``python -m webterm.broker`` killed the server.
     That has to stay true: a worker that outlives its supervisor is a broker
