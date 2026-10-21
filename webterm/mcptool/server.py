@@ -651,10 +651,11 @@ def list_terminals() -> Dict[str, Any]:
 
     For a host entry that carries "peers", `errors` also holds what that
     hub's /mcp/info said when this server started: a peer the hub relays but
-    this config has no token for (key `<hub>.<id>`; its windows are not
-    listed), a configured peer the hub does not relay (that host's key), or
-    a hub whose peer list could not be read (the hub's key). These are
-    checked once, at startup."""
+    this config has no token for (key `<hub>.<id>`, or the hub's key when
+    another host has that name; its windows are not listed), a configured
+    peer the hub does not relay (that host's key), or a hub whose peer list
+    could not be read in time (the hub's key). At most 64 listed ids are
+    checked per hub. These are checked once, at startup."""
     terminals: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
     for name in _host_configs:

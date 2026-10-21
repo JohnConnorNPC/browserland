@@ -4179,3 +4179,11 @@ def test_a_key_repeated_in_one_object_is_refused(raw):
         m._parse_hosts(raw)
     assert "repeats the key" in str(ei.value)
     assert ("'b'" if "peers" in raw else "'token'") in str(ei.value)
+
+
+def test_the_list_terminals_docstring_gives_the_codes_cap():
+    """The tool text an agent reads states the same cap as the code."""
+    from webterm.mcptool import server
+    from webterm.protocol import MAX_MCP_PEERS
+    doc = " ".join(server.list_terminals.__doc__.split())
+    assert f"At most {MAX_MCP_PEERS} listed ids are checked per hub" in doc
