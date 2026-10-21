@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -183,7 +183,10 @@ def _probe_startup() -> None:
     (the client sends the admin header when it has one). The probes run
     concurrently under one overall deadline (``_ADMIN_PROBE_TIMEOUT_S``, the
     client default), so the worst-case startup delay is one timeout, not
-    timeout × hosts.
+    timeout × hosts. The deadline is on the whole pass, not on each read: a
+    probe still running when it passes (a hub that trickles its answer, a
+    slow DNS) is abandoned, its client is closed and dropped (the next call
+    builds a fresh one), and it reads as a failed probe.
 
     Admin: a host with an admin token is admin-capable iff the body is a
     dict with ``admin: true`` — a pre-#245 broker answers without the key,
@@ -209,8 +212,18 @@ def _probe_startup() -> None:
         except Exception as exc:
             return exc
 
-    with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        answers = list(pool.map(probe, names))
+    pool = ThreadPoolExecutor(max_workers=len(names))
+    futures = [pool.submit(probe, name) for name in names]
+    done, _ = wait(futures, timeout=_ADMIN_PROBE_TIMEOUT_S)
+    pool.shutdown(wait=False, cancel_futures=True)
+    answers = []
+    for name, future in zip(names, futures):
+        if future in done:
+            answers.append(future.result())
+        else:
+            answers.append(TimeoutError(
+                f"no answer within {_ADMIN_PROBE_TIMEOUT_S:g} s"))
+            _drop_client(name)
     for name, info in zip(names, answers):
         if (cfgs[name].admin_token and isinstance(info, dict)
                 and info.get("admin") is True):
@@ -328,6 +341,19 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
                         "true there. This is for the hub's operator, not the "
                         "agent.")
     return rows
+
+
+def _drop_client(name: str) -> None:
+    """Close and forget one host's client (an abandoned startup probe's):
+    closing ends a request still reading from it, and the next call builds a
+    fresh client."""
+    with _clients_lock:
+        client = _clients.pop(name, None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # a flaky close must not abort startup
+            pass
 
 
 def _get_client(name: str) -> BrowserlandClient:

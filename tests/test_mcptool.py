@@ -4068,3 +4068,50 @@ def test_a_listed_peer_whose_name_another_host_has_is_reported_on_the_hub():
     with pytest.raises(ValueError, match="collides with peer 'c'"):
         m._parse_hosts(json.dumps(
             [dict(_HUB, peers={"c": {"token": "c-t"}}), entries[1]]))
+
+
+# ---- #261 round 1: the startup probe has ONE deadline, for the whole pass -------
+
+def test_a_trickling_hub_cannot_hold_startup_past_the_deadline(monkeypatch):
+    """adv S3: a hub that sends its /mcp/info one byte at a time (each byte
+    well inside any per-read timeout) is abandoned when the one deadline
+    passes: configure() returns within it plus slack, the hub's row says it
+    gave no answer in time, and the next call still works on a fresh client.
+    Numbers: deadline 0.3 s, the trickle would take ~3 s, bound 1.3 s."""
+    import threading
+    import time
+    from webterm.mcptool import server
+    monkeypatch.setattr(server, "_ADMIN_PROBE_TIMEOUT_S", 0.3)
+    stop = threading.Event()
+    body = json.dumps({"ok": True, "mcp_peers": []}).encode()
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            for i in range(len(body)):
+                if stop.wait(3.0 / len(body)):
+                    return
+                yield body[i:i + 1]
+
+    def handler_for(name):
+        def handler(req):
+            if req.url.path == "/mcp/info":
+                return httpx.Response(200, stream=Trickle())
+            return httpx.Response(200, json=[{"id": 1, "mode": "read"}])
+        return handler
+    started = time.monotonic()
+    try:
+        _parsed(monkeypatch, [dict(_HUB, peers={})], handler_for)
+        elapsed = time.monotonic() - started
+        # the abandoned probe's client is closed and not reused
+        probed = server._clients.get("hub")
+        out = server.list_terminals()
+        fresh_open = not server._clients["hub"]._client.is_closed
+    finally:
+        stop.set()
+        _reset_server()
+    assert elapsed < 1.3, f"configure() waited {elapsed:.2f}s"
+    assert probed is None and fresh_open
+    assert out["errors"]["hub"].startswith(
+        "Could not read the peer list of hub 'hub' at startup (no answer "
+        "within 0.3 s)")
+    assert [t["id"] for t in out["terminals"]] == ["hub:1"]
