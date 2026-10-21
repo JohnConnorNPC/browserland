@@ -4075,6 +4075,18 @@ def test_a_peer_path_on_another_broker_is_not_the_hubs_peer(hand_url):
     assert list(out["errors"]) == ["hub.b"]
 
 
+@pytest.mark.parametrize("hand_host", ["127.0.0.2", "0.0.0.0"])
+def test_only_the_three_loopback_names_are_folded(hand_host):
+    """Round 2: 127.0.0.1, localhost and ::1 are one host (cells above);
+    127.0.0.2 and 0.0.0.0 are not, so /peer/b there is not the hub's b."""
+    out, _ = _rows_for(
+        [dict(_HUB, url="http://127.0.0.1:4445", peers={}),
+         {"name": "b", "url": f"http://{hand_host}:4445/peer/b",
+          "token": "b-t"}],
+        {"ok": True, "mcp_peers": ["b"]}, {"b": [{"id": 5, "mode": "read"}]})
+    assert list(out["errors"]) == ["hub.b"]
+
+
 def test_a_listed_peer_whose_name_another_host_has_is_reported_on_the_hub():
     """adv S2: an unrelated, healthy host named `hub.c` (at another broker)
     and a hub that lists c: the row is NOT put on hub.c (whose windows are
