@@ -224,6 +224,11 @@ def _probe_startup() -> None:
         _admin_tools_registered = True
 
 
+def _add_row(rows: Dict[str, str], key: str, row: str) -> None:
+    """One more row under ``key``, after any already there ("; ")."""
+    rows[key] = f"{rows[key]}; {row}" if key in rows else row
+
+
 #: The names the loopback host goes by (#261 round 1): a hub entry at
 #: 127.0.0.1 and a hand-written peer entry at localhost name one broker.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -253,7 +258,8 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
     the config. A hub's configured peers are the hosts whose base is
     ``<hub base>/peer/<id>`` (a nested peer or a hand-written entry alike,
     compared by :func:`_url_key`, so a spelling of the same url matches).
-    Rows: a peer the hub lists that no host reaches, keyed ``<hub>.<id>``; a
+    Rows: a peer the hub lists that no host reaches, keyed ``<hub>.<id>``
+    (or the hub's own key when another host already has that name); a
     configured peer the hub does not list, keyed by that host; a hub whose
     probe failed or whose ``mcp_peers`` is not a list of peer ids, keyed by
     the hub. A body without ``mcp_peers`` (an older hub) yields nothing. The
@@ -289,15 +295,29 @@ def _peer_rows(cfgs: Dict[str, HostConfig]) -> Dict[str, str]:
                 "to any of them).")
             continue
         for pid in listed:
-            if pid not in configured:
-                rows[f"{hub}.{pid}"] = (
-                    f"Hub {hub!r} relays MCP to peer {pid!r} (its /mcp/info "
-                    "lists it), but this MCP config has no token for that "
-                    "peer, so its windows are not listed. This is for the "
-                    "person who set up this MCP config, not the agent: add "
-                    f'"{pid}": {{"token": "<that peer\'s own MCP token>"}} to '
-                    f'the "peers" of the {hub!r} entry and restart this '
-                    "server.")
+            if pid in configured:
+                continue
+            missing = (f"Hub {hub!r} relays MCP to peer {pid!r} (its "
+                       "/mcp/info lists it), but this MCP config has no "
+                       "token for that peer, so its windows are not listed. "
+                       "This is for the person who set up this MCP config, "
+                       "not the agent: ")
+            name = f"{hub}.{pid}"
+            if name in cfgs:
+                # Round 1: `<hub>.<id>` is some other host's name (that
+                # entry is not this peer, or it would be configured), so
+                # the row goes on the hub, and the advice avoids the name.
+                _add_row(rows, hub, missing + (
+                    f"the name {name!r} it would get belongs to another "
+                    "entry, so add an entry of its own for that peer, at "
+                    f"{cfgs[hub].base.rstrip('/')}/peer/{pid} under a name "
+                    "no other entry uses, with that peer's own MCP token, "
+                    "and restart this server."))
+            else:
+                rows[name] = missing + (
+                    f'add "{pid}": {{"token": "<that peer\'s own MCP '
+                    f'token>"}} to the "peers" of the {hub!r} entry and '
+                    "restart this server.")
         for pid, names in configured.items():
             if pid not in listed:
                 for name in names:

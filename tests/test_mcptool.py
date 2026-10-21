@@ -4044,3 +4044,27 @@ def test_a_peer_path_on_another_broker_is_not_the_hubs_peer(hand_url):
         [dict(_HUB, peers={}), {"name": "b", "url": hand_url, "token": "b-t"}],
         {"ok": True, "mcp_peers": ["b"]}, {"b": [{"id": 5, "mode": "read"}]})
     assert list(out["errors"]) == ["hub.b"]
+
+
+def test_a_listed_peer_whose_name_another_host_has_is_reported_on_the_hub():
+    """adv S2: an unrelated, healthy host named `hub.c` (at another broker)
+    and a hub that lists c: the row is NOT put on hub.c (whose windows are
+    fine) but on the hub, and its advice is an entry of its own under
+    another name -- adding "c" to the hub's peers would be refused at
+    startup as a collision with hub.c."""
+    from webterm.mcptool import __main__ as m
+    entries = [dict(_HUB, peers={}),
+               {"name": "hub.c", "url": "http://other:4445", "token": "o-t"}]
+    out, paths = _rows_for(entries, {"ok": True, "mcp_peers": ["c"]}, {})
+    assert list(out["errors"]) == ["hub"]
+    row = out["errors"]["hub"]
+    assert "Hub 'hub' relays MCP to peer 'c'" in row
+    assert "the name 'hub.c' it would get belongs to another entry" in row
+    assert "at http://hub:4445/peer/c under a name no other entry uses" in row
+    assert '"peers"' not in row
+    assert sorted(t["id"] for t in out["terminals"]) == ["hub.c:1", "hub:1"]
+    assert not [p for p in paths if p.startswith("/peer/c")]
+    # the advice the row does NOT give would indeed be refused
+    with pytest.raises(ValueError, match="collides with peer 'c'"):
+        m._parse_hosts(json.dumps(
+            [dict(_HUB, peers={"c": {"token": "c-t"}}), entries[1]]))
