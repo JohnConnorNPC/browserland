@@ -8477,10 +8477,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 and not isinstance(body.get("token"), str)):
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         # #245: admin_token clears with null/"" and mints with
-        # admin_generate — a client-chosen secret is never accepted, so a
-        # non-string non-null value is a bad_token like above.
+        # admin_generate. A non-string non-null value is a bad_token like
+        # above...
         if ("admin_token" in body and body.get("admin_token") is not None
                 and not isinstance(body.get("admin_token"), str)):
+            return sanic_json({"ok": False, "error": "bad_token"}, status=400)
+        # H3 (#260): ...and a non-empty string too. The credential is
+        # server-minted only (admin_generate); a client may CLEAR it (null or
+        # "") but never SET it to a value it chose.
+        if (isinstance(body.get("admin_token"), str)
+                and body["admin_token"].strip()):
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         env_pinned = _mcp_token_env_pinned()
         admin_env_pinned = _mcp_admin_env_pinned()
@@ -8505,8 +8511,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 if body.get("admin_generate"):
                     cfg["admin_token"] = secrets.token_urlsafe(32)
                 elif "admin_token" in body:
-                    atok = (body.get("admin_token") or "").strip()
-                    cfg["admin_token"] = atok or None
+                    # Only a clear reaches here: a chosen value was refused
+                    # above.
+                    cfg["admin_token"] = None
             if "default_mode" in body:
                 cfg["default_mode"] = body["default_mode"]
             if "allow_launch" in body:

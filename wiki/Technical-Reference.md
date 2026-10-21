@@ -1571,15 +1571,15 @@ absolute server paths, shown only to a holder of the browser token.
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
 (`off`/`read`/`readwrite`), `allow_launch`, `allow_desktop` (#244), `token`,
-`generate:true` (mint a
-fresh `token_urlsafe(32)`), `admin_token` (the #245 credential: `null` or `""`
-clears it) or `admin_generate:true` (mint/rotate — a server-minted value only,
-never a client-chosen secret). Validated before any write; returns the GET
-shape. While the env pins the token, `token`/`generate` edits are **ignored**
-(the live token stays the env value), and the same rule holds for
-`admin_token`/`admin_generate` under `WEB_TERMINAL_MCP_ADMIN_TOKEN`. Errors:
-`bad_json` (400), `bad_mode` (400),
-`bad_token` (400, non-string `token`/`admin_token`).
+`generate:true` (mint a fresh `token_urlsafe(32)`), `admin_token` (the #245
+credential: `null` or `""` clears it; any other string is refused) or
+`admin_generate:true` (mint/rotate — a server-minted value only, never a
+client-chosen secret). Validated before any write; returns the GET shape. While
+the env pins the token, `token`/`generate` edits are **ignored** (the live token
+stays the env value), and the same rule holds for `admin_token`/`admin_generate`
+under `WEB_TERMINAL_MCP_ADMIN_TOKEN`. Errors: `bad_json` (400), `bad_mode`
+(400), `bad_token` (400, non-string `token`/`admin_token`, or a non-empty
+`admin_token` string).
 
 **`POST /mcp/knobs`** (#245, admin credential required) — body
 `{"default_mode"?: "off"|"read"|"readwrite", "allow_launch"?: bool,

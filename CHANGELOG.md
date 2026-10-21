@@ -631,6 +631,13 @@ again, unless they change a dependency file too.
   `script-src` plus `frame-ancestors`. See
   [`wiki/Upgrading.md`](wiki/Upgrading.md#the-admin-token-guards-routes-not-files-191).
 
+- **`POST /mcp/config` refuses a client-chosen `admin_token`** (#260). A
+  non-empty string answers 400 `bad_token` and changes nothing; `null` or `""`
+  still clears it and `admin_generate: true` still mints one. Before, any
+  string became the MCP admin credential, which the docs said never happens.
+  The Control Panel's admin token field is now read-only; it never sent a
+  typed value.
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the

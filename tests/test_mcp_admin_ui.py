@@ -32,6 +32,14 @@ def test_mcp_applet_markup_wired_into_the_page():
         'id="set-mcp-copy-admin"',       # #245 Copy .mcp.json Admin checkbox
     ):
         assert el_id in INDEX_HTML, f"missing MCP applet element {el_id!r}"
+    # #260 H3: the admin token field is read-only (only generate and clear
+    # change it); the plain MCP token field stays editable.
+    def _input_tag(el_id):
+        at = INDEX_HTML.index(f'id="{el_id}"')
+        tag = INDEX_HTML[INDEX_HTML.rindex("<input", 0, at):]
+        return tag[:tag.index(">") + 1]
+    assert "readonly" in _input_tag("set-mcp-admin-token")
+    assert "readonly" not in _input_tag("set-mcp-token")
     # Review round 1 (N3): the checkbox carries its own hint line naming the
     # master-switch + admin-token rule.
     chunk = INDEX_HTML.split('id="set-mcp-allow-desktop"')[1][:600]

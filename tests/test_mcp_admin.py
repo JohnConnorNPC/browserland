@@ -142,8 +142,39 @@ def test_admin_env_pinned_ignores_ui_mint_and_writes_none(tmp_path,
     _, resp = authed(app).post("/mcp/config", json={"admin_token": None})
     assert resp.json["admin_token"] == "pinned-admin-secret"
     assert app.ctx.mcp_cfg["admin_token"] == "pinned-admin-secret"
+    # #260 H3: a chosen value is a 400 even under the pin; nothing changes.
+    _, resp = authed(app).post("/mcp/config",
+                               json={"admin_token": "chosen-value-123456"})
+    assert (resp.status, resp.json["error"]) == (400, "bad_token")
+    assert app.ctx.mcp_cfg["admin_token"] == "pinned-admin-secret"
     assert json.loads(_sidecar(tmp_path).read_text(encoding="utf-8"))[
         "admin_token"] is None
+
+
+def test_config_refuses_a_client_chosen_admin_token(tmp_path, monkeypatch):
+    """#260 H3: the admin credential is server-minted only. A non-empty
+    string is a 400 that changes nothing (alone or beside admin_generate);
+    "" and a whitespace-only string still clear it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, resp = authed(app).post("/mcp/config", json={"admin_generate": True})
+    assert resp.status == 200
+    minted = resp.json["admin_token"]
+    before = _sidecar(tmp_path).read_bytes()
+    for body in ({"admin_token": "chosen-value-123456"},
+                 {"admin_generate": True,
+                  "admin_token": "chosen-value-123456"}):
+        _, resp = authed(app).post("/mcp/config", json=body)
+        assert (resp.status, resp.json["error"]) == (400, "bad_token"), body
+        assert app.ctx.mcp_cfg["admin_token"] == minted
+        assert _sidecar(tmp_path).read_bytes() == before
+    _, resp = authed(app).post("/mcp/config", json={"admin_token": ""})
+    assert resp.status == 200 and resp.json["admin_token"] == ""
+    assert app.ctx.mcp_cfg["admin_token"] is None
+    _, resp = authed(app).post("/mcp/config", json={"admin_generate": True})
+    assert resp.status == 200 and resp.json["admin_token"]
+    _, resp = authed(app).post("/mcp/config", json={"admin_token": "   "})
+    assert resp.status == 200 and resp.json["admin_token"] == ""
+    assert app.ctx.mcp_cfg["admin_token"] is None
 
 
 def test_config_rejects_non_string_admin_token(tmp_path, monkeypatch):
