@@ -3959,3 +3959,25 @@ def test_a_second_configure_drops_the_previous_rows(monkeypatch):
     finally:
         _reset_server()
     assert out["errors"] == {}
+
+
+def test_a_second_configure_with_another_hub_keeps_none_of_the_first():
+    """Round 1: configure() with hub `old`, then with hub `new` (both with
+    "peers"): the second startup neither trips on the first hub's probe
+    (a KeyError on `old`) nor keeps its rows; only `new`'s row is left. No
+    _reset_server between the two configures: configure() alone must reset."""
+    from webterm.mcptool import server
+    handler_for, _ = _hub_answers({"ok": True, "mcp_peers": ["c"]})
+    old = dict(_HUB, name="old", url="http://old:4445", peers={})
+    new = dict(_HUB, name="new", url="http://new:4445", peers={})
+    mp = pytest.MonkeyPatch()
+    try:
+        _parsed(mp, [old], handler_for)
+        assert list(server._peer_errors) == ["old.c"]
+        _parsed(mp, [new], handler_for)
+        assert set(server._peer_probe) == {"new"}
+        out = server.list_terminals()
+    finally:
+        mp.undo()
+        _reset_server()
+    assert list(out["errors"]) == ["new.c"]
