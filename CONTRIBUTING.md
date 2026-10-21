@@ -20,3 +20,18 @@
    the broker / agent / browser model and multi-machine setup.
 
  Search existing issues before opening a new one.
+
+ ## Docs
+
+ `wiki/` is the doc source. Regenerate the help corpus
+ (`python -m webterm.broker.help_corpus`) in the same commit as any wiki change.
+
+ ## Design notes
+
+ These are design notes, not user docs; they may not match the current code.
+
+ - [docs-mod-platform-next.md](docs-mod-platform-next.md) — mod support: current
+   state and next-version requirements.
+ - [docs-mod-signing.md](docs-mod-signing.md) — mod package signing.
+ - [docs-terminal-funnels.md](docs-terminal-funnels.md) — the terminal write / input /
+   resize funnels (#201).
