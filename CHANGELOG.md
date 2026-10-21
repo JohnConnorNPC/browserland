@@ -579,6 +579,11 @@ again, unless they change a dependency file too.
   size, from the terminal or a browser resize, is held to 1–1000 columns and
   rows, as `/launch` already was.
 
+- **Yellow survives a terminal re-render** (#260). Re-attaching to a window
+  redrew yellow text and backgrounds in the default colour, because pyte names
+  that colour `brown`, and bright-magenta backgrounds too (pyte spells it
+  `bfightmagenta`).
+
 ### Removed
 
 - **The Agent-docs mod is retired** (#177). Each terminal title bar carried a

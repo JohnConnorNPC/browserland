@@ -71,6 +71,28 @@ def test_sgr_flag_reset_between_cells():
     assert screen.buffer[0][1].bold is False
 
 
+def test_pyte_colours_survive_a_re_render():
+    # #260: pyte names yellow "brown"/"brightbrown" and spells the bright
+    # magenta background "bfightmagenta"; each used to come back as default.
+    out = pyte_snap.render(
+        b"\x1b[33mY\x1b[93mZ\x1b[43mB\x1b[103mC\x1b[105mM\x1b[0m", 10, 1)
+    for sgr in (b"33m", b"93m", b"43m", b"103m", b"105m"):
+        assert sgr in out, sgr
+
+
+def test_every_pyte_colour_name_maps():
+    # Read from pyte's own tables, so a rename in a future pyte reds this.
+    from pyte.graphics import BG_AIXTERM, BG_ANSI, FG_AIXTERM, FG_ANSI
+    names = (set(FG_ANSI.values()) | set(BG_ANSI.values())
+             | set(FG_AIXTERM.values()) | set(BG_AIXTERM.values()))
+    assert "default" in names
+    for name in names - {"default"}:
+        assert pyte_snap._color_params(name, False) != [39], name
+        assert pyte_snap._color_params(name, True) != [49], name
+    assert pyte_snap._color_params("default", False) == [39]
+    assert pyte_snap._color_params("default", True) == [49]
+
+
 def test_render_without_pyte_raises_helpful_error(monkeypatch):
     monkeypatch.setattr(pyte_snap, "pyte", None)
     assert pyte_snap.available() is False

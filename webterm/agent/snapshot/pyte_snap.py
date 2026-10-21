@@ -23,11 +23,17 @@ except ImportError:  # pragma: no cover - exercised only without the extra
 
 PREAMBLE = b"\x1b[0m\x1b[2J\x1b[H"
 
+# Keyed by pyte's colour names (#260): pyte calls ANSI 3 "brown" and 11
+# "brightbrown", and pyte 0.8.2 spells the bright-magenta background (SGR 105)
+# "bfightmagenta" -- a typo kept here as an alias, while "brightmagenta" stays
+# for the foreground and for a pyte that fixes it. The "yellow" names are
+# harmless aliases: a key pyte never produces is never looked up.
 _NAMED = {
-    "black": 0, "red": 1, "green": 2, "yellow": 3,
+    "black": 0, "red": 1, "green": 2, "yellow": 3, "brown": 3,
     "blue": 4, "magenta": 5, "cyan": 6, "white": 7,
     "brightblack": 8, "brightred": 9, "brightgreen": 10,
-    "brightyellow": 11, "brightblue": 12, "brightmagenta": 13,
+    "brightyellow": 11, "brightbrown": 11, "brightblue": 12,
+    "brightmagenta": 13, "bfightmagenta": 13,
     "brightcyan": 14, "brightwhite": 15,
 }
 
