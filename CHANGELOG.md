@@ -14,7 +14,7 @@ story behind anything named below.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-19
+## [1.0.0] - 2026-10-23
 
 The first stable release. 1.0 supports Windows and Linux, Python 3.10 or
 newer, and current Chrome, Edge and Firefox. Within 1.x the mod API stays at
