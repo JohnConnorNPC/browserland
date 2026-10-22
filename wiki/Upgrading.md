@@ -62,17 +62,37 @@ again, unless they change a dependency file too.
 
 ---
 
+## Terminals no longer inherit the MCP tokens (#260)
+
+**What changed.** A shell the broker starts no longer inherits
+`WEB_TERMINAL_MCP_TOKEN`, `WEB_TERMINAL_MCP_ADMIN_TOKEN`,
+`BROWSERLAND_MCP_TOKEN`, `BROWSERLAND_MCP_ADMIN_TOKEN` or
+`BROWSERLAND_MCP_HOSTS` from the broker's environment, as it already did not
+inherit `WEB_TERMINAL_TOKEN`.
+
+**Who is affected.** An MCP client or script started inside a Browserland
+terminal that read one of these from the inherited environment. It now starts
+without it.
+
+**What to do.** Give that client its token in its own configuration: the
+`.mcp.json` from the Control Panel's **Copy .mcp.json**, `--token-file`, or the
+variable set in that shell yourself.
+
+---
+
 ## A chosen token needs 16 or more characters (#260)
 
-**What changed.** A broker whose token is shorter than 16 characters refuses
-to start, with a message naming where the token came from. That holds for every
-place a token can be set: `$WEB_TERMINAL_TOKEN`, `auth_token` in
-`broker_config.json`, and a hand-written `webterm_token.json` beside the state
-store. A token the broker mints itself is always long enough.
+**What changed.** A broker whose browser token is shorter than 16 characters
+refuses to start, with a message naming where the token came from:
+`$WEB_TERMINAL_TOKEN`, `auth_token` in `broker_config.json`, or a hand-written
+`webterm_token.json` beside the state store. A token the broker mints itself is
+always long enough. The MCP token has no such floor yet; that is a hardening
+item, not part of this change.
 
 **Who is affected.** Only an operator who set a short token themselves.
-Separately, a wrong token's 401 now arrives a second late, so a browser still
-holding a rotated token waits a second on each poll until you log in again.
+Separately, a wrong token's 401 now arrives one second late (at most 32 at
+once), so a browser still holding a rotated token waits a second on each poll
+until you log in again.
 
 **What to do.** Set a longer value everywhere it is used (each browser's login,
 each host entry, `BROWSERLAND_MCP_HOSTS` peers), or remove it and let the broker

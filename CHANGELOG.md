@@ -672,18 +672,20 @@ again, unless they change a dependency file too.
   broker got `WEB_TERMINAL_MCP_TOKEN`, `WEB_TERMINAL_MCP_ADMIN_TOKEN`, the
   `BROWSERLAND_MCP_*` tokens and `BROWSERLAND_MCP_HOSTS` whenever they were set
   in the broker's environment; they are now removed, as `WEB_TERMINAL_TOKEN`
-  already was.
+  already was. See
+  [`wiki/Upgrading.md`](wiki/Upgrading.md#terminals-no-longer-inherit-the-mcp-tokens-260).
 
 - **A chosen token needs 16 or more characters** (#260). A broker whose
-  `auth_token` is shorter now refuses to start, as a short `admin_token`
-  already did; see
+  browser `auth_token` is shorter now refuses to start, as a short
+  `admin_token` already did (the MCP token has no floor yet); see
   [`wiki/Upgrading.md`](wiki/Upgrading.md#a-chosen-token-needs-16-or-more-characters-260).
 
-- **A wrong token is answered after a delay** (#260). Each wrong token waits
+- **A wrong token's 401 is answered after a delay** (#260). On the browser,
+  MCP and peer gates and the `/ws` and `/control` sockets, a wrong token waits
   one second before its 401, while at most 32 wait at once; past that the
-  answer is immediate, so the delay never piles up requests. Guessing a token
-  one request after another is slow. A correct token is never delayed and a
-  missing one is not counted; nothing locks anyone out.
+  answer is immediate, so the delay never piles up requests. The producer
+  `/browserland` dial and the help corpus are not delayed. A correct token is
+  never delayed and a missing one is not counted; nothing locks anyone out.
 
 ## [0.8.0] - 2026-07-30
 

@@ -224,17 +224,25 @@ no loopback exemption, no opt-out. Resolution (never returns nothing):
 `$WEB_TERMINAL_TOKEN` → config `auth_token` → the `webterm_token.json` sidecar
 beside the state store → **mint** `secrets.token_urlsafe(32)` into it. Compared
 with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
-without minting or starting a server. A resolved token shorter than 16
-characters refuses to start (#260). A wrong token's 401 is answered after one
-second while fewer than 32 are waiting, and at once beyond that; a correct token
-is never delayed, and a missing one is a plain 401. A browser still holding a
-rotated token waits a second on each poll until you log in again (#260).
+without minting or starting a server. A resolved browser token shorter than 16
+characters refuses to start; the MCP token has no such floor yet (#260).
+
+**A wrong token is answered late (#260).** A wrong token's 401 is answered
+after one second while fewer than 32 are waiting, and at once beyond that, on
+every browser gate, `/mcp/*`, `/peer/*`, `/ws` and `/control`. A correct token
+is never delayed, and a missing one is a plain 401. Not delayed: the producer
+`/browserland` dial and the help corpus, which answers a wrong token with the
+public corpus (a 200). A browser still holding a rotated token waits a second
+on each poll until you log in again.
 
 A terminal's shell inherits the broker's environment without
 `WEB_TERMINAL_TOKEN`, the MCP tokens (`WEB_TERMINAL_MCP_TOKEN`,
 `WEB_TERMINAL_MCP_ADMIN_TOKEN`, `BROWSERLAND_MCP_TOKEN`,
-`BROWSERLAND_MCP_ADMIN_TOKEN`) and `BROWSERLAND_MCP_HOSTS`; read them with
-`--print-token` or from the sidecars (#260).
+`BROWSERLAND_MCP_ADMIN_TOKEN`) and `BROWSERLAND_MCP_HOSTS` (#260). When the
+environment pins them, they come from the environment you set for the broker
+(a unit file, a shell profile); otherwise the Control Panel's MCP access fields
+and **Copy .mcp.json** show the MCP tokens. `--print-token` prints only the
+browser token.
 
 Loopback was never a sound exemption: `tailscale serve` in front of a
 `127.0.0.1` bind (the topology [[Setup-and-Onboarding]] recommends) makes every
