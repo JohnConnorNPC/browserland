@@ -1,12 +1,14 @@
 """#226 acceptance: "Open in new window" driven end to end in a real browser.
 
 NOT collected by pytest (no test_ prefix) -- it needs a running broker and
-Playwright's Chromium. Run it against a THROWAWAY broker (it launches a shell
-on that broker's default profile and terminates it at the end):
+Playwright's Chromium (or Firefox, with --browser firefox). Run it against a
+THROWAWAY broker (it launches a shell on that broker's default profile and
+terminates it at the end):
 
     python -m webterm.broker --port 4446            # from a scratch cwd, with
                                                     # PYTHONPATH at the repo
     python tests/playwright_detach.py --base http://127.0.0.1:4446/         --token-file <that cwd>/webterm_token.json
+    python tests/playwright_detach.py --base http://127.0.0.1:4446/         --token-file <that cwd>/webterm_token.json --browser firefox
 
 The token is read from the file and never printed. Checks, in order: the
 blocked-popup path is a no-op; the desktop releases (socket closed) BEFORE the
@@ -28,6 +30,7 @@ _ap = argparse.ArgumentParser()
 _ap.add_argument("--base", required=True, help="broker URL, e.g. http://127.0.0.1:4446/")
 _ap.add_argument("--token-file", required=True, help="that broker's webterm_token.json")
 _ap.add_argument("--headed", action="store_true")
+_ap.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
 _args = _ap.parse_args()
 TOKEN = json.load(open(_args.token_file, encoding="utf-8"))["auth_token"]
 BASE = _args.base if _args.base.endswith("/") else _args.base + "/"
@@ -71,7 +74,7 @@ MARK_LINES = "(a) => { " + _LOGICAL + " return lines.filter(s => s.includes(a[1]
 ECHO_LINES = "(a) => { " + _LOGICAL + " return [lines.filter(s => s.trim() === a[1]).length, lines.filter(s => s.includes('echo ' + a[1])).length]; }"
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=not _args.headed)
+    browser = getattr(p, _args.browser).launch(headless=not _args.headed)
     ctx = browser.new_context(viewport={"width": 1400, "height": 900})
     desk = ctx.new_page()
     desk.on("console", lambda m: print("  [desk console]", m.type, m.text) if m.type in ("error", "warning") else None)
