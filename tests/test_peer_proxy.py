@@ -1419,3 +1419,21 @@ async def test_a_hub_token_on_an_expanded_peer_never_reaches_it(hub2,
     code = await asyncio.get_running_loop().run_in_executor(None, run)
     assert code == "hub_credential_refused"
     assert upstream.seen == []
+
+
+async def test_a_relayed_401_under_a_correct_hub_token_is_not_delayed(
+        live, upstream):
+    # #260 review (the auditor's MS5b probe): the wrong-token delay is for a
+    # failed check of THIS broker's token. A correct hub token whose peer
+    # answers 401 is relayed as it came, never held for the delay.
+    calls = []
+
+    async def rec(seconds):
+        calls.append(seconds)
+    live.app.ctx.auth_fail_delay._sleep = rec
+    upstream.routes["/sessions"] = lambda s: Answer(
+        401, [("Content-Type", "application/json")],
+        b'{"error":"auth_required"}')
+    r = await _get(live, "/peer/b/sessions", headers=browser(upstream.origin))
+    assert r.status_code == 401, r.status_code
+    assert calls == [], calls
