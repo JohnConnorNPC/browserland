@@ -290,6 +290,23 @@ def test_package_totals_are_capped():
 # CSS may not reach an external origin
 # --------------------------------------------------------------------------- #
 
+#: One desync string per guard of the url-token reading (#260 review round
+#: 2): each is refused only while its guard stands.
+_URL_TOKEN_DESYNC = {
+    # whitespace after url( is skipped before the quote test
+    "space-before-quote": 'a{background:url( "x)/*" )}\n'
+                          "b{background:url(https://example.invalid/x)}\n"
+                          "/* */\n",
+    # a quoted argument is a string, not a url-token: its ")" ends nothing
+    "quoted-argument": 'a{background:url("x)/*")}\n'
+                       "b{background:url(https://example.invalid/x)}\n"
+                       "/* */\n",
+    # URL( is the same token as url(
+    "uppercase": "a{background:URL(/*)}\n"
+                 "b{background:url(https://example.invalid/x)}\n/* */\n",
+}
+
+
 def test_installed_css_may_not_reference_an_external_origin():
     # The CSP sets ONLY script-src and frame-ancestors -- no default-src, no
     # style-src -- so a stylesheet's @import / url() is entirely unrestricted
@@ -327,7 +344,7 @@ def test_installed_css_may_not_reference_an_external_origin():
         "b{background:url(https://example.invalid/x)}\n/* */\n",
         "a{background:url(/*)}\n"
         "b{background:url(//example.invalid/x)}\n/* */\n",
-    ]
+    ] + list(_URL_TOKEN_DESYNC.values())
     for css in refused:
         with pytest.raises(modinstall.ValidationError) as exc:
             modinstall.validate_package(
@@ -383,6 +400,24 @@ def test_scan_skips_a_url_token_comment_desync(tmp_path):
                   b"b{background:url(https://example.invalid/x)}\n/* */\n")})
     index = modinstall.scan(tmp_path / "mods")
     assert index["skipped"] == {"x-desync": "css_external_reference"}
+
+
+@pytest.mark.parametrize("guard", sorted(_URL_TOKEN_DESYNC))
+def test_each_url_token_guard_refuses_its_desync(tmp_path, guard):
+    # #260 review round 2: one cell per guard of the url-token reading in
+    # _strip_css_comments, at install and at boot: drop the guard and that
+    # string's external load hides in a comment only the checker sees.
+    css = _URL_TOKEN_DESYNC[guard]
+    with pytest.raises(modinstall.ValidationError) as exc:
+        modinstall.validate_package(
+            manifest(styles=["x-notes.css"]),
+            {"x-notes.js": "//\n", "x-notes.css": css})
+    assert exc.value.code == "css_external_reference"
+    plant_raw(tmp_path / "mods", "x-guard",
+              {"id": "x-guard", "scripts": ["a.js"], "styles": ["a.css"]},
+              {"a.js": b"//\n", "a.css": css.encode("utf-8")})
+    index = modinstall.scan(tmp_path / "mods")
+    assert index["skipped"] == {"x-guard": "css_external_reference"}
 
 
 def _wiki_flat(name):
