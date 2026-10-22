@@ -17,9 +17,9 @@ prefs blob untouched by the child; input/output flow only through the child
 (the marker is wider than the child, so the counts follow wrapped lines);
 restore paths keep the window minimized; a desktop reload rebuilds it detached
 and unattached and the reattach poll leaves it alone; closing the child
-returns it (snapshot replay lands); a second child refuses and its `bye` is
-ignored; a desktop Close while detached still reopens when the child goes;
-the child's own x returns it.
+returns it (snapshot replay lands); a second child refuses and its `bye`
+(seen on the channel) is ignored; a desktop Close while detached still reopens
+when the child goes; the child's own x returns it and closes the child page.
 """
 import argparse, json, os, sys, time
 from playwright.sync_api import sync_playwright
@@ -176,9 +176,16 @@ with sync_playwright() as p:
     time.sleep(2.5)
     check(not c2.evaluate("(k) => windows.has(k)", key), "second child for the same key opened no window")
     check(c2.evaluate("!!Array.from(document.querySelectorAll('.notice-sticky')).find(n => (n._noticeText||'').includes('already open'))"), "second child says 'already open in another window'")
-    # a refused child's bye must not return the real owner's terminal
-    c2.evaluate("detachedChildReturn()")
+    # a refused child's bye must not return the real owner's terminal. The
+    # desktop taps the channel, so "ignored" means a bye that went out. Every
+    # return is called deferred: it ends in window.close(), and Firefox can
+    # close the page before an evaluate of it returns.
+    inst2 = c2.evaluate("DETACH_INST")
+    desk.evaluate("() => { window.__byes = []; window.__byeTap = new BroadcastChannel('bl-detach'); window.__byeTap.onmessage = (e) => { if (e.data && e.data.t === 'bye') window.__byes.push(e.data.inst); }; }")
+    c2.evaluate("() => { setTimeout(detachedChildReturn, 0); }")
     time.sleep(1.2)
+    ok = wait_for(desk, "window.__byes.includes(%s)" % json.dumps(inst2), 5, "refused child's bye")
+    check(ok, "refused child sent its bye (desktop saw it)")
     st = desk.evaluate(WIN, key)
     check(st and st["detached"] and not st["hasWs"], "refused child's `bye` ignored: desktop still detached")
     c1st = c1.evaluate(WIN, key)
@@ -199,12 +206,13 @@ with sync_playwright() as p:
     c1 = pi.value
     wait_for(c1, "(() => { const w = windows.get(%s); return !!(w && w.wsOpen); })()" % json.dumps(key), 20, "child #3")
     wait_for(desk, "(() => { const w = windows.get(%s); return !!(w && w.detached); })()" % json.dumps(key), 15, "desktop yield #3")
-    # explicit Return from the child's own × path
-    c1.evaluate("detachedChildReturn()")
+    # explicit Return from the child's own × path (deferred, as above)
+    c1.evaluate("() => { setTimeout(detachedChildReturn, 0); }")
     ok = wait_for(desk, "(() => { const w = windows.get(%s); return !!(w && !w.detached && w.wsOpen); })()" % json.dumps(key), 20, "return via ×")
     check(ok, "explicit Return (child ×) brought the terminal back")
-    time.sleep(0.5)
-    check(c1.is_closed() or c1.evaluate("window.closed") or True, "(info) child page after Return")
+    deadline = time.time() + 5
+    while not c1.is_closed() and time.time() < deadline: time.sleep(0.2)
+    check(c1.is_closed(), "child page closed itself after Return")
 
     # ---- clean up: terminate the test shell ----
     desk.evaluate("(k) => terminateWindow(k)", key)
