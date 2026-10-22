@@ -320,6 +320,13 @@ def test_installed_css_may_not_reference_an_external_origin():
         'a{background:url(h\\74tp://evil.example/x.png)}\n',
         'a{background:url("\\/\\/evil.example/x.png")}\n',
         '.a::before { content: "\\2014"; }\n',
+        # #260 review: an unquoted url( argument is one url-token, so its
+        # "/*" opens no comment in the browser -- nor in the checker, which
+        # used to blank the external load after it.
+        "a{background:url(/*)}\n"
+        "b{background:url(https://example.invalid/x)}\n/* */\n",
+        "a{background:url(/*)}\n"
+        "b{background:url(//example.invalid/x)}\n/* */\n",
     ]
     for css in refused:
         with pytest.raises(modinstall.ValidationError) as exc:
@@ -336,6 +343,9 @@ def test_installed_css_may_not_reference_an_external_origin():
         # #260: a backslash inside a comment, and the character itself.
         '/* a \\ b */\n.a { color: red; }\n',
         '.a::before { content: "—"; }\n',
+        # ...while a real comment before or after a url() still is one.
+        ".a { background: url(a.png) /* c */; }\n",
+        "/* c */ .a { background: url( a.png ); }\n",
     ]
     for css in allowed:
         modinstall.validate_package(
@@ -362,6 +372,17 @@ def test_scan_skips_and_logs_an_escaped_stylesheet(tmp_path, caplog):
             in r.getMessage()]
     assert len(hits) == 1
     assert not any("x-ok" in r.getMessage() for r in caplog.records)
+
+
+def test_scan_skips_a_url_token_comment_desync(tmp_path):
+    # The same url( desync at boot: an installed mod using it stops loading.
+    plant_raw(tmp_path / "mods", "x-desync",
+              {"id": "x-desync", "scripts": ["a.js"], "styles": ["a.css"]},
+              {"a.js": b"//\n", "a.css": (
+                  b"a{background:url(/*)}\n"
+                  b"b{background:url(https://example.invalid/x)}\n/* */\n")})
+    index = modinstall.scan(tmp_path / "mods")
+    assert index["skipped"] == {"x-desync": "css_external_reference"}
 
 
 def _wiki_flat(name):

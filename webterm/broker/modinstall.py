@@ -302,6 +302,12 @@ _CSS_IMPORT_RE = re.compile(r"@import\b", re.I)
 _CSS_PROTOCOL_RELATIVE_RE = re.compile(r"\A\s*(?:[a-z][a-z0-9+.\-]*:)?//", re.I)
 
 
+def _css_ident_char(ch: str) -> bool:
+    """Could ``ch`` end an identifier? Then a following ``url(`` is part of a
+    longer function name (``myurl(``), not the url-token."""
+    return ch.isalnum() or ch in "-_\\" or ord(ch) > 127
+
+
 def _strip_css_comments(text: str) -> Tuple[str, List[str]]:
     """One linear, STRING-AWARE pass. Returns ``(text with comments blanked,
     every quoted string literal found outside a comment)``.
@@ -311,12 +317,29 @@ def _strip_css_comments(text: str) -> Tuple[str, List[str]]:
     about strings treats it as an unterminated comment and silently drops the
     REST OF THE FILE -- so the external ``url()`` on the next line is never
     seen. An unterminated comment that really is one runs to end of file, which
-    is what a browser does."""
+    is what a browser does.
+
+    URL-token aware too (#260 review): the argument of an unquoted ``url(``
+    is one url-token in CSS Syntax 3, and a ``/*`` inside it opens no comment
+    -- so ``url(/*)`` must not make the checker blank the rules after it
+    while the browser still applies them. The argument is copied through, as
+    it is, to its ``)``."""
     out: List[str] = []
     strings: List[str] = []
     pos, length = 0, len(text)
     while pos < length:
         ch = text[pos]
+        if (ch in "uU" and text[pos:pos + 4].lower() == "url("
+                and (pos == 0 or not _css_ident_char(text[pos - 1]))):
+            arg = pos + 4
+            while arg < length and text[arg] in " \t\n\r\f":
+                arg += 1
+            if arg >= length or text[arg] not in "\"'":
+                end = text.find(")", arg)
+                end = length if end < 0 else end + 1
+                out.append(text[pos:end])
+                pos = end
+                continue
         if ch == "/" and text.startswith("/*", pos):
             end = text.find("*/", pos + 2)
             out.append(" ")
