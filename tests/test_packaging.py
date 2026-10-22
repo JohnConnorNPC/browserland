@@ -221,7 +221,8 @@ def test_contributing_names_the_doc_source_and_the_design_notes():
     text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     flat = " ".join(text.split())
     assert "## Docs `wiki/` is the doc source." in flat
-    assert "(`python -m webterm.broker.help_corpus`) in the same commit" in flat
+    assert ("(`python -m webterm.broker.help_corpus`) in the same commit"
+            in flat)
     assert "## Design notes" in flat
     for note in ("docs-mod-platform-next.md", "docs-mod-signing.md",
                  "docs-terminal-funnels.md"):
