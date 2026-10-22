@@ -13,7 +13,8 @@ blocked-popup path is a no-op; the desktop releases (socket closed) BEFORE the
 child builds its window; the child is the viewport-sized single float on a
 forced-floating layout, holds the Web Lock, skips workspaces; the desktop is
 detached + minimized + socket-less, chip marked, record persisted, and its
-prefs blob untouched by the child; input/output flow only through the child;
+prefs blob untouched by the child; input/output flow only through the child
+(the marker is wider than the child, so the counts follow wrapped lines);
 restore paths keep the window minimized; a desktop reload rebuilds it detached
 and unattached and the reattach poll leaves it alone; closing the child
 returns it (snapshot replay lands); a second child refuses and its `bye` is
@@ -51,8 +52,18 @@ WIN = """(key) => { const w = windows.get(key); if (!w) return null; return {
     detached: !!w.detached, minimized: !!w.minimized, wsOpen: !!w.wsOpen,
     hasWs: !!w.ws, disposed: !!w.disposed, tiled: !!w.tiled,
     rows: w.term.rows, cols: w.term.cols,
-    buf: (() => { const b = w.term.buffer.active; let s=''; for (let i=0;i<b.length;i++) s += b.getLine(i).translateToString(true) + '\\n'; return s; })(),
 }; }"""
+# Logical lines (rows joined across xterm's soft wraps) of a[0]'s buffer that
+# contain a[1]. The marker is wider than both terminals, so no single row ever
+# holds it whole. Relies on the raw snapshot replay (the default): a pyte-mode
+# broker replays hard rows, which this count would see split.
+MARK_LINES = """(a) => { const w = windows.get(a[0]); if (!w) return 0; const b = w.term.buffer.active;
+    let n = 0, cur = '';
+    for (let i = 0; i < b.length; i++) { const L = b.getLine(i);
+        if (i > 0 && !L.isWrapped) { if (cur.includes(a[1])) n++; cur = ''; }
+        cur += L.translateToString(true); }
+    if (cur.includes(a[1])) n++;
+    return n; }"""
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=not _args.headed)
@@ -113,14 +124,17 @@ with sync_playwright() as p:
     check(desk_mode == blob_mode, "localStorage layout still the desktop's (child did not clobber): %s == %s" % (desk_mode, blob_mode))
 
     # ---- input only reaches the PTY from the child; output only lands in the child ----
-    marker = "DETACH_MARK_%d" % int(time.time())
+    # wider than both terminals: the echoed command wraps inside it wherever
+    # the prompt ends, so a per-row match can never pass (MARK_LINES)
+    ccols = child.evaluate("(k) => windows.get(k).term.cols", key)
+    dcols = desk.evaluate("(k) => windows.get(k).term.cols", key)
+    marker = ("DETACH_MARK_%d_" % int(time.time())).ljust(max(ccols, dcols) + 8, "x")
+    print("marker: %d chars (child %d cols, desktop %d cols)" % (len(marker), ccols, dcols))
     child.evaluate("(a) => { const w = windows.get(a[0]); w.ws.send(JSON.stringify({type:'input', data: 'echo ' + a[1] + '\\r'})); }", [key, marker])
-    ok = wait_for(child, "(a) => { const w = windows.get(a[0]); const b = w.term.buffer.active; for (let i=0;i<b.length;i++) if (b.getLine(i).translateToString(true).includes(a[1])) return true; return false; }" if False else
-                  "(() => { const w = windows.get(%s); const b = w.term.buffer.active; let n=0; for (let i=0;i<b.length;i++) if (b.getLine(i).translateToString(true).includes(%s)) n++; return n >= 2; })()" % (json.dumps(key), json.dumps(marker)), 20, "echo in child (cmd + output)")
+    ok = wait_for(child, "(%s)(%s) >= 2" % (MARK_LINES, json.dumps([key, marker])), 20, "echo in child (cmd + output)")
     check(ok, "child terminal shows the echoed marker (input + output flow through the child)")
     time.sleep(1.0)
-    dbuf = desk.evaluate(WIN, key)["buf"]
-    check(marker not in dbuf, "desktop terminal did NOT receive the marker while detached")
+    check(desk.evaluate(MARK_LINES, [key, marker]) == 0, "desktop terminal did NOT receive the marker while detached")
 
     # ---- restore paths focus the child instead of un-minimizing ----
     desk.evaluate("(k) => restoreWindow(k)", key)
@@ -148,7 +162,7 @@ with sync_playwright() as p:
     st = desk.evaluate(WIN, key)
     check(ok and st and st["wsOpen"] and not st["detached"], "child closed: desktop reattached and restored")
     check(desk.evaluate("(k) => !(prefs._detached && prefs._detached[k])", key), "detached record cleared")
-    ok = wait_for(desk, "(() => { const w = windows.get(%s); const b = w.term.buffer.active; for (let i=0;i<b.length;i++) if (b.getLine(i).translateToString(true).includes(%s)) return true; return false; })()" % (json.dumps(key), json.dumps(marker)), 15, "snapshot replay on return")
+    ok = wait_for(desk, "(%s)(%s) >= 1" % (MARK_LINES, json.dumps([key, marker])), 15, "snapshot replay on return")
     check(ok, "desktop terminal shows the marker after return (snapshot replay)")
 
     # ---- second child for the same key refuses (lock taken) ----
