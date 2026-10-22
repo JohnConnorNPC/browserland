@@ -142,6 +142,9 @@ with sync_playwright() as p:
     ok = wait_for(child, "(() => { const r = (%s)(%s); return r[0] >= 1 && r[1] >= 1; })()" % (ECHO_LINES, json.dumps([key, marker])), 20, "echo in child (cmd + output)")
     print("echo lines (output, command):", child.evaluate(ECHO_LINES, [key, marker]))
     check(ok, "child terminal shows the echoed marker (input + output flow through the child)")
+    # the width premise, read after the echo landed (a late refit can grow the child)
+    ccols = child.evaluate("(k) => windows.get(k).term.cols", key)
+    check(len(marker) > ccols, "marker wider than the child (%d chars > %d cols)" % (len(marker), ccols))
     time.sleep(1.0)
     check(desk.evaluate(MARK_LINES, [key, marker]) == 0, "desktop terminal did NOT receive the marker while detached")
 
@@ -173,6 +176,8 @@ with sync_playwright() as p:
     check(desk.evaluate("(k) => !(prefs._detached && prefs._detached[k])", key), "detached record cleared")
     ok = wait_for(desk, "(%s)(%s) >= 1" % (MARK_LINES, json.dumps([key, marker])), 15, "snapshot replay on return")
     check(ok, "desktop terminal shows the marker after return (snapshot replay)")
+    dcols = desk.evaluate("(k) => windows.get(k).term.cols", key)
+    check(len(marker) > dcols, "marker wider than the desktop after the reload (%d chars > %d cols)" % (len(marker), dcols))
 
     # ---- second child for the same key refuses (lock taken) ----
     with ctx.expect_page() as pi:
