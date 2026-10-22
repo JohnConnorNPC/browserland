@@ -103,6 +103,16 @@ def test_bad_dims_still_raise():
         protocol.clamp_dims("x", 24)
     with pytest.raises(TypeError):
         protocol.clamp_dims(None, 24)
+    with pytest.raises(ValueError):
+        protocol.clamp_dims(float("nan"), 24)
+
+
+def test_clamp_dims_clamps_an_infinite_value():
+    # #260 review: JSON 1e400 is an infinite float; it clamps, never raises
+    # an OverflowError past the sites' (TypeError, ValueError).
+    import json
+    big = json.loads('{"cols": 1e400, "rows": -1e400}')
+    assert protocol.clamp_dims(big["cols"], big["rows"]) == (1000, 1)
 
 
 def test_agent_cli_holds_dims_to_the_same_range():

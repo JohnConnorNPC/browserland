@@ -418,8 +418,8 @@ def test_a_valid_token_gets_through(tmp_path):
 # ---- #260: a chosen token needs 16 or more characters --------------------
 
 def _boot(tmp_path, cfg, n):
-    return create_app(dict(cfg, state_path=str(tmp_path / "webterm_state.json")),
-                      name=f"webterm-floor-{n}")
+    state = str(tmp_path / "webterm_state.json")
+    return create_app(dict(cfg, state_path=state), name=f"webterm-floor-{n}")
 
 
 def test_a_short_chosen_token_refuses_to_start(tmp_path, monkeypatch):
@@ -690,3 +690,22 @@ def test_every_wrong_token_401_is_delayed(tmp_path, monkeypatch):
         checked.append(path)
     assert "/profiles" in checked and "/sessions" in checked
     assert len(checked) > 40, f"only {len(checked)} routes walked"
+
+
+def test_one_warning_per_wrong_token(tmp_path, monkeypatch, caplog):
+    # #260 review: a wrong token logs once (the rate-limited "wrong token"
+    # line); the per-route "rejected unauthenticated" line is for a missing
+    # token only.
+    app, _rec = _delay_app(tmp_path, monkeypatch, 6)
+    with caplog.at_level("WARNING"):
+        app.test_client.post("/launch", headers=_bearer(WRONG))
+    wrong = [r.getMessage() for r in caplog.records
+             if r.levelname == "WARNING" and "/launch" in r.getMessage()]
+    assert len(wrong) == 1 and wrong[0].startswith("wrong token on /launch")
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        app.test_client.post("/launch")
+    missing = [r.getMessage() for r in caplog.records
+               if r.levelname == "WARNING" and "/launch" in r.getMessage()]
+    assert len(missing) == 1
+    assert missing[0].startswith("rejected unauthenticated /launch")

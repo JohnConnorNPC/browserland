@@ -93,7 +93,8 @@ def test_upgrading_says_terminals_no_longer_inherit_the_mcp_tokens():
 
 
 def test_changelog_states_what_is_and_is_not_delayed():
-    item = _changelog_item("- **A wrong token's 401 is answered after a delay**")
+    item = _changelog_item(
+        "- **A wrong token's 401 is answered after a delay**")
     assert (f"a wrong token waits {_delay_words()} before its 401, while at "
             f"most {auth.AUTH_FAIL_CONCURRENT} wait at once") in item
     assert ("The producer `/browserland` dial and the help corpus are not "

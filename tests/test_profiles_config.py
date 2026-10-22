@@ -225,7 +225,8 @@ def test_post_auth_gate_with_token(tmp_path, monkeypatch):
     _, r = authed(app).get("/profiles/config?token=sekrit-0123456789")
     assert r.status == 200 and r.json["ok"] is True
     # A rejected POST changes nothing.
-    r = _post(app, {"profiles": {"a/b": {"command": ["x"]}}}, token="sekrit-0123456789")
+    r = _post(app, {"profiles": {"a/b": {"command": ["x"]}}},
+              token="sekrit-0123456789")
     assert r.status == 400 and r.json["error"] == "bad_name"
 
 
@@ -347,3 +348,23 @@ def test_detect_endpoint_wired(tmp_path, monkeypatch):
     _, r = authed(app).get("/profiles/detect")
     assert r.status == 200 and r.json["ok"] is True
     assert r.json["suggestions"] == fake
+
+
+def test_a_profile_title_and_a_launch_title_are_cut_to_256(tmp_path,
+                                                          monkeypatch):
+    # #260 review: the two caps protocol.py's block names as the reference
+    # ("as /launch already does"), pinned: a profile entry's title and a
+    # /launch body's title are both cut to 256.
+    entry = brokerapp._valid_profile_entry(
+        {"command": ["x"], "title": "t" * 300})
+    assert len(entry["title"]) == 256
+    app = _make_app(tmp_path, monkeypatch)
+    seen = {}
+
+    async def launch(profile, **kw):
+        seen.update(kw)
+        return 202, {"ok": True}
+    monkeypatch.setattr(app.ctx.launcher, "launch", launch)
+    _, r = authed(app).post("/launch", json={"title": "t" * 300})
+    assert r.status == 202, r.json
+    assert len(seen["title"]) == 256

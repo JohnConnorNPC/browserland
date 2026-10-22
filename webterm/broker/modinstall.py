@@ -420,9 +420,9 @@ def _reject_css_external_references(name: str, text: str) -> None:
     if found >= 0:
         raise ValidationError(
             "css_external_reference",
-            f"{name}: {stripped[found:found + 64]} is a CSS escape, which could "
-            f"hide an external reference from this check (write the character "
-            f"itself -- the file is UTF-8)")
+            f"{name}: {stripped[found:found + 64]} is a CSS escape, which "
+            f"could hide an external reference from this check (write the "
+            f"character itself -- the file is UTF-8)")
     if _CSS_IMPORT_RE.search(stripped):
         raise ValidationError("css_external_reference",
                               f"{name}: @import may not be used")

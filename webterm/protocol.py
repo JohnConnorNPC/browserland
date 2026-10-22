@@ -202,12 +202,21 @@ CWD_MAX = 4096
 KIND_MAX = 64
 
 
+def _clamp_dim(value: Any) -> int:
+    try:
+        number = int(value)
+    except OverflowError:
+        # JSON 1e400 parses to an infinite float; it is out of range, so
+        # it clamps like any other (NaN is a ValueError from int()).
+        return DIM_MAX if value > 0 else DIM_MIN
+    return max(DIM_MIN, min(number, DIM_MAX))
+
+
 def clamp_dims(cols: Any, rows: Any) -> Tuple[int, int]:
-    """``(cols, rows)`` as ints held to DIM_MIN..DIM_MAX. ``int()`` runs first,
-    so a non-number still raises ValueError/TypeError, as the call sites
-    always did."""
-    return (max(DIM_MIN, min(int(cols), DIM_MAX)),
-            max(DIM_MIN, min(int(rows), DIM_MAX)))
+    """``(cols, rows)`` as ints held to DIM_MIN..DIM_MAX; an infinite value
+    clamps too. ``int()`` runs first, so a non-number still raises
+    ValueError/TypeError, as the call sites always did."""
+    return _clamp_dim(cols), _clamp_dim(rows)
 
 
 def cap_text(value: Any, limit: int) -> str:

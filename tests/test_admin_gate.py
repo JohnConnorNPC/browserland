@@ -461,7 +461,8 @@ def test_the_docs_say_the_admin_token_is_typed_into_the_mods_page():
             "hostile mod is loaded") in para
     assert "it mounts no Mods pane either" in para
     a = tr.index(lead)
-    block = tr[tr.index("```bash", a):tr.index("```\n", tr.index("```bash", a) + 7)]
+    fence = tr.index("```bash", a)
+    block = tr[fence:tr.index("```\n", fence + 7)]
     assert "X-Webterm-Admin: $ADMIN" in block
     assert ("Type it only when you trust every mod installed on that broker"
             in _flat(_wiki("Installing-Mods.md")))

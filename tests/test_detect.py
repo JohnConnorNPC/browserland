@@ -14,7 +14,8 @@ def test_argv0_match():
     assert classify_proc("node.exe", ["C:\\x\\opencode", "serve"]) == "opencode"
     # #260: a Windows path splits on POSIX too (interpreter and argv0 rules),
     # and a POSIX path still splits.
-    assert classify_proc("node.exe", ["node.exe", "C:\\npm\\claude.js"]) == "claude"
+    assert classify_proc("node.exe",
+                         ["node.exe", "C:\\npm\\claude.js"]) == "claude"
     assert classify_proc("cmd.exe", ["C:\\npm\\codex.cmd"]) == "codex"
     assert classify_proc("node", ["/usr/lib/x/opencode", "serve"]) == "opencode"
 

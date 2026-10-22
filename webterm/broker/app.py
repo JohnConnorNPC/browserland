@@ -4777,6 +4777,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.auth_fail_delay.note(label, request.ip)
         return False
 
+    def _log_missing_token(request: Request, label: str) -> None:
+        # A wrong token was already logged, rate-limited, by _token_ok (one
+        # WARNING per wrong token, not two); only a missing one logs here.
+        if not getattr(request.ctx, "auth_failed", None):
+            LOGGER.warning("rejected unauthenticated %s from %s",
+                           label, request.ip)
+
     async def _auth_fail_delay(request: Request, response):
         # #260: a wrong token's 401 waits here, in one place, so the gates
         # stay sync. Only the token-mismatch 401: never a 200, 400 or 403.
@@ -4917,9 +4924,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _browser_ws(request: Request, ws: Websocket):
         # In-handler post-upgrade auth: see module docstring (4401 vs 1006).
         if not _token_ok(request, app.ctx.auth_token, "/ws"):
-            LOGGER.warning("rejected unauthenticated /ws from %s", request.ip)
             if getattr(request.ctx, "auth_failed", None):
                 await app.ctx.auth_fail_delay.wait()      # #260
+            else:
+                LOGGER.warning("rejected unauthenticated /ws from %s",
+                               request.ip)
             await ws.close(code=4401, reason="auth required")
             return
         await relay.handle_browser_ws(request, ws, app.ctx.registry, app.ctx)
@@ -5013,10 +5022,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # refusal). An unauthenticated /control could otherwise steal the
         # single-active-browser lease out from under the real client.
         if not _token_ok(request, app.ctx.auth_token, "/control"):
-            LOGGER.warning("rejected unauthenticated /control from %s",
-                           request.ip)
             if getattr(request.ctx, "auth_failed", None):
                 await app.ctx.auth_fail_delay.wait()      # #260
+            else:
+                LOGGER.warning("rejected unauthenticated /control from %s",
+                               request.ip)
             await ws.close(code=4401, reason="auth required")
             return
         client_id = (request.args.get("clientId") or "").strip()
@@ -5396,8 +5406,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # probe surfaces as a fetch TypeError instead of "wrong password".
     def _gated_auth_error(request: Request, label: str):
         if not _token_ok(request, app.ctx.auth_token, label):
-            LOGGER.warning("rejected unauthenticated %s from %s",
-                           label, request.ip)
+            _log_missing_token(request, label)
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
         return None
@@ -7095,7 +7104,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not cfg.get("enabled") or not cfg.get("token"):
             return sanic_json({"error": "mcp_disabled"}, status=403)
         if not _token_ok(request, cfg["token"], "/mcp"):
-            LOGGER.warning("rejected unauthenticated /mcp from %s", request.ip)
+            _log_missing_token(request, "/mcp")
             return sanic_json({"error": "auth_required"}, status=401)
         try:
             _mcp_scope(request)
@@ -9034,8 +9043,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         installed. None when all three pass."""
         if not _token_ok(request, app.ctx.auth_token, "/peer",
                          provided=_peer_bearer(request)):
-            LOGGER.warning("rejected unauthenticated /peer from %s",
-                           request.ip)
+            _log_missing_token(request, "/peer")
             return _peer_refusal(False, 401, "auth_required")
         if not app.ctx.peer_proxy:
             return _peer_refusal(False, 503, "proxy_unavailable")
