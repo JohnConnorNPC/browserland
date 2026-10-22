@@ -667,3 +667,26 @@ def test_the_wrong_token_log_is_rate_limited(caplog):
             if r.name == "webterm.broker.auth"]
     assert msgs == ["wrong token on /sessions from 10.0.0.1",
                     "wrong token on /sessions from 10.0.0.1 (+1 more)"]
+
+
+def test_every_wrong_token_401_is_delayed(tmp_path, monkeypatch):
+    """#260 review: walked from the LIVE router, like the unauthenticated
+    walk above, so a gate added later (or one put back on the bare
+    predicate, as /profiles could be) cannot answer a wrong token at once.
+    Every HTTP route outside PUBLIC_PATHS must refuse a wrong token with 401
+    and pay exactly one delay."""
+    app, rec = _delay_app(tmp_path, monkeypatch, 5)
+    checked = []
+    for path, method in _http_routes(app):
+        if path in PUBLIC_PATHS:
+            continue
+        tok = MCP_TOK.replace("mcp", "bad") if path.startswith("/mcp/") \
+            else WRONG
+        before = len(rec.calls)
+        _, r = app.test_client.request(_concrete(path), http_method=method,
+                                       headers=_bearer(tok))
+        assert r.status == 401, f"{method} {path} answered {r.status}"
+        assert rec.calls[before:] == [1.0], f"{method} {path} was not delayed"
+        checked.append(path)
+    assert "/profiles" in checked and "/sessions" in checked
+    assert len(checked) > 40, f"only {len(checked)} routes walked"
