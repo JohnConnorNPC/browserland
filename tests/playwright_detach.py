@@ -53,17 +53,22 @@ WIN = """(key) => { const w = windows.get(key); if (!w) return null; return {
     hasWs: !!w.ws, disposed: !!w.disposed, tiled: !!w.tiled,
     rows: w.term.rows, cols: w.term.cols,
 }; }"""
-# Logical lines (rows joined across xterm's soft wraps) of a[0]'s buffer that
-# contain a[1]. The marker is wider than both terminals, so no single row ever
-# holds it whole. Relies on the raw snapshot replay (the default): a pyte-mode
-# broker replays hard rows, which this count would see split.
-MARK_LINES = """(a) => { const w = windows.get(a[0]); if (!w) return 0; const b = w.term.buffer.active;
-    let n = 0, cur = '';
+# a[0]'s buffer as logical lines (rows joined across xterm's soft wraps, each
+# line right-trimmed once, so a space at a wrapped row's end is kept). The
+# marker is wider than both terminals, so no single row ever holds it whole.
+# Relies on the raw snapshot replay (the default): a pyte-mode broker replays
+# hard rows, which these counts would see split. A missing window is -1, never
+# a count, so "did NOT receive" (== 0) can't pass on a failed read.
+_LOGICAL = """const w = windows.get(a[0]); if (!w) return -1; const b = w.term.buffer.active;
+    const lines = []; let cur = '';
     for (let i = 0; i < b.length; i++) { const L = b.getLine(i);
-        if (i > 0 && !L.isWrapped) { if (cur.includes(a[1])) n++; cur = ''; }
-        cur += L.translateToString(true); }
-    if (cur.includes(a[1])) n++;
-    return n; }"""
+        if (i > 0 && !L.isWrapped) { lines.push(cur.trimEnd()); cur = ''; }
+        cur += L.translateToString(false); }
+    lines.push(cur.trimEnd());"""
+# logical lines that contain the marker a[1]
+MARK_LINES = "(a) => { " + _LOGICAL + " return lines.filter(s => s.includes(a[1])).length; }"
+# [output lines (the trimmed text is exactly a[1]), command lines (hold 'echo ' + a[1])]
+ECHO_LINES = "(a) => { " + _LOGICAL + " return [lines.filter(s => s.trim() === a[1]).length, lines.filter(s => s.includes('echo ' + a[1])).length]; }"
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=not _args.headed)
@@ -131,7 +136,8 @@ with sync_playwright() as p:
     marker = ("DETACH_MARK_%d_" % int(time.time())).ljust(max(ccols, dcols) + 8, "x")
     print("marker: %d chars (child %d cols, desktop %d cols)" % (len(marker), ccols, dcols))
     child.evaluate("(a) => { const w = windows.get(a[0]); w.ws.send(JSON.stringify({type:'input', data: 'echo ' + a[1] + '\\r'})); }", [key, marker])
-    ok = wait_for(child, "(%s)(%s) >= 2" % (MARK_LINES, json.dumps([key, marker])), 20, "echo in child (cmd + output)")
+    ok = wait_for(child, "(() => { const r = (%s)(%s); return r[0] >= 1 && r[1] >= 1; })()" % (ECHO_LINES, json.dumps([key, marker])), 20, "echo in child (cmd + output)")
+    print("echo lines (output, command):", child.evaluate(ECHO_LINES, [key, marker]))
     check(ok, "child terminal shows the echoed marker (input + output flow through the child)")
     time.sleep(1.0)
     check(desk.evaluate(MARK_LINES, [key, marker]) == 0, "desktop terminal did NOT receive the marker while detached")
