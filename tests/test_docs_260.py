@@ -122,3 +122,60 @@ def test_installing_mods_says_the_pane_warns_without_an_admin_token():
     assert ("If no admin token is set, the Mods pane says so at the top: then "
             "any page or mod holding the broker's password can install and "
             "uninstall mods there.") in im
+
+
+#: The delay as the "rotated token" sentences spell it.
+_A_DELAY = {1.0: "a second"}
+
+
+def _a_delay_words():
+    from tests.conftest import REAL_AUTH_FAIL_DELAY_S
+    return _A_DELAY[REAL_AUTH_FAIL_DELAY_S]
+
+
+def test_the_rotated_token_cost_is_stated_where_it_bites():
+    # #260 review round 2: what the delay costs an honest browser, in TR and
+    # in Upgrading's Who is affected, from the constant.
+    sentence = (f"A browser still holding a rotated token waits "
+                f"{_a_delay_words()} on each poll until you log in again.")
+    assert sentence in _page("wiki/Technical-Reference.md")
+    up = _section("wiki/Upgrading.md",
+                  "## A chosen token needs 16 or more characters (#260)")
+    assert (f"so a browser still holding a rotated token waits "
+            f"{_a_delay_words()} on each poll until you log in again.") in up
+
+
+def test_the_mcp_inherit_entry_says_who_and_what_to_do():
+    up = _section("wiki/Upgrading.md",
+                  "## Terminals no longer inherit the MCP tokens (#260)")
+    assert ("**Who is affected.** An MCP client or script started inside a "
+            "Browserland terminal that read one of these from the inherited "
+            "environment.") in up
+    assert ("**What to do.** Give that client its token in its own "
+            "configuration: the `.mcp.json` from the Control Panel's **Copy "
+            ".mcp.json**, `--token-file`, or the variable set in that shell "
+            "yourself.") in up
+
+
+def _slug(heading):
+    # GitHub's anchor for a heading: lower-case, punctuation other than
+    # "-" and "_" dropped, spaces to "-".
+    import re
+    text = re.sub(r"[^\w\- ]", "", heading.strip().lower())
+    return text.replace(" ", "-")
+
+
+def test_the_changelog_links_to_upgrading_resolve():
+    # Every #260 link from CHANGELOG into Upgrading names a heading that
+    # exists, so renaming a heading cannot leave a dead link green.
+    import re
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    anchors = set(re.findall(r"wiki/Upgrading\.md#([\w-]+-260)\)",
+                             changelog))
+    assert anchors >= {"terminals-no-longer-inherit-the-mcp-tokens-260",
+                       "a-chosen-token-needs-16-or-more-characters-260",
+                       "an-installed-stylesheet-may-not-use-a-css-escape-260"}
+    upgrading = (ROOT / "wiki" / "Upgrading.md").read_text(encoding="utf-8")
+    slugs = {_slug(line[3:]) for line in upgrading.splitlines()
+             if line.startswith("## ")}
+    assert anchors <= slugs, sorted(anchors - slugs)
