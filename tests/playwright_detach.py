@@ -21,7 +21,8 @@ restore paths keep the window minimized; a desktop reload rebuilds it detached
 and unattached and the reattach poll leaves it alone; closing the child
 returns it (snapshot replay lands); a second child refuses and its `bye`
 (seen on the channel) is ignored; a desktop Close while detached still reopens
-when the child goes; the child's own x returns it and closes the child page.
+when the child goes; the child's own x returns it (its bye seen) and closes
+the child page.
 """
 import argparse, json, os, sys, time
 from playwright.sync_api import sync_playwright
@@ -220,10 +221,14 @@ with sync_playwright() as p:
     c1 = pi.value
     wait_for(c1, "(() => { const w = windows.get(%s); return !!(w && w.wsOpen); })()" % json.dumps(key), 20, "child #3")
     wait_for(desk, "(() => { const w = windows.get(%s); return !!(w && w.detached); })()" % json.dumps(key), 15, "desktop yield #3")
-    # explicit Return from the child's own × path (deferred, as above)
+    # explicit Return from the child's own × path (deferred, as above); the
+    # desktop's bye tap is still installed
+    inst3 = c1.evaluate("DETACH_INST")
     c1.evaluate("() => { setTimeout(detachedChildReturn, 0); }")
     ok = wait_for(desk, "(() => { const w = windows.get(%s); return !!(w && !w.detached && w.wsOpen); })()" % json.dumps(key), 20, "return via ×")
     check(ok, "explicit Return (child ×) brought the terminal back")
+    ok = wait_for(desk, "window.__byes.includes(%s)" % json.dumps(inst3), 5, "owner's bye")
+    check(ok, "owner's Return sent its bye (desktop saw it)")
     deadline = time.time() + 5
     while not c1.is_closed() and time.time() < deadline: time.sleep(0.2)
     check(c1.is_closed(), "child page closed itself after Return")
