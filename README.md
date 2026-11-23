@@ -7,6 +7,8 @@
 every machine you install it on, with the AI coding agents you run inside
 them.**
 
+Chat with us on the [Browserland Discord](https://discord.gg/rTEJBTXdZX).
+
 Point a browser at one broker and you get a windowed desktop of live
 terminals: tile them, tab them, split them, and drag them across virtual
 desktops. Each terminal is a real PTY running on some machine, streamed to the
